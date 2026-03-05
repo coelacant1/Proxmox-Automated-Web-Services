@@ -1,0 +1,48 @@
+@import "tailwindcss";
+@import "xterm/css/xterm.css";
+
+/* PAWS Design Tokens - Proxmox dark theme */
+@theme {
+  --color-paws-bg: #1a1a1a;
+  --color-paws-surface: #262626;
+  --color-paws-surface-hover: #333333;
+  --color-paws-border: #404040;
+  --color-paws-border-subtle: #333333;
+  --color-paws-text: #f2f2f2;
+  --color-paws-text-muted: #b3b3b3;
+  --color-paws-text-dim: #808080;
+  --color-paws-primary: #e57000;
+  --color-paws-primary-hover: #cc6400;
+  --color-paws-success: #5cb85c;
+  --color-paws-warning: #ffae0b;
+  --color-paws-danger: #ce3c3c;
+  --color-paws-danger-hover: #a63030;
+  --color-paws-info: #4db5ff;
+  --color-paws-admin: #e57000;
+  --color-paws-selected: #595959;
+}
+
+@layer base {
+  :root {
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+    color: var(--color-paws-text);
+    background-color: var(--color-paws-bg);
+  }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    min-height: 100vh;
+  }
+
+  a {
+    color: var(--color-paws-primary);
+    text-decoration: none;
+  }
+}
