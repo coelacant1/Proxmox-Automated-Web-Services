@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     proxmox_token_id: str = ""
     proxmox_token_secret: str = ""
     proxmox_verify_ssl: bool = False
+    proxmox_password: str = ""  # PVE user password (required for xterm.js terminal)
 
     # Auth modes
     local_auth_enabled: bool = True
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     oauth_client_secret: str = ""
 
     # Rate limiting
-    rate_limit_per_minute: int = 100
+    rate_limit_per_minute: int = 600
     vm_create_limit_per_hour: int = 5
     auth_login_limit_per_minute: int = 5
     auth_register_limit_per_minute: int = 3
@@ -59,6 +60,15 @@ class Settings(BaseSettings):
     minio_root_password: str = "minioadmin"
     minio_use_ssl: bool = False
     minio_region: str = "us-east-1"
+
+    # Proxmox Backup Server (PBS)
+    pbs_host: str = ""
+    pbs_port: int = 8007
+    pbs_token_id: str = "root@pam!paws"
+    pbs_token_secret: str = ""
+    pbs_fingerprint: str = ""  # PBS TLS cert fingerprint for PVE storage config
+    pbs_datastore: str = "backups"
+    pbs_verify_ssl: bool = False
 
     model_config = {"env_prefix": "PAWS_", "env_file": [".env", "../.env"]}
 

@@ -17,6 +17,13 @@ class UserRole(enum.StrEnum):
     VIEWER = "viewer"
 
 
+class GroupRole(enum.StrEnum):
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+    VIEWER = "viewer"
+
+
 class GUID(TypeDecorator):
     """Platform-independent UUID type.
 
@@ -48,6 +55,22 @@ class GUID(TypeDecorator):
         return uuid.UUID(value)
 
 
+class UserTier(Base):
+    """Capability tier that bundles permissions for users."""
+
+    __tablename__ = "user_tiers"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capabilities: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON array
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+    users: Mapped[list["User"]] = relationship(back_populates="tier")
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -65,6 +88,7 @@ class User(Base):
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tier_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("user_tiers.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -72,6 +96,7 @@ class User(Base):
 
     resources: Mapped[list["Resource"]] = relationship(back_populates="owner", cascade="all, delete-orphan")
     quota: Mapped["UserQuota"] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
+    tier: Mapped["UserTier | None"] = relationship(back_populates="users", lazy="selectin")
     project_memberships: Mapped[list["ProjectMember"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
@@ -366,6 +391,8 @@ class Volume(Base):
     disk_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)  # e.g. scsi1, virtio1
     project_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("projects.id"), nullable=True)
     proxmox_node: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    proxmox_volid: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    proxmox_owner_vmid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -643,3 +670,167 @@ class Tag(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (UniqueConstraint("resource_id", "key", name="uq_tag_resource_key"),)
+
+
+class BugReport(Base):
+    """User-submitted bug reports with optional file attachment."""
+
+    __tablename__ = "bug_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attachment_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attachment_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+    user = relationship("User", lazy="selectin")
+
+
+# --- Phase 41 Models ---
+
+
+class SystemRule(Base):
+    """Admin-defined rules/restrictions visible to all users."""
+
+    __tablename__ = "system_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    category: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="info")  # info, warning, restriction
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+
+class UserGroup(Base):
+    """User-created group for sharing resources."""
+
+    __tablename__ = "user_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+    owner: Mapped["User"] = relationship(lazy="selectin")
+    members: Mapped[list["UserGroupMember"]] = relationship(back_populates="group", cascade="all, delete-orphan", lazy="selectin")
+    shared_resources: Mapped[list["GroupResourceShare"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+
+class UserGroupMember(Base):
+    """Membership in a user group with role."""
+
+    __tablename__ = "user_group_members"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    group_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("user_groups.id"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(20), default=GroupRole.MEMBER)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("group_id", "user_id", name="uq_group_member"),)
+
+    group: Mapped["UserGroup"] = relationship(back_populates="members")
+    user: Mapped["User"] = relationship(lazy="selectin")
+
+
+class GroupResourceShare(Base):
+    """Entity shared with a group at a specific permission level."""
+
+    __tablename__ = "group_resource_shares"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    group_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("user_groups.id"), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False, default="resource")
+    entity_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False, index=True)
+    resource_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=True, index=True)
+    permission: Mapped[str] = mapped_column(String(20), nullable=False, default="read")  # read, operate, admin
+    shared_by: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("group_id", "entity_type", "entity_id", name="uq_group_entity"),
+    )
+
+    group: Mapped["UserGroup"] = relationship(back_populates="shared_resources")
+    resource: Mapped["Resource | None"] = relationship(lazy="selectin")
+
+
+class TemplateRequest(Base):
+    """User request to convert a VM into a system-wide template."""
+
+    __tablename__ = "template_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String(20), nullable=False, default="vm")
+    os_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    min_cpu: Mapped[int] = mapped_column(Integer, default=1)
+    min_ram_mb: Mapped[int] = mapped_column(Integer, default=512)
+    min_disk_gb: Mapped[int] = mapped_column(Integer, default=10)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    icon_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+    user: Mapped["User"] = relationship(foreign_keys=[user_id], lazy="selectin")
+    resource: Mapped["Resource"] = relationship(lazy="selectin")
+    reviewer: Mapped["User | None"] = relationship(foreign_keys=[reviewed_by], lazy="selectin")
+
+
+class HAGroup(Base):
+    """Admin-managed HA group mapping to a Proxmox HA group."""
+
+    __tablename__ = "ha_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pve_group_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    nodes: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON array of node names
+    restricted: Mapped[bool] = mapped_column(Boolean, default=False)
+    nofailback: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_relocate: Mapped[int] = mapped_column(Integer, default=1)
+    max_restart: Mapped[int] = mapped_column(Integer, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TierRequest(Base):
+    """User request to be assigned a specific tier."""
+
+    __tablename__ = "tier_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    tier_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("user_tiers.id"), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, approved, rejected
+    admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+    user: Mapped["User"] = relationship(foreign_keys=[user_id], lazy="selectin")
+    tier: Mapped["UserTier"] = relationship(lazy="selectin")
+    reviewer: Mapped["User | None"] = relationship(foreign_keys=[reviewed_by], lazy="selectin")

@@ -2,13 +2,14 @@
 
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.deps import get_current_active_user
+from app.core.deps import get_current_active_user, require_admin
 from app.models.models import SystemSetting, User
+from app.services.proxmox_client import proxmox_client
 
 router = APIRouter(prefix="/api/storage-pools", tags=["storage-pools"])
 
@@ -33,3 +34,25 @@ async def list_storage_pools(
     default = default_setting.value if default_setting else "local-lvm"
 
     return {"pools": pools, "default": default}
+
+
+@router.get("/available")
+async def list_available_storage_pools(
+    _: User = Depends(require_admin),
+):
+    """Admin-only: list all Proxmox storages that can hold VM/container disks."""
+    try:
+        storages = proxmox_client.get_storage_list()
+        result = []
+        for s in storages:
+            content = s.get("content", "")
+            if "images" in content or "rootdir" in content:
+                result.append({
+                    "storage": s["storage"],
+                    "type": s.get("type", ""),
+                    "shared": bool(s.get("shared", 0)),
+                    "content": content,
+                })
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))

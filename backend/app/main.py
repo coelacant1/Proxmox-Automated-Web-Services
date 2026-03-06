@@ -8,19 +8,22 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import async_session
-from app.core.middleware import RateLimitMiddleware, SecurityHeadersMiddleware
+from app.core.middleware import AnalyticsMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
 from app.core.security import hash_password
 from app.models.models import InstanceType, SystemSetting, User, UserQuota, UserRole
 from app.routers import (
     admin,
     admin_audit,
     admin_quota_requests,
+    admin_ha,
     admin_settings,
     admin_templates,
+    admin_tiers,
     api_keys,
     auth,
     backups,
     billing,
+    bug_reports,
     cluster,
     compute,
     console,
@@ -28,6 +31,7 @@ from app.routers import (
     dns,
     endpoints,
     events,
+    groups,
     health,
     health_checks,
     instance_types,
@@ -48,7 +52,9 @@ from app.routers import (
     ssh_keys,
     storage,
     storage_pools,
+    system_rules,
     tags,
+    template_requests,
     templates,
     volumes,
     vpcs,
@@ -174,9 +180,13 @@ SYSTEM_SETTING_DEFAULTS = {
     # Storage pool configuration
     "storage_pools": ('["local-lvm"]', "Available storage pools (JSON array of pool names)"),
     "default_storage_pool": ("local-lvm", "Default storage pool for new volumes/instances"),
+    # Backup storage configuration
+    "backup_storages": ('[]', "Proxmox storages enabled for user backups (JSON array)"),
     # VMID range
     "vmid_range_start": ("1000", "Starting VMID for new VMs/containers"),
     "vmid_range_end": ("999999", "Ending VMID for new VMs/containers"),
+    # Session management
+    "session_timeout_minutes": ("0", "Force logout after N minutes (0 = use token expiry, no forced timeout)"),
 }
 
 
@@ -277,6 +287,7 @@ app = FastAPI(
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(AnalyticsMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -325,3 +336,10 @@ app.include_router(ssh_keys.router)
 app.include_router(security_groups.router)
 app.include_router(volumes.router)
 app.include_router(vpcs.router)
+app.include_router(bug_reports.router)
+app.include_router(admin_tiers.router)
+app.include_router(admin_tiers.user_router)
+app.include_router(admin_ha.router)
+app.include_router(system_rules.router)
+app.include_router(groups.router)
+app.include_router(template_requests.router)

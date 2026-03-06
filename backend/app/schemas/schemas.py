@@ -367,6 +367,11 @@ class VolumeCreate(BaseModel):
     name: str
     size_gib: int
     storage_pool: str = "local-lvm"
+    resource_id: uuid.UUID  # VM to create the disk on (required)
+
+
+class VolumeAttachRequest(BaseModel):
+    resource_id: uuid.UUID  # VM to move/reattach the disk to
 
 
 class VolumeRead(BaseModel):
@@ -378,6 +383,9 @@ class VolumeRead(BaseModel):
     resource_id: uuid.UUID | None
     disk_slot: str | None
     proxmox_node: str | None
+    proxmox_volid: str | None
+    proxmox_owner_vmid: int | None
+    display_name: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

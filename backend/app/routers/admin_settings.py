@@ -11,6 +11,18 @@ from app.schemas.schemas import SystemSettingRead, SystemSettingUpdate
 
 router = APIRouter(prefix="/api/admin/settings", tags=["admin"])
 
+# Keys that non-admin users can read (for UI behavior)
+PUBLIC_SETTING_KEYS = {"session_timeout_minutes", "local_auth_enabled", "platform_name"}
+
+
+@router.get("/public")
+async def get_public_settings(db: AsyncSession = Depends(get_db)):
+    """Return non-sensitive system settings (no auth required)."""
+    result = await db.execute(
+        select(SystemSetting).where(SystemSetting.key.in_(PUBLIC_SETTING_KEYS))
+    )
+    return {s.key: s.value for s in result.scalars().all()}
+
 
 @router.get("/", response_model=list[SystemSettingRead])
 async def list_settings(
@@ -45,9 +57,10 @@ async def update_setting(
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if not setting:
-        raise HTTPException(status_code=404, detail="Setting not found")
-
-    setting.value = data.value
+        setting = SystemSetting(key=key, value=data.value, description=None)
+        db.add(setting)
+    else:
+        setting.value = data.value
     await db.commit()
     await db.refresh(setting)
     return setting

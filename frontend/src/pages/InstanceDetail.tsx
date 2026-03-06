@@ -13,6 +13,7 @@ import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
   Input, Modal, Badge, StatusBadge, Tabs, Select, ConfirmDialog,
+  useToast,
 } from '@/components/ui';
 
 interface Instance {
@@ -36,12 +37,16 @@ interface FirewallRule { pos: number; type: string; action: string; proto?: stri
 
 interface MetricPoint { time: number; cpu?: number; mem?: number; maxmem?: number; disk?: number; maxdisk?: number; netin?: number; netout?: number; diskread?: number; diskwrite?: number; }
 interface TaskItem { upid: string; type: string; status?: string; starttime: number; endtime?: number; user?: string; node?: string; }
-interface BackupItem { volid: string; size: number; ctime: number; format: string; storage: string; }
+interface BackupItem {
+  volid: string; size: number; ctime: number; format: string; storage: string; notes?: string;
+  pbs?: boolean; backup_type?: string; backup_id?: string; backup_time?: number;
+}
 interface NetInterface { [key: string]: string; }
 
 export default function InstanceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [inst, setInst] = useState<Instance | null>(null);
   const [tab, setTab] = useState('overview');
   const [loading, setLoading] = useState(true);
@@ -73,6 +78,8 @@ export default function InstanceDetail() {
   const [vncShowLocalCursor, setVncShowLocalCursor] = useState(false);
   const [vncFullscreen, setVncFullscreen] = useState(false);
   const vncWrapperRef = useRef<HTMLDivElement>(null);
+  const termWsRef = useRef<WebSocket | null>(null);
+  const termFitRef = useRef<InstanceType<typeof import('xterm-addon-fit').FitAddon> | null>(null);
 
   // Metrics, Tasks, Backups, Network
   const [metrics, setMetrics] = useState<MetricPoint[]>([]);
@@ -82,9 +89,34 @@ export default function InstanceDetail() {
   const [netInterfaces, setNetInterfaces] = useState<NetInterface>({});
   const [vpcs, setVpcs] = useState<Array<{ id: string; name: string; vnet?: string; vxlan_tag?: number; cidr?: string }>>([]);
   const [showBackupModal, setShowBackupModal] = useState(false);
-  const [backupForm, setBackupForm] = useState({ storage: 'local', mode: 'snapshot', compress: 'zstd', notes: '' });
+  const [backupForm, setBackupForm] = useState({ storage: '', mode: 'snapshot', compress: 'zstd', notes: '' });
+  const [backupStorages, setBackupStorages] = useState<Array<{ storage: string }>>([]);
+  const [backupDeleting, setBackupDeleting] = useState<string | null>(null);
+  const [backupRestoring, setBackupRestoring] = useState<string | null>(null);
+  const [browsingBackup, setBrowsingBackup] = useState<BackupItem | null>(null);
+  const [backupFiles, setBackupFiles] = useState<any[]>([]);
+  const [backupFilePath, setBackupFilePath] = useState('');
+  const [backupFileLoading, setBackupFileLoading] = useState(false);
   const [showNetModal, setShowNetModal] = useState(false);
   const [netForm, setNetForm] = useState({ net_id: 'net0', vpc_id: '' });
+
+  // Generic confirm dialog state
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string; message: string; confirmLabel?: string;
+    variant?: 'danger' | 'primary'; onConfirm: () => void;
+  } | null>(null);
+
+  // Volumes (additional disks)
+  const [volumes, setVolumes] = useState<Array<{
+    id: string; name: string; size_gib: number; storage_pool: string;
+    status: string; disk_slot: string | null; proxmox_volid: string | null;
+  }>>([]);
+
+  // High Availability
+  const [haStatus, setHaStatus] = useState<{ enabled: boolean; state?: string; group?: string; sid?: string } | null>(null);
+  const [haGroups, setHaGroups] = useState<Array<{ id: string; name: string; description?: string; nodes: string[] }>>([]);
+  const [haGroupId, setHaGroupId] = useState('');
+  const [haLoading, setHaLoading] = useState(false);
 
   const fetchData = () => {
     if (!id) return;
@@ -110,10 +142,72 @@ export default function InstanceDetail() {
     api.get(`/api/compute/vms/${id}/metrics?timeframe=${metricsTimeframe}`).then((r) => setMetrics(r.data?.data || [])).catch(() => {});
     api.get(`/api/compute/vms/${id}/tasks`).then((r) => setTaskHistory(r.data?.tasks || [])).catch(() => {});
     api.get(`/api/compute/vms/${id}/backups`).then((r) => setBackups(r.data?.backups || [])).catch(() => {});
+    api.get('/api/compute/backup-storages').then((r) => {
+      const storages = r.data || [];
+      setBackupStorages(storages);
+      if (storages.length > 0) setBackupForm((p) => ({ ...p, storage: storages[0].storage }));
+    }).catch(() => {});
     api.get(`/api/compute/vms/${id}/network`).then((r) => {
       setNetInterfaces(r.data?.interfaces || {});
       setVpcs(r.data?.vpcs || []);
     }).catch(() => {});
+    api.get(`/api/volumes/?resource_id=${id}`).then((r) => setVolumes(r.data || [])).catch(() => {});
+    api.get(`/api/compute/instances/${id}/ha`).then((r) => setHaStatus(r.data)).catch(() => setHaStatus(null));
+    api.get('/api/ha/groups').then((r) => setHaGroups(r.data || [])).catch(() => {});
+  };
+
+  // Targeted refresh helpers to avoid re-fetching everything
+  const refreshInstance = () => {
+    if (!id) return;
+    api.get(`/api/compute/vms/${id}`).then((res) => {
+      if (res?.data) {
+        setInst(res.data);
+        const sp = res.data.specs || {};
+        setResizeForm({
+          cores: Number(sp.cores || sp.cpu || 1),
+          memory_mb: Number(sp.memory_mb || sp.ram_mb || 512),
+          disk_gb: Number(sp.disk_gb || 10),
+        });
+      }
+    }).catch(() => {});
+  };
+  const refreshSGs = () => {
+    if (!id) return;
+    api.get(`/api/security-groups/?resource_id=${id}`).then((r) => setAttachedSGs(r.data || [])).catch(() => {});
+    api.get('/api/security-groups/').then((r) => setAllSGs(r.data || [])).catch(() => {});
+  };
+  const refreshEndpoints = () => {
+    if (!id) return;
+    api.get(`/api/endpoints?resource_id=${id}`).then((r) => setEndpoints(r.data || [])).catch(() => {});
+  };
+  const refreshSnapshots = () => {
+    if (!id) return;
+    api.get(`/api/compute/vms/${id}/snapshots`).then((r) => setSnapshots(r.data || [])).catch(() => {});
+  };
+  const refreshTasks = () => {
+    if (!id) return;
+    api.get(`/api/compute/vms/${id}/tasks`).then((r) => setTaskHistory(r.data?.tasks || [])).catch(() => {});
+  };
+  const refreshBackups = () => {
+    if (!id) return;
+    api.get(`/api/compute/vms/${id}/backups`).then((r) => setBackups(r.data?.backups || [])).catch(() => {});
+    api.get('/api/compute/backup-storages').then((r) => {
+      const storages = r.data || [];
+      setBackupStorages(storages);
+      if (storages.length > 0) setBackupForm((p) => ({ ...p, storage: p.storage || storages[0].storage }));
+    }).catch(() => {});
+  };
+  const refreshNetwork = () => {
+    if (!id) return;
+    api.get(`/api/compute/vms/${id}/network`).then((r) => {
+      setNetInterfaces(r.data?.interfaces || {});
+      setVpcs(r.data?.vpcs || []);
+    }).catch(() => {});
+  };
+
+  const refreshVolumes = () => {
+    if (!id) return;
+    api.get(`/api/volumes/?resource_id=${id}`).then((r) => setVolumes(r.data || [])).catch(() => {});
   };
 
   const fetchFirewall = () => {
@@ -132,10 +226,38 @@ export default function InstanceDetail() {
       .catch(() => {});
   }, [metricsTimeframe, id]);
 
-  const doAction = async (action: string) => {
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  const ACTION_SUCCESS: Record<string, string> = {
+    start: 'Start signal sent', stop: 'Force stop signal sent',
+    shutdown: 'Graceful shutdown signal sent', reboot: 'Reboot signal sent',
+    suspend: 'Suspend signal sent', resume: 'Resume signal sent',
+    hibernate: 'Hibernate signal sent',
+  };
+
+  const doAction = async (action: string, opts?: { force?: boolean }) => {
     if (!id) return;
-    await api.post(`/api/compute/vms/${id}/action`, { action });
-    setTimeout(fetchData, 2000);
+    setActionLoading(action);
+    try {
+      await api.post(`/api/compute/vms/${id}/action`, { action, ...opts });
+      toast(ACTION_SUCCESS[action] || `${action} signal sent`, 'success');
+      setTimeout(() => { refreshInstance(); refreshTasks(); }, 2000);
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast(typeof d === 'string' ? d : `${action} failed`, 'error');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const confirmAction = (action: string, label: string, message: string) => {
+    setConfirmDialog({
+      title: label,
+      message,
+      confirmLabel: label,
+      variant: action === 'stop' ? 'danger' : 'primary',
+      onConfirm: () => { setConfirmDialog(null); doAction(action); },
+    });
   };
 
   const handleResize = async () => {
@@ -143,9 +265,9 @@ export default function InstanceDetail() {
     try {
       await api.patch(`/api/compute/vms/${id}/resize`, resizeForm);
       setShowResize(false);
-      fetchData();
+      refreshInstance();
     } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Resize failed');
+      toast(e?.response?.data?.detail || 'Resize failed', 'error');
     }
   };
 
@@ -157,20 +279,54 @@ export default function InstanceDetail() {
 
   const handleDestroy = async () => {
     if (!id) return;
-    await api.delete(`/api/compute/vms/${id}`);
-    navigate('/vms');
+    try {
+      await api.delete(`/api/compute/vms/${id}`);
+      navigate('/vms');
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast(typeof d === 'string' ? d : 'Failed to destroy instance', 'error');
+    }
+  };
+
+  // HA actions
+  const enableHA = async () => {
+    if (!id) return;
+    setHaLoading(true);
+    try {
+      await api.post(`/api/compute/instances/${id}/ha`, { ha_group_id: haGroupId || null });
+      toast('HA enabled', 'success');
+      api.get(`/api/compute/instances/${id}/ha`).then((r) => setHaStatus(r.data)).catch(() => {});
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast(typeof d === 'string' ? d : 'Failed to enable HA', 'error');
+    }
+    setHaLoading(false);
+  };
+
+  const disableHA = async () => {
+    if (!id) return;
+    setHaLoading(true);
+    try {
+      await api.delete(`/api/compute/instances/${id}/ha`);
+      toast('HA disabled', 'success');
+      setHaStatus({ enabled: false });
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast(typeof d === 'string' ? d : 'Failed to disable HA', 'error');
+    }
+    setHaLoading(false);
   };
 
   // Security Group actions
   const attachSG = async (sgId: string) => {
     await api.post(`/api/security-groups/${sgId}/attach`, { resource_id: id });
     setShowAddSG(false);
-    fetchData();
+    refreshSGs();
   };
 
   const detachSG = async (sgId: string) => {
     await api.post(`/api/security-groups/${sgId}/detach`, { resource_id: id });
-    fetchData();
+    refreshSGs();
   };
 
   // Endpoint actions
@@ -180,20 +336,20 @@ export default function InstanceDetail() {
       await api.post('/api/endpoints', { ...newEndpoint, resource_id: id });
       setShowAddEndpoint(false);
       setNewEndpoint({ name: '', protocol: 'http', internal_port: 80, subdomain: '' });
-      fetchData();
+      refreshEndpoints();
     } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Failed to create endpoint');
+      toast(e?.response?.data?.detail || 'Failed to create endpoint', 'error');
     }
   };
 
   const deleteEndpoint = async (epId: string) => {
     await api.delete(`/api/endpoints/${epId}`);
-    fetchData();
+    refreshEndpoints();
   };
 
   const toggleEndpoint = async (ep: EndpointRef) => {
     await api.patch(`/api/endpoints/${ep.id}`, { is_active: !ep.is_active });
-    fetchData();
+    refreshEndpoints();
   };
 
   // Snapshot actions
@@ -203,10 +359,51 @@ export default function InstanceDetail() {
       await api.post(`/api/compute/vms/${id}/snapshots`, snapshotForm);
       setShowNewSnapshot(false);
       setSnapshotForm({ name: '', description: '' });
-      fetchData();
+      refreshSnapshots();
     } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Snapshot failed');
+      toast(e?.response?.data?.detail || 'Snapshot failed', 'error');
     }
+  };
+
+  const rollbackSnapshot = (snapname: string) => {
+    if (!id) return;
+    setConfirmDialog({
+      title: 'Rollback Snapshot',
+      message: `Rollback to snapshot "${snapname}"? Current state will be lost.`,
+      confirmLabel: 'Rollback',
+      variant: 'danger',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        try {
+          await api.post(`/api/compute/vms/${id}/snapshots/${encodeURIComponent(snapname)}/rollback`);
+          toast('Snapshot rollback started.', 'info');
+          refreshSnapshots();
+          refreshInstance();
+        } catch (e: any) {
+          toast(e?.response?.data?.detail || 'Rollback failed', 'error');
+        }
+      },
+    });
+  };
+
+  const deleteSnapshot = (snapname: string) => {
+    if (!id) return;
+    setConfirmDialog({
+      title: 'Delete Snapshot',
+      message: `Delete snapshot "${snapname}"? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      variant: 'danger',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        try {
+          await api.delete(`/api/compute/vms/${id}/snapshots/${encodeURIComponent(snapname)}`);
+          toast('Snapshot deleted.', 'success');
+          refreshSnapshots();
+        } catch (e: any) {
+          toast(e?.response?.data?.detail || 'Delete failed', 'error');
+        }
+      },
+    });
   };
 
   // Console
@@ -220,11 +417,128 @@ export default function InstanceDetail() {
     try {
       await api.post(`/api/compute/vms/${id}/backups`, backupForm);
       setShowBackupModal(false);
-      setBackupForm({ storage: 'local', mode: 'snapshot', compress: 'zstd', notes: '' });
-      fetchData();
+      setBackupForm((p) => ({ ...p, mode: 'snapshot', compress: 'zstd', notes: '' }));
+      toast('Backup job started. It may take a few minutes to complete.', 'info', 10000);
+      refreshBackups();
     } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Backup failed');
+      toast(e?.response?.data?.detail || 'Backup failed', 'error');
     }
+  };
+
+  const handleDeleteBackup = (b: BackupItem) => {
+    if (!id) return;
+    setConfirmDialog({
+      title: 'Delete Backup',
+      message: 'Delete this backup? This cannot be undone.',
+      confirmLabel: 'Delete',
+      variant: 'danger',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setBackupDeleting(b.volid);
+        try {
+          await api.delete(`/api/compute/vms/${id}/backups`, {
+            data: {
+              volid: b.volid, storage: b.storage, pbs: !!b.pbs,
+              backup_type: b.backup_type || 'vm',
+              backup_id: b.backup_id || '', backup_time: b.backup_time || 0,
+            },
+          });
+          toast('Backup deleted.', 'success');
+          refreshBackups();
+        } catch (e: any) {
+          toast(e?.response?.data?.detail || 'Delete failed', 'error');
+        } finally {
+          setBackupDeleting(null);
+        }
+      },
+    });
+  };
+
+  const handleRestoreBackup = (b: BackupItem) => {
+    if (!id) return;
+    setConfirmDialog({
+      title: 'Restore Backup',
+      message: 'Restore this backup? This will overwrite the current state of the instance.',
+      confirmLabel: 'Restore',
+      variant: 'danger',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setBackupRestoring(b.volid);
+        try {
+          await api.post(`/api/compute/vms/${id}/backups/restore`, {
+            volid: b.volid, storage: b.storage, pbs: !!b.pbs,
+          });
+          toast('Restore started. This may take a few minutes.', 'info', 10000);
+          refreshBackups();
+          refreshInstance();
+        } catch (e: any) {
+          toast(e?.response?.data?.detail || 'Restore failed', 'error');
+        } finally {
+          setBackupRestoring(null);
+        }
+      },
+    });
+  };
+
+  const handleBrowseBackup = async (b: BackupItem) => {
+    if (!id) return;
+    setBrowsingBackup(b);
+    setBackupFilePath('');
+    setBackupFileLoading(true);
+    try {
+      const r = await api.post(`/api/compute/vms/${id}/backups/files`, {
+        volid: b.volid, storage: b.storage, filepath: '',
+      });
+      setBackupFiles(r.data?.files || []);
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to browse backup', 'error');
+      setBrowsingBackup(null);
+    } finally {
+      setBackupFileLoading(false);
+    }
+  };
+
+  const handleBrowsePath = async (filepath: string) => {
+    if (!id || !browsingBackup) return;
+    setBackupFilePath(filepath);
+    setBackupFileLoading(true);
+    try {
+      const r = await api.post(`/api/compute/vms/${id}/backups/files`, {
+        volid: browsingBackup.volid, storage: browsingBackup.storage, filepath,
+      });
+      setBackupFiles(r.data?.files || []);
+    } catch {
+      setBackupFiles([]);
+    } finally {
+      setBackupFileLoading(false);
+    }
+  };
+
+  const handleDownloadFile = (filepath: string) => {
+    if (!id || !browsingBackup) return;
+    // Block downloading entire archive roots (e.g. root.pxar.didx) - too large
+    if (!filepath || filepath.endsWith('.didx') || filepath.endsWith('.fidx')) {
+      toast('Cannot download the entire archive. Browse into it and download individual files or folders.', 'warning', 6000);
+      return;
+    }
+    const baseName = filepath.split('/').pop() || 'download';
+    toast(`Preparing download: ${baseName}...`, 'info', 8000);
+    const backup = browsingBackup;
+    api.post(`/api/compute/vms/${id}/backups/download`, {
+      volid: backup.volid, storage: backup.storage, filepath,
+    }, { responseType: 'blob' }).then((r) => {
+      const url = window.URL.createObjectURL(new Blob([r.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      const contentType = r.headers?.['content-type'] || '';
+      const isZip = contentType.includes('zip') || (!baseName.includes('.') && r.data.size > 0);
+      a.download = isZip && !baseName.endsWith('.zip') ? `${baseName}.zip` : baseName;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      toast(`Download ready: ${a.download}`, 'success');
+    }).catch((e: any) => {
+      toast(e?.response?.data?.detail || 'Download failed', 'error');
+    });
   };
 
   const handleNetworkUpdate = async () => {
@@ -232,16 +546,24 @@ export default function InstanceDetail() {
     try {
       await api.put(`/api/compute/vms/${id}/network`, netForm);
       setShowNetModal(false);
-      fetchData();
+      refreshNetwork();
     } catch (e: any) {
-      alert(e?.response?.data?.detail || 'Network update failed');
+      toast(e?.response?.data?.detail || 'Network update failed', 'error');
     }
   };
 
   // VNC key sender helpers
   const vncSendKey = (keysym: number, code: string) => rfbRef.current?.sendKey(keysym, code);
   const vncSendCtrlAltDel = () => rfbRef.current?.sendCtrlAltDel();
-  const vncToggleFullscreen = () => {
+  const vncToggleLocalCursor = () => {
+    if (rfbRef.current) {
+      const next = !vncShowLocalCursor;
+      rfbRef.current.showDotCursor = next;
+      setVncShowLocalCursor(next);
+    }
+  };
+
+  const consoleToggleFullscreen = () => {
     const el = vncWrapperRef.current;
     if (!el) return;
     if (!document.fullscreenElement) {
@@ -250,12 +572,11 @@ export default function InstanceDetail() {
       document.exitFullscreen().then(() => setVncFullscreen(false)).catch(() => {});
     }
   };
-  const vncToggleLocalCursor = () => {
-    if (rfbRef.current) {
-      const next = !vncShowLocalCursor;
-      rfbRef.current.showDotCursor = next;
-      setVncShowLocalCursor(next);
-    }
+  const vncToggleFullscreen = consoleToggleFullscreen;
+
+  const consoleReconnect = () => {
+    setConsoleActive(false);
+    setTimeout(() => openConsole(consoleType), 100);
   };
 
   useEffect(() => {
@@ -311,8 +632,7 @@ export default function InstanceDetail() {
       Promise.all([
         import('xterm'),
         import('xterm-addon-fit'),
-        import('xterm-addon-attach'),
-      ]).then(([{ Terminal: XTerminal }, { FitAddon }, { AttachAddon }]) => {
+      ]).then(([{ Terminal: XTerminal }, { FitAddon }]) => {
         const el = consoleRef.current;
         if (!el) return;
         el.innerHTML = '';
@@ -325,13 +645,51 @@ export default function InstanceDetail() {
         term.loadAddon(fitAddon);
         term.open(el);
         fitAddon.fit();
+        termFitRef.current = fitAddon;
 
         const ws = new WebSocket(wsUrl);
         ws.binaryType = 'arraybuffer';
-        const attachAddon = new AttachAddon(ws);
-        term.loadAddon(attachAddon);
+        termWsRef.current = ws;
 
-        cleanup = () => { try { ws.close(); term.dispose(); } catch {} };
+        // PVE vncwebsocket sends raw terminal bytes (binary frames).
+        // Input uses termproxy framing: data "0:LEN:MSG", resize "1:COLS:ROWS:", ping "2"
+        ws.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            term.write(new Uint8Array(event.data));
+          } else {
+            term.write(event.data);
+          }
+        };
+
+        term.onData((data: string) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send('0:' + data.length + ':' + data);
+          }
+        });
+
+        term.onResize(({ cols, rows }: { cols: number; rows: number }) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send('1:' + cols + ':' + rows + ':');
+          }
+        });
+
+        // Send initial resize after connection opens
+        ws.onopen = () => {
+          const dims = fitAddon.proposeDimensions();
+          if (dims) ws.send('1:' + dims.cols + ':' + dims.rows + ':');
+        };
+
+        // Ping every 30s to keep connection alive
+        const pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send('2');
+        }, 30000);
+
+        cleanup = () => {
+          clearInterval(pingInterval);
+          termWsRef.current = null;
+          termFitRef.current = null;
+          try { ws.close(); term.dispose(); } catch {}
+        };
       });
     }
 
@@ -358,6 +716,7 @@ export default function InstanceDetail() {
   const tabs = [
     { id: 'overview', label: 'Overview' },
     { id: 'monitoring', label: 'Monitoring' },
+    { id: 'storage', label: 'Storage', count: volumes.length },
     { id: 'networking', label: 'Networking' },
     { id: 'snapshots', label: 'Snapshots', count: snapshots.filter((s) => s.name !== 'current').length },
     { id: 'backups', label: 'Backups', count: backups.length },
@@ -384,19 +743,27 @@ export default function InstanceDetail() {
           </p>
         </div>
         <div className="flex gap-1.5">
-          <Button variant="outline" size="sm" onClick={() => doAction('start')} disabled={vmStatus === 'running'}>
+          <Button variant="outline" size="sm" onClick={() => doAction('start')}
+            disabled={vmStatus === 'running' || actionLoading !== null} title="Start">
             <Play className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => doAction('shutdown')} disabled={vmStatus === 'stopped'}>
+          <Button variant="outline" size="sm" onClick={() => doAction('shutdown')}
+            disabled={vmStatus === 'stopped' || actionLoading !== null} title="Graceful Shutdown">
             <Square className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => doAction('reboot')} disabled={vmStatus === 'stopped'}>
+          <Button variant="outline" size="sm"
+            onClick={() => confirmAction('stop', 'Force Stop', `Force stop "${inst.display_name}"? This is equivalent to pulling the power cord and may cause data loss.`)}
+            disabled={vmStatus === 'stopped' || actionLoading !== null} title="Force Stop">
+            <Power className="h-3.5 w-3.5" />
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => doAction('reboot')}
+            disabled={vmStatus === 'stopped' || actionLoading !== null} title="Reboot">
             <RotateCcw className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setShowResize(true)}>
+          <Button variant="outline" size="sm" onClick={() => setShowResize(true)} title="Resize">
             <Maximize className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setShowCloudInit(true)}>
+          <Button variant="outline" size="sm" onClick={() => setShowCloudInit(true)} title="Cloud-Init">
             <Cloud className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -458,13 +825,77 @@ export default function InstanceDetail() {
             <Card><CardContent><p className="text-sm text-paws-text-dim py-4">No metrics data available.</p></CardContent></Card>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <MetricsChart title="CPU Usage" data={metrics} dataKey="cpu" color="#e5a00d" unit="%" formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
-              <MetricsChart title="Memory Usage" data={metrics} dataKey="mem" color="#3b82f6" unit=" bytes" secondaryKey="maxmem" secondaryColor="#1e40af" formatter={fmtBytes} />
-              <MetricsChart title="Network Traffic" data={metrics} dataKey="netin" color="#10b981" unit="" secondaryKey="netout" secondaryColor="#f97316" formatter={fmtBytes} legendLabels={['In', 'Out']} />
-              <MetricsChart title="Disk IO" data={metrics} dataKey="diskread" color="#8b5cf6" unit="" secondaryKey="diskwrite" secondaryColor="#ec4899" formatter={fmtBytes} legendLabels={['Read', 'Write']} />
+              <MetricsChart title="CPU Usage" data={metrics} dataKey="cpu" color="#e5a00d" unit="%" formatter={(v: number) => `${(v * 100).toFixed(1)}%`} timeframe={metricsTimeframe} />
+              <MetricsChart title="Memory Usage" data={metrics} dataKey="mem" color="#3b82f6" unit=" bytes" secondaryKey="maxmem" secondaryColor="#1e40af" formatter={fmtBytes} timeframe={metricsTimeframe} />
+              <MetricsChart title="Network Traffic" data={metrics} dataKey="netin" color="#10b981" unit="" secondaryKey="netout" secondaryColor="#f97316" formatter={fmtBytes} legendLabels={['In', 'Out']} timeframe={metricsTimeframe} />
+              <MetricsChart title="Disk IO" data={metrics} dataKey="diskread" color="#8b5cf6" unit="" secondaryKey="diskwrite" secondaryColor="#ec4899" formatter={fmtBytes} legendLabels={['Read', 'Write']} timeframe={metricsTimeframe} />
             </div>
           )}
         </div>
+      )}
+
+      {/* Storage (Additional Disks) */}
+      {tab === 'storage' && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between w-full">
+              <CardTitle>Additional Disks</CardTitle>
+              <Button variant="outline" size="sm" onClick={() => navigate('/volumes')}>
+                <Plus className="h-3.5 w-3.5 mr-1" /> Manage Volumes
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {volumes.length === 0 ? (
+              <p className="text-sm text-paws-text-dim">
+                No additional disks attached. Go to{' '}
+                <button className="text-paws-accent hover:underline" onClick={() => navigate('/volumes')}>
+                  Volumes
+                </button>{' '}
+                to create and attach storage.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {volumes.map((vol) => (
+                  <div key={vol.id} className="flex items-center justify-between py-2 border-b border-paws-border-subtle last:border-0">
+                    <div className="flex items-center gap-3">
+                      <HardDrive className="h-4 w-4 text-paws-text-dim" />
+                      <div>
+                        <p className="text-sm font-medium text-paws-text">{vol.name}</p>
+                        <p className="text-xs text-paws-text-dim font-mono">
+                          {vol.proxmox_volid || vol.storage_pool}
+                          {vol.disk_slot ? ` \u2022 ${vol.disk_slot}` : ''}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm text-paws-text">{vol.size_gib} GiB</span>
+                      <StatusBadge status={vol.status} />
+                      <Button variant="outline" size="sm" onClick={() => {
+                        setConfirmDialog({
+                          title: 'Detach Volume',
+                          message: `Detach "${vol.name}" from this instance? The disk data will be preserved and can be re-attached later.`,
+                          confirmLabel: 'Detach',
+                          variant: 'primary',
+                          onConfirm: () => {
+                            api.post(`/api/volumes/${vol.id}/detach`)
+                              .then(() => { toast('Volume detached.', 'success'); refreshVolumes(); })
+                              .catch((e: any) => {
+                                const d = e?.response?.data?.detail;
+                                toast(typeof d === 'string' ? d : 'Failed to detach', 'error');
+                              });
+                          },
+                        });
+                      }}>
+                        Detach
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Networking */}
@@ -631,9 +1062,17 @@ export default function InstanceDetail() {
                       <p className="text-sm font-medium text-paws-text">{snap.name}</p>
                       {snap.description && <p className="text-xs text-paws-text-dim">{snap.description}</p>}
                     </div>
-                    <span className="text-xs text-paws-text-dim">
-                      {snap.snaptime ? new Date(snap.snaptime * 1000).toLocaleString() : ''}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-paws-text-dim">
+                        {snap.snaptime ? new Date(snap.snaptime * 1000).toLocaleString() : ''}
+                      </span>
+                      <Button variant="outline" size="sm" onClick={() => rollbackSnapshot(snap.name)}>
+                        <RotateCcw className="h-3 w-3 mr-1" /> Rollback
+                      </Button>
+                      <Button variant="danger" size="sm" onClick={() => deleteSnapshot(snap.name)}>
+                        <Trash2 className="h-3 w-3 mr-1" /> Delete
+                      </Button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -658,26 +1097,43 @@ export default function InstanceDetail() {
               {backups.length === 0 ? (
                 <p className="text-sm text-paws-text-dim">No backups found.</p>
               ) : (
-                <table className="w-full text-sm">
+                <table className="w-full text-sm table-fixed">
                   <thead>
                     <tr className="text-paws-text-dim border-b border-paws-border-subtle">
-                      <th className="text-left py-2">Volume</th>
-                      <th className="text-left py-2">Date</th>
-                      <th className="text-left py-2">Size</th>
-                      <th className="text-left py-2">Format</th>
-                      <th className="text-left py-2">Storage</th>
+                      <th className="text-left py-2 pr-4 w-2/5">Notes</th>
+                      <th className="text-left py-2 pr-4">Date</th>
+                      <th className="text-left py-2 pr-4">Size</th>
+                      <th className="text-left py-2 pr-4">Storage</th>
+                      <th className="text-right py-2 w-56">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {backups.map((b, i) => (
+                    {backups.map((b, i) => {
+                      const displayNotes = (b.notes || '').replace(/\[paws:[^\]]+\]\s*/g, '');
+                      return (
                       <tr key={i} className="border-b border-paws-border-subtle last:border-0">
-                        <td className="py-2 font-mono text-xs text-paws-text">{b.volid}</td>
-                        <td className="py-2 text-paws-text">{new Date(b.ctime * 1000).toLocaleString()}</td>
-                        <td className="py-2 text-paws-text">{fmtBytes(b.size)}</td>
-                        <td className="py-2 text-paws-text">{b.format}</td>
-                        <td className="py-2 text-paws-text">{b.storage}</td>
+                        <td className="py-2 pr-4 text-paws-text text-xs truncate">{displayNotes || <span className="text-paws-text-dim font-mono text-xs">{b.volid}</span>}</td>
+                        <td className="py-2 pr-4 text-paws-text whitespace-nowrap">{new Date(b.ctime * 1000).toLocaleString()}</td>
+                        <td className="py-2 pr-4 text-paws-text whitespace-nowrap">{fmtBytes(b.size)}</td>
+                        <td className="py-2 pr-4 text-paws-text">{b.storage}</td>
+                        <td className="py-2 text-right">
+                          <div className="flex gap-1 justify-end">
+                            <Button variant="outline" size="sm" onClick={() => handleRestoreBackup(b)}
+                              disabled={backupRestoring === b.volid}>
+                              <RotateCcw className="h-3 w-3 mr-1" /> Restore
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={() => handleBrowseBackup(b)}>
+                              <HardDrive className="h-3 w-3 mr-1" /> Files
+                            </Button>
+                            <Button variant="danger" size="sm" onClick={() => handleDeleteBackup(b)}
+                              disabled={backupDeleting === b.volid}>
+                              <Trash2 className="h-3 w-3 mr-1" /> Delete
+                            </Button>
+                          </div>
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -784,12 +1240,29 @@ export default function InstanceDetail() {
                         : <><Maximize className="h-3.5 w-3.5 mr-1" /> Fullscreen</>
                       }
                     </Button>
+                    <Button variant="outline" size="sm" onClick={consoleReconnect} title="Reconnect">
+                      <RotateCcw className="h-3.5 w-3.5 mr-1" /> Reconnect
+                    </Button>
                   </div>
                 )}
-                {/* 16:9 console container */}
+                {/* Terminal Toolbar */}
+                {consoleType === 'terminal' && (
+                  <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                    <Button variant="outline" size="sm" onClick={consoleToggleFullscreen} title="Toggle fullscreen">
+                      {vncFullscreen
+                        ? <><Minimize className="h-3.5 w-3.5 mr-1" /> Exit Fullscreen</>
+                        : <><Maximize className="h-3.5 w-3.5 mr-1" /> Fullscreen</>
+                      }
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={consoleReconnect} title="Reconnect">
+                      <RotateCcw className="h-3.5 w-3.5 mr-1" /> Reconnect
+                    </Button>
+                  </div>
+                )}
+                {/* Console container */}
                 <div
                   ref={consoleRef}
-                  className="w-full bg-black rounded-md overflow-hidden"
+                  className="w-full bg-black overflow-hidden"
                   style={{ aspectRatio: '16 / 9', maxHeight: vncFullscreen ? '100vh' : '70vh' }}
                 />
               </div>
@@ -804,23 +1277,30 @@ export default function InstanceDetail() {
           <Card>
             <CardHeader><CardTitle>Power Actions</CardTitle></CardHeader>
             <CardContent className="flex flex-wrap gap-3">
-              <Button variant="outline" onClick={() => doAction('start')} disabled={vmStatus === 'running'}>
-                <Play className="h-4 w-4 mr-1" /> Start
+              <Button variant="outline" onClick={() => doAction('start')}
+                disabled={vmStatus === 'running' || actionLoading !== null}>
+                <Play className="h-4 w-4 mr-1" /> {actionLoading === 'start' ? 'Starting...' : 'Start'}
               </Button>
-              <Button variant="outline" onClick={() => doAction('shutdown')} disabled={vmStatus === 'stopped'}>
-                <Square className="h-4 w-4 mr-1" /> Graceful Shutdown
+              <Button variant="outline" onClick={() => doAction('shutdown')}
+                disabled={vmStatus === 'stopped' || actionLoading !== null}>
+                <Square className="h-4 w-4 mr-1" /> {actionLoading === 'shutdown' ? 'Shutting down...' : 'Graceful Shutdown'}
               </Button>
-              <Button variant="outline" onClick={() => doAction('stop')} disabled={vmStatus === 'stopped'}>
-                <Power className="h-4 w-4 mr-1" /> Force Stop
+              <Button variant="outline"
+                onClick={() => confirmAction('stop', 'Force Stop', `Force stop "${inst.display_name}"? This is equivalent to pulling the power cord and may cause data loss.`)}
+                disabled={vmStatus === 'stopped' || actionLoading !== null}>
+                <Power className="h-4 w-4 mr-1" /> {actionLoading === 'stop' ? 'Stopping...' : 'Force Stop'}
               </Button>
-              <Button variant="outline" onClick={() => doAction('reboot')} disabled={vmStatus === 'stopped'}>
-                <RotateCcw className="h-4 w-4 mr-1" /> Reboot
+              <Button variant="outline" onClick={() => doAction('reboot')}
+                disabled={vmStatus === 'stopped' || actionLoading !== null}>
+                <RotateCcw className="h-4 w-4 mr-1" /> {actionLoading === 'reboot' ? 'Rebooting...' : 'Reboot'}
               </Button>
-              <Button variant="outline" onClick={() => doAction('suspend')} disabled={vmStatus !== 'running'}>
-                <Clock className="h-4 w-4 mr-1" /> Suspend
+              <Button variant="outline" onClick={() => doAction('suspend')}
+                disabled={vmStatus !== 'running' || actionLoading !== null}>
+                <Clock className="h-4 w-4 mr-1" /> {actionLoading === 'suspend' ? 'Suspending...' : 'Suspend'}
               </Button>
-              <Button variant="outline" onClick={() => doAction('resume')} disabled={vmStatus !== 'suspended'}>
-                <Play className="h-4 w-4 mr-1" /> Resume
+              <Button variant="outline" onClick={() => doAction('resume')}
+                disabled={vmStatus !== 'suspended' || actionLoading !== null}>
+                <Play className="h-4 w-4 mr-1" /> {actionLoading === 'resume' ? 'Resuming...' : 'Resume'}
               </Button>
             </CardContent>
           </Card>
@@ -833,6 +1313,57 @@ export default function InstanceDetail() {
               <Button variant="outline" onClick={() => setShowCloudInit(true)}>
                 <Cloud className="h-4 w-4 mr-1" /> Cloud-Init
               </Button>
+              <Button variant="outline" onClick={async () => {
+                if (!id || !inst) return;
+                try {
+                  await api.post('/api/templates/request', {
+                    resource_id: id,
+                    name: inst.display_name + ' Template',
+                    description: `Template from ${inst.display_name}`,
+                    category: inst.resource_type || 'vm',
+                    os_type: 'linux',
+                    min_cpu: inst.specs?.cores || 1,
+                    min_ram_mb: inst.specs?.memory_mb || 512,
+                    min_disk_gb: inst.specs?.disk_gb || 10,
+                  });
+                  toast('Template request submitted for admin review', 'success');
+                } catch (e: any) {
+                  const d = e?.response?.data?.detail;
+                  toast(typeof d === 'string' ? d : 'Failed to request template', 'error');
+                }
+              }}>
+                <Camera className="h-4 w-4 mr-1" /> Request as Template
+              </Button>
+            </CardContent>
+          </Card>
+          {/* High Availability */}
+          <Card>
+            <CardHeader><CardTitle className="flex items-center gap-2"><Shield className="h-4 w-4" /> High Availability</CardTitle></CardHeader>
+            <CardContent>
+              {haStatus === null ? (
+                <p className="text-paws-text-muted text-sm">Loading HA status...</p>
+              ) : haStatus.enabled ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="success">HA Enabled</Badge>
+                    {haStatus.state && <span className="text-sm text-paws-text-muted">State: {haStatus.state}</span>}
+                    {haStatus.group && <span className="text-sm text-paws-text-muted">Group: {haStatus.group}</span>}
+                  </div>
+                  <Button variant="outline" size="sm" onClick={disableHA} disabled={haLoading}>
+                    {haLoading ? 'Disabling...' : 'Disable HA'}
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-paws-text-muted text-sm">HA is not enabled for this instance.</p>
+                  {haGroups.length > 0 && (
+                    <Select label="HA Group (optional)" placeholder="Auto-assign" options={[{ value: '', label: 'Auto-assign' }, ...haGroups.map(g => ({ value: g.id, label: g.name }))]} value={haGroupId} onChange={e => setHaGroupId(e.target.value)} />
+                  )}
+                  <Button size="sm" onClick={enableHA} disabled={haLoading}>
+                    {haLoading ? 'Enabling...' : 'Enable HA'}
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
           <Card>
@@ -964,17 +1495,22 @@ export default function InstanceDetail() {
       {/* Backup Modal */}
       <Modal open={showBackupModal} onClose={() => setShowBackupModal(false)} title="Create Backup">
         <div className="space-y-3">
-          <Input label="Storage" value={backupForm.storage}
-            onChange={(e) => setBackupForm((p) => ({ ...p, storage: e.target.value }))} />
+          <Select label="Storage" value={backupForm.storage}
+            onChange={(e) => setBackupForm((p) => ({ ...p, storage: e.target.value }))}
+            options={backupStorages.length > 0
+              ? backupStorages.map((s) => ({ value: s.storage, label: s.storage }))
+              : [{ value: '', label: 'No storages configured' }]
+            } disabled={backupStorages.length === 0} />
           <Select label="Mode" value={backupForm.mode}
             onChange={(e) => setBackupForm((p) => ({ ...p, mode: e.target.value }))}
             options={[{ value: 'snapshot', label: 'Snapshot' }, { value: 'suspend', label: 'Suspend' }, { value: 'stop', label: 'Stop' }]} />
           <Select label="Compression" value={backupForm.compress}
             onChange={(e) => setBackupForm((p) => ({ ...p, compress: e.target.value }))}
             options={[{ value: 'zstd', label: 'ZSTD' }, { value: 'lzo', label: 'LZO' }, { value: 'gzip', label: 'GZIP' }, { value: 'none', label: 'None' }]} />
-          <Input label="Notes" value={backupForm.notes}
+          <Input label="Notes (optional)" value={backupForm.notes}
             onChange={(e) => setBackupForm((p) => ({ ...p, notes: e.target.value }))} />
-          <Button onClick={handleBackup} variant="primary" className="w-full">Create Backup</Button>
+          <p className="text-xs text-paws-text-dim">Backup will be tagged: {inst?.display_name} | VMID {inst?.proxmox_vmid} | {inst?.proxmox_node}</p>
+          <Button onClick={handleBackup} variant="primary" className="w-full" disabled={backupStorages.length === 0}>Create Backup</Button>
         </div>
       </Modal>
 
@@ -1005,6 +1541,82 @@ export default function InstanceDetail() {
           </Button>
         </div>
       </Modal>
+
+      {/* File Browser Modal (PBS) */}
+      <Modal open={!!browsingBackup} onClose={() => { setBrowsingBackup(null); setBackupFiles([]); setBackupFilePath(''); }}
+        title={`Browse Backup - ${browsingBackup?.backup_id || ''} @ ${browsingBackup ? new Date(browsingBackup.backup_time! * 1000).toLocaleString() : ''}`}>
+        <div className="space-y-3">
+          {backupFilePath && (
+            <div className="flex items-center gap-2 text-sm">
+              <Button variant="ghost" size="sm" onClick={() => {
+                const parent = backupFilePath.split('/').slice(0, -1).join('/');
+                if (parent) handleBrowsePath(parent);
+                else handleBrowseBackup(browsingBackup!);
+              }}>
+                <ArrowLeft className="h-3 w-3 mr-1" /> Back
+              </Button>
+              <span className="text-paws-text-dim font-mono text-xs">{backupFilePath}</span>
+            </div>
+          )}
+          {backupFileLoading ? (
+            <p className="text-sm text-paws-text-dim py-4 text-center">Loading...</p>
+          ) : backupFiles.length === 0 ? (
+            <p className="text-sm text-paws-text-dim py-4 text-center">No files found.</p>
+          ) : (
+            <div className="max-h-96 overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-paws-text-dim border-b border-paws-border-subtle">
+                    <th className="text-left py-1">Name</th>
+                    <th className="text-left py-1">Type</th>
+                    <th className="text-left py-1">Size</th>
+                    <th className="text-right py-1">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {backupFiles.map((f: any, i: number) => {
+                    const name = f.filename || f.text || f.name || `item-${i}`;
+                    const isDir = f.type === 'd' || f.type === 'directory' || f.leaf === false || f.leaf === 0;
+                    const isSymlink = f.type === 'l';
+                    const isBrowsable = isDir || isSymlink;
+                    const typeLabel = isSymlink ? 'symlink' : isDir ? 'dir' : 'file';
+                    const fullPath = backupFilePath ? `${backupFilePath}/${name}` : name;
+                    return (
+                      <tr key={i} className="border-b border-paws-border-subtle last:border-0">
+                        <td className="py-1 text-paws-text font-mono text-xs">
+                          {isBrowsable ? (
+                            <button className="text-paws-accent hover:underline" onClick={() => handleBrowsePath(fullPath)}>
+                              {name}/
+                            </button>
+                          ) : name}
+                        </td>
+                        <td className="py-1 text-paws-text-dim text-xs">{typeLabel}</td>
+                        <td className="py-1 text-paws-text text-xs">{f.size ? fmtBytes(f.size) : '-'}</td>
+                        <td className="py-1 text-right">
+                          <Button variant="ghost" size="sm" onClick={() => handleDownloadFile(fullPath)}>
+                            Download{isBrowsable ? ' .zip' : ''}
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      {/* Generic Confirm Dialog */}
+      <ConfirmDialog
+        open={!!confirmDialog}
+        title={confirmDialog?.title || ''}
+        message={confirmDialog?.message || ''}
+        confirmLabel={confirmDialog?.confirmLabel || 'Confirm'}
+        variant={confirmDialog?.variant || 'danger'}
+        onConfirm={() => { confirmDialog?.onConfirm(); setConfirmDialog(null); }}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }
@@ -1026,7 +1638,7 @@ function fmtBytes(bytes: number): string {
 }
 
 function MetricsChart({
-  title, data, dataKey, color, unit, secondaryKey, secondaryColor, formatter, legendLabels,
+  title, data, dataKey, color, unit, secondaryKey, secondaryColor, formatter, legendLabels, timeframe,
 }: {
   title: string;
   data: MetricPoint[];
@@ -1037,14 +1649,34 @@ function MetricsChart({
   secondaryColor?: string;
   formatter?: (v: number) => string;
   legendLabels?: [string, string];
+  timeframe?: string;
 }) {
   const fmt = formatter || ((v: number) => `${v}${unit}`);
+
+  const formatTime = (epoch: number): string => {
+    const d = new Date(epoch * 1000);
+    switch (timeframe) {
+      case 'hour':
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      case 'day':
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      case 'week':
+        return d.toLocaleDateString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+      case 'month':
+        return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      case 'year':
+        return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      default:
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+  };
+
   const chartData = data
     .filter((d) => d.time)
     .map((d) => {
       const rec = d as unknown as Record<string, unknown>;
       return {
-        time: new Date((d.time) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        time: formatTime(d.time),
         [dataKey]: rec[dataKey] ?? 0,
         ...(secondaryKey ? { [secondaryKey]: rec[secondaryKey] ?? 0 } : {}),
       };

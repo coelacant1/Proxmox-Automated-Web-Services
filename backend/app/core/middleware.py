@@ -1,4 +1,6 @@
-"""Rate-limiting middleware using Redis sliding window."""
+"""Rate-limiting and analytics middleware using Redis."""
+
+import time
 
 from fastapi import Request, Response, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -6,6 +8,67 @@ from starlette.responses import JSONResponse
 
 from app.core.security import decode_token
 from app.services.rate_limiter import check_api_rate_limit
+
+
+class AnalyticsMiddleware(BaseHTTPMiddleware):
+    """Tracks per-user request counts and active sessions in Redis."""
+
+    EXEMPT_PREFIXES = ("/health", "/docs", "/openapi.json", "/favicon")
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        path = request.url.path
+        if any(path.startswith(p) for p in self.EXEMPT_PREFIXES):
+            return await call_next(request)
+
+        user_id = self._extract_user_id(request)
+        response = await call_next(request)
+
+        # Fire-and-forget analytics recording
+        try:
+            from app.services.rate_limiter import get_redis
+            r = await get_redis()
+            now = time.time()
+            hour_bucket = int(now // 3600) * 3600
+            pipe = r.pipeline()
+
+            # Total request counter per hour bucket
+            req_key = f"analytics:requests:{hour_bucket}"
+            pipe.incr(req_key)
+            pipe.expire(req_key, 86400 * 7)  # keep 7 days
+
+            if user_id:
+                # Per-user request counter per hour
+                user_req_key = f"analytics:user_requests:{user_id}:{hour_bucket}"
+                pipe.incr(user_req_key)
+                pipe.expire(user_req_key, 86400 * 7)
+
+                # Active user heartbeat (sorted set: user_id -> last_seen timestamp)
+                pipe.zadd("analytics:active_users", {user_id: now})
+
+                # Endpoint usage counter per hour
+                endpoint_key = f"analytics:endpoints:{hour_bucket}"
+                pipe.hincrby(endpoint_key, f"{request.method} {path}", 1)
+                pipe.expire(endpoint_key, 86400 * 7)
+
+            await pipe.execute()
+        except Exception:
+            pass  # fail open
+
+        return response
+
+    @staticmethod
+    def _extract_user_id(request: Request) -> str | None:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            payload = decode_token(auth_header[7:])
+            if payload and payload.get("sub"):
+                return payload["sub"]
+        token = request.cookies.get("paws_access_token")
+        if token:
+            payload = decode_token(token)
+            if payload and payload.get("sub"):
+                return payload["sub"]
+        return None
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -19,6 +82,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if request.url.path in self.EXEMPT_PATHS:
+            return await call_next(request)
+
+        # Only rate-limit mutating requests; reads are freely allowed
+        if request.method in ("GET", "HEAD", "OPTIONS"):
             return await call_next(request)
 
         # Identify the caller

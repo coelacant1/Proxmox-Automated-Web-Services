@@ -1,9 +1,10 @@
 """Usage tracking and dashboard data endpoints."""
 
 import json
+import time
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -135,4 +136,143 @@ async def usage_history(
         "total_ram_mb_allocated": total_ram_mb,
         "total_disk_gb_allocated": total_disk_gb,
         "resource_count": len(resources),
+    }
+
+
+# ---- Admin Analytics Endpoints ----
+
+@router.get("/admin/analytics")
+async def admin_analytics(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Real-time analytics: active users, request counts over time, login history."""
+    from app.services.rate_limiter import get_redis
+    from datetime import datetime, timezone
+
+    now = time.time()
+    current_hour = int(now // 3600) * 3600
+
+    # -- Active users (seen in last 15 minutes) --
+    active_users_raw: list = []
+    try:
+        r = await get_redis()
+        cutoff = now - 900  # 15 minutes
+        active_ids = await r.zrangebyscore("analytics:active_users", cutoff, "+inf", withscores=True)
+        if active_ids:
+            user_ids = [uid for uid, _ in active_ids]
+            result = await db.execute(
+                select(User.id, User.username, User.email, User.role)
+                .where(User.id.in_(user_ids))
+            )
+            user_map = {str(u.id): {"username": u.username, "email": u.email, "role": u.role} for u in result.all()}
+            for uid, score in active_ids:
+                info = user_map.get(uid, {"username": "unknown", "email": "", "role": ""})
+                active_users_raw.append({
+                    **info,
+                    "last_seen": datetime.fromtimestamp(score, tz=timezone.utc).isoformat(),
+                })
+    except Exception:
+        pass
+
+    # -- Request counts per hour (last 24 hours) --
+    request_history: list = []
+    try:
+        r = await get_redis()
+        pipe = r.pipeline()
+        for i in range(24):
+            bucket = current_hour - (i * 3600)
+            pipe.get(f"analytics:requests:{bucket}")
+        results = await pipe.execute()
+        for i, count in enumerate(results):
+            bucket = current_hour - (i * 3600)
+            request_history.append({
+                "time": datetime.fromtimestamp(bucket, tz=timezone.utc).isoformat(),
+                "requests": int(count) if count else 0,
+            })
+        request_history.reverse()
+    except Exception:
+        pass
+
+    # -- Top endpoints this hour --
+    top_endpoints: list = []
+    try:
+        r = await get_redis()
+        ep_data = await r.hgetall(f"analytics:endpoints:{current_hour}")
+        if ep_data:
+            sorted_eps = sorted(ep_data.items(), key=lambda x: int(x[1]), reverse=True)[:15]
+            top_endpoints = [{"endpoint": k, "count": int(v)} for k, v in sorted_eps]
+    except Exception:
+        pass
+
+    # -- Login history (from audit logs, last 7 days) --
+    from datetime import timedelta
+    seven_days_ago = datetime.now(tz=timezone.utc) - timedelta(days=7)
+
+    # Logins per day
+    login_result = await db.execute(
+        select(
+            cast(AuditLog.created_at, Date).label("day"),
+            func.count(AuditLog.id),
+        )
+        .where(
+            AuditLog.action.in_(["login", "login_success", "oauth_login"]),
+            AuditLog.created_at >= seven_days_ago,
+        )
+        .group_by("day")
+        .order_by("day")
+    )
+    logins_by_day = [
+        {"date": str(row[0]), "logins": row[1]}
+        for row in login_result.all()
+    ]
+
+    # Recent logins
+    recent_logins_result = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.action.in_(["login", "login_success", "oauth_login"]))
+        .order_by(desc(AuditLog.created_at))
+        .limit(20)
+    )
+    recent_logins_raw = recent_logins_result.scalars().all()
+    # Resolve usernames
+    login_user_ids = list({l.user_id for l in recent_logins_raw})
+    user_result = await db.execute(
+        select(User.id, User.username, User.email).where(User.id.in_(login_user_ids))
+    ) if login_user_ids else None
+    login_user_map = {str(u.id): {"username": u.username, "email": u.email} for u in user_result.all()} if user_result else {}
+
+    recent_logins = [
+        {
+            "username": login_user_map.get(str(l.user_id), {}).get("username", "unknown"),
+            "email": login_user_map.get(str(l.user_id), {}).get("email", ""),
+            "action": l.action,
+            "details": json.loads(l.details) if l.details else None,
+            "created_at": l.created_at.isoformat() if l.created_at else None,
+        }
+        for l in recent_logins_raw
+    ]
+
+    # -- Total requests today --
+    total_today = 0
+    try:
+        r = await get_redis()
+        pipe = r.pipeline()
+        day_start = int(now // 86400) * 86400
+        for h in range(24):
+            bucket = day_start + (h * 3600)
+            pipe.get(f"analytics:requests:{bucket}")
+        results = await pipe.execute()
+        total_today = sum(int(c) for c in results if c)
+    except Exception:
+        pass
+
+    return {
+        "active_users": active_users_raw,
+        "active_user_count": len(active_users_raw),
+        "request_history": request_history,
+        "total_requests_today": total_today,
+        "top_endpoints": top_endpoints,
+        "logins_by_day": logins_by_day,
+        "recent_logins": recent_logins,
     }

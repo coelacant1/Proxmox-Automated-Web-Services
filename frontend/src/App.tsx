@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider } from './context/AuthContext';
+import { ToastProvider } from './components/ui';
 import Admin from './pages/Admin';
 import AdminDashboard from './pages/AdminDashboard';
 import Alarms from './pages/Alarms';
@@ -10,8 +11,11 @@ import BackupDetail from './pages/BackupDetail';
 import BackupSettingsPage from './pages/BackupSettingsPage';
 import BackupsEnhanced from './pages/BackupsEnhanced';
 import BucketDetail from './pages/BucketDetail';
+import BugReports from './pages/BugReports';
 import Containers from './pages/Containers';
 import CostDashboard from './pages/CostDashboard';
+import Groups from './pages/Groups';
+import SystemRules from './pages/SystemRules';
 import CreateInstance from './pages/CreateInstance';
 import CustomImages from './pages/CustomImages';
 import Dashboard from './pages/Dashboard';
@@ -35,6 +39,7 @@ import StatusPage from './pages/StatusPage';
 import Storage from './pages/Storage';
 import Tags from './pages/Tags';
 import Templates from './pages/Templates';
+import Tiers from './pages/Tiers';
 import VMs from './pages/VMs';
 import VPCs from './pages/VPCs';
 import Volumes from './pages/Volumes';
@@ -42,6 +47,7 @@ import Volumes from './pages/Volumes';
 function App() {
   return (
     <BrowserRouter>
+      <ToastProvider>
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -80,12 +86,17 @@ function App() {
             <Route path="status" element={<StatusPage />} />
             <Route path="api-docs" element={<APIDocs />} />
             <Route path="import-export" element={<ImportExport />} />
+            <Route path="bug-reports" element={<BugReports />} />
+            <Route path="groups" element={<Groups />} />
+            <Route path="system-rules" element={<SystemRules />} />
+            <Route path="tiers" element={<Tiers />} />
             <Route path="admin" element={<Admin />} />
             <Route path="admin/dashboard" element={<AdminDashboard />} />
             <Route path="admin/images" element={<CustomImages />} />
           </Route>
         </Routes>
       </AuthProvider>
+      </ToastProvider>
     </BrowserRouter>
   );
 }

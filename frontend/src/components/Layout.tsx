@@ -26,6 +26,10 @@ import {
   MapPin,
   Book,
   FileDown,
+  Bug,
+  Users,
+  ScrollText,
+  Crown,
 } from 'lucide-react';
 
 const navSections = [
@@ -77,9 +81,13 @@ const navSections = [
   {
     label: 'Account',
     items: [
+      { to: '/groups', label: 'Groups', icon: Users },
+      { to: '/tiers', label: 'Account Tier', icon: Crown },
       { to: '/mfa', label: 'MFA Settings', icon: Smartphone },
       { to: '/api-docs', label: 'API Docs', icon: Book },
       { to: '/import-export', label: 'Import/Export', icon: FileDown },
+      { to: '/bug-reports', label: 'Bug Reports', icon: Bug },
+      { to: '/system-rules', label: 'System Rules', icon: ScrollText },
     ],
   },
 ];

@@ -75,13 +75,19 @@ export default function StatusPage() {
       {/* Overall Status */}
       <Card className="mb-6">
         <CardContent className="py-8 text-center">
-          <div className="flex items-center justify-center gap-3 mb-2">
-            {statusIcon(overall)}
-            <span className={`text-3xl font-bold capitalize ${overallColor}`}>{overall}</span>
-          </div>
-          <p className="text-sm text-paws-text-dim">
-            {overall === 'healthy' ? 'All systems operational.' : overall === 'degraded' ? 'Some services are experiencing issues.' : 'Service disruption detected.'}
-          </p>
+          {loading ? (
+            <p className="text-sm text-paws-text-dim">Checking services...</p>
+          ) : (
+            <>
+              <div className="flex items-center justify-center gap-3 mb-2">
+                {statusIcon(overall)}
+                <span className={`text-3xl font-bold capitalize ${overallColor}`}>{overall}</span>
+              </div>
+              <p className="text-sm text-paws-text-dim">
+                {overall === 'healthy' ? 'All systems operational.' : overall === 'degraded' ? 'Some services are experiencing issues.' : 'Service disruption detected.'}
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -89,6 +95,9 @@ export default function StatusPage() {
       <Card>
         <CardHeader><CardTitle>Services</CardTitle></CardHeader>
         <CardContent className="p-0">
+          {loading ? (
+            <p className="text-sm text-paws-text-dim px-4 py-6 text-center">Loading...</p>
+          ) : (
           <div className="divide-y divide-paws-border-subtle">
             {services.map((svc) => (
               <div key={svc.name} className="flex items-center justify-between px-4 py-3">
@@ -107,6 +116,7 @@ export default function StatusPage() {
               </div>
             ))}
           </div>
+          )}
         </CardContent>
       </Card>
     </div>

@@ -9,6 +9,7 @@ interface ResourceItem {
   display_name: string;
   resource_type: string;
   status: string;
+  proxmox_node?: string;
   specs: Record<string, unknown>;
   created_at: string;
   [key: string]: unknown;
@@ -31,6 +32,7 @@ const statusOptions = [
   { value: '', label: 'All Statuses' },
   { value: 'running', label: 'Running' },
   { value: 'stopped', label: 'Stopped' },
+  { value: 'provisioning', label: 'Provisioning' },
   { value: 'creating', label: 'Creating' },
   { value: 'error', label: 'Error' },
 ];
@@ -77,6 +79,15 @@ export default function Resources() {
       key: 'status',
       header: 'Status',
       render: (row) => <StatusBadge status={row.status} />,
+    },
+    {
+      key: 'proxmox_node',
+      header: 'Node',
+      render: (row) => (
+        <span className="text-paws-text-dim text-xs font-mono">
+          {row.proxmox_node || '-'}
+        </span>
+      ),
     },
     {
       key: 'created_at',

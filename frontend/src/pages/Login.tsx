@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '@/components/ui';
 import { Input } from '@/components/ui';
@@ -11,6 +11,8 @@ export default function Login() {
   const [error, setError] = useState('');
   const { login, loginWithOAuth } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const reason = searchParams.get('reason');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,6 +32,12 @@ export default function Login() {
         <p className="mb-6 text-center text-paws-text-muted">
           Sign in to manage your infrastructure
         </p>
+
+        {reason === 'timeout' && (
+          <div className="mb-4 rounded-md bg-yellow-500/10 border border-yellow-500/30 px-3 py-2 text-center text-sm text-yellow-400">
+            Your session has expired due to inactivity. Please log in again.
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 text-center text-paws-danger">{error}</div>

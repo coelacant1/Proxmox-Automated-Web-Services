@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 class ProxmoxClient:
     _instance: "ProxmoxClient | None" = None
     _api: ProxmoxAPI | None = None
+    _session_ticket: str | None = None
+    _session_user: str | None = None
 
     def __new__(cls) -> "ProxmoxClient":
         if cls._instance is None:
@@ -48,6 +50,35 @@ class ProxmoxClient:
     @property
     def api(self) -> ProxmoxAPI:
         return self._connect()
+
+    def get_session_ticket(self) -> tuple[str, str]:
+        """Get a PVE session ticket using username+password.
+
+        Required for xterm.js terminal auth (termproxy does not support API tokens).
+        Returns (username, ticket) tuple.
+        """
+        import requests
+
+        if not settings.proxmox_password:
+            raise ConnectionError(
+                "PAWS_PROXMOX_PASSWORD required for terminal console access"
+            )
+
+        host = settings.proxmox_host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
+        port = settings.proxmox_port
+        user = settings.proxmox_token_id.split("!")[0]
+
+        resp = requests.post(
+            f"https://{host}:{port}/api2/json/access/ticket",
+            data={"username": user, "password": settings.proxmox_password},
+            verify=settings.proxmox_verify_ssl,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()["data"]
+        self._session_ticket = data["ticket"]
+        self._session_user = data["username"]
+        return (data["username"], data["ticket"])
 
     # --- Cluster / Node Operations ---
 
@@ -162,6 +193,30 @@ class ProxmoxClient:
     def resize_vm_disk(self, node: str, vmid: int, disk: str, size: str) -> None:
         self.api.nodes(node).qemu(vmid).resize.put(disk=disk, size=size)
 
+    def move_vm_disk(
+        self, node: str, vmid: int, disk: str,
+        target_vmid: int | None = None,
+        target_disk: str | None = None,
+        storage: str | None = None,
+    ) -> str:
+        """Move a VM disk to another storage or another VM."""
+        params: dict[str, Any] = {"disk": disk}
+        if target_vmid is not None:
+            params["target-vmid"] = target_vmid
+        if target_disk is not None:
+            params["target-disk"] = target_disk
+        if storage is not None:
+            params["storage"] = storage
+        return self.api.nodes(node).qemu(vmid).move_disk.post(**params)
+
+    def allocate_storage_volume(
+        self, node: str, storage: str, vmid: int, size: str, fmt: str = "raw"
+    ) -> str:
+        """Allocate a new volume on storage. Returns the volume identifier."""
+        return self.api.nodes(node).storage(storage).content.post(
+            vmid=vmid, size=size, format=fmt
+        )
+
     def update_vm_config(self, node: str, vmid: int, **kwargs: Any) -> None:
         self.api.nodes(node).qemu(vmid).config.put(**kwargs)
 
@@ -214,6 +269,80 @@ class ProxmoxClient:
 
     def get_storage_content(self, node: str, storage: str) -> list[dict[str, Any]]:
         return self.api.nodes(node).storage(storage).content.get()
+
+    def get_storage_config(self, storage: str) -> dict[str, Any]:
+        """Get configuration of a specific storage."""
+        return self.api.storage(storage).get()
+
+    def create_pbs_storage(
+        self, name: str, server: str, datastore: str,
+        namespace: str, fingerprint: str,
+        username: str, password: str, port: int = 8007,
+    ) -> None:
+        """Create a PVE storage config pointing to a PBS namespace."""
+        self.api.storage.post(
+            storage=name,
+            type="pbs",
+            server=server,
+            port=port,
+            datastore=datastore,
+            namespace=namespace,
+            content="backup",
+            username=username,
+            password=password,
+            fingerprint=fingerprint,
+        )
+
+    def storage_exists(self, name: str) -> bool:
+        """Check if a PVE storage config exists."""
+        try:
+            self.api.storage(name).get()
+            return True
+        except Exception:
+            return False
+
+    def delete_storage_content(self, node: str, storage: str, volid: str) -> str:
+        """Delete a volume (backup file) from storage."""
+        return self.api.nodes(node).storage(storage).content(volid).delete()
+
+    def list_backup_files(self, node: str, storage: str, volid: str, filepath: str = "/") -> list[dict[str, Any]]:
+        """List files inside a backup via PVE's file-restore API."""
+        import base64
+        fp_b64 = base64.b64encode(filepath.encode()).decode()
+        result = self.api.nodes(node).storage(storage)("file-restore")("list").get(
+            volume=volid, filepath=fp_b64,
+        )
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict) and "data" in result:
+            return result["data"]
+        return [result] if result else []
+
+    def download_backup_file(self, node: str, storage: str, volid: str, filepath: str) -> Any:
+        """Download a file from a backup via PVE's file-restore API. Returns raw response."""
+        import base64
+        fp_b64 = base64.b64encode(filepath.encode()).decode()
+        return self.api.nodes(node).storage(storage)("file-restore")("download").get(
+            volume=volid, filepath=fp_b64,
+        )
+
+    def restore_vm_backup(
+        self, node: str, vmid: int, archive: str, storage: str | None = None,
+    ) -> str:
+        """Restore a VM from a backup archive (qmrestore)."""
+        kwargs: dict[str, Any] = {"vmid": vmid, "archive": archive, "force": 1}
+        if storage:
+            kwargs["storage"] = storage
+        return self.api.nodes(node).qemu.post(**kwargs)
+
+    def restore_ct_backup(
+        self, node: str, vmid: int, archive: str, storage: str | None = None,
+    ) -> str:
+        """Restore a container from a backup archive (pct restore)."""
+        kwargs: dict[str, Any] = {"vmid": vmid, "ostemplate": archive, "force": 1, "restore": 1}
+        if storage:
+            kwargs["storage"] = storage
+        return self.api.nodes(node).lxc.post(**kwargs)
 
     # --- Templates ---
 
@@ -271,6 +400,10 @@ class ProxmoxClient:
             params["vmid"] = vmid
         return self.api.nodes(node).tasks.get(**params)
 
+    def get_task_log(self, node: str, upid: str, limit: int = 1000, start: int = 0) -> list[dict[str, Any]]:
+        """Get log lines for a specific task."""
+        return self.api.nodes(node).tasks(upid).log.get(limit=limit, start=start)
+
     def get_rrd_data(self, node: str, vmid: int, vmtype: str = "qemu", timeframe: str = "hour") -> list[dict[str, Any]]:
         if vmtype == "lxc":
             return self.api.nodes(node).lxc(vmid).rrddata.get(timeframe=timeframe)
@@ -321,6 +454,52 @@ class ProxmoxClient:
     def get_agent_info(self, node: str, vmid: int) -> dict[str, Any]:
         """Get QEMU guest agent info."""
         return self.api.nodes(node).qemu(vmid).agent.get(command="info")
+
+    # --- High Availability ---
+
+    def get_ha_groups(self) -> list[dict[str, Any]]:
+        """Get all HA groups from the cluster."""
+        return self.api.cluster.ha.groups.get()
+
+    def get_ha_group(self, group_name: str) -> dict[str, Any]:
+        """Get details of a specific HA group."""
+        return self.api.cluster.ha.groups(group_name).get()
+
+    def create_ha_group(self, group_name: str, nodes: str, **kwargs: Any) -> None:
+        """Create an HA group. nodes is comma-separated e.g. 'node1,node2'."""
+        self.api.cluster.ha.groups.post(group=group_name, nodes=nodes, **kwargs)
+
+    def update_ha_group(self, group_name: str, **kwargs: Any) -> None:
+        """Update an HA group."""
+        self.api.cluster.ha.groups(group_name).put(**kwargs)
+
+    def delete_ha_group(self, group_name: str) -> None:
+        """Delete an HA group."""
+        self.api.cluster.ha.groups(group_name).delete()
+
+    def get_ha_resources(self) -> list[dict[str, Any]]:
+        """Get all HA-managed resources."""
+        return self.api.cluster.ha.resources.get()
+
+    def get_ha_resource(self, sid: str) -> dict[str, Any]:
+        """Get HA status for a specific resource. sid format: 'vm:VMID' or 'ct:VMID'."""
+        return self.api.cluster.ha.resources(sid).get()
+
+    def add_ha_resource(self, sid: str, group: str | None = None, **kwargs: Any) -> None:
+        """Add a resource to HA management. sid format: 'vm:VMID' or 'ct:VMID'."""
+        params: dict[str, Any] = {"sid": sid}
+        if group:
+            params["group"] = group
+        params.update(kwargs)
+        self.api.cluster.ha.resources.post(**params)
+
+    def remove_ha_resource(self, sid: str) -> None:
+        """Remove a resource from HA management."""
+        self.api.cluster.ha.resources(sid).delete()
+
+    def get_ha_status(self) -> list[dict[str, Any]]:
+        """Get HA manager status (current HA resource states)."""
+        return self.api.cluster.ha.status.current.get()
 
 
 proxmox_client = ProxmoxClient()
