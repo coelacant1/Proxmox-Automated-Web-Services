@@ -1,5 +1,7 @@
 """VPC and subnet management API."""
 
+import uuid as _uuid
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,8 +11,28 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.models.models import VPC, Subnet, User
 from app.schemas.schemas import SubnetCreate, SubnetRead, VPCCreate, VPCRead
+from app.services.group_access import check_group_access
 
 router = APIRouter(prefix="/api/vpcs", tags=["vpcs"])
+
+
+async def _get_vpc(
+    db: AsyncSession, user_id: _uuid.UUID, vpc_id: str, min_perm: str = "read",
+) -> VPC:
+    """Get a VPC by ownership or group share."""
+    vid = _uuid.UUID(vpc_id)
+    result = await db.execute(
+        select(VPC).where(VPC.id == vid, VPC.owner_id == user_id).options(selectinload(VPC.subnets))
+    )
+    vpc = result.scalar_one_or_none()
+    if not vpc:
+        res2 = await db.execute(select(VPC).where(VPC.id == vid).options(selectinload(VPC.subnets)))
+        vpc = res2.scalar_one_or_none()
+        if vpc and not await check_group_access(db, user_id, "vpc", vid, min_perm):
+            vpc = None
+    if not vpc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found")
+    return vpc
 
 
 @router.get("/", response_model=list[VPCRead])
@@ -59,15 +81,7 @@ async def get_vpc(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(
-        select(VPC)
-        .where(VPC.id == vpc_id, VPC.owner_id == user.id)
-        .options(selectinload(VPC.subnets))
-    )
-    vpc = result.scalar_one_or_none()
-    if not vpc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found")
-    return vpc
+    return await _get_vpc(db, user.id, vpc_id)
 
 
 @router.delete("/{vpc_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -76,10 +90,7 @@ async def delete_vpc(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(select(VPC).where(VPC.id == vpc_id, VPC.owner_id == user.id))
-    vpc = result.scalar_one_or_none()
-    if not vpc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found")
+    vpc = await _get_vpc(db, user.id, vpc_id, min_perm="admin")
     if vpc.is_default:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete default VPC")
 
@@ -97,10 +108,7 @@ async def create_subnet(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(select(VPC).where(VPC.id == vpc_id, VPC.owner_id == user.id))
-    vpc = result.scalar_one_or_none()
-    if not vpc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found")
+    vpc = await _get_vpc(db, user.id, vpc_id, min_perm="admin")
 
     subnet = Subnet(vpc_id=vpc.id, name=body.name, cidr=body.cidr, gateway=body.gateway, is_public=body.is_public)
     db.add(subnet)
@@ -116,10 +124,7 @@ async def delete_subnet(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    # Verify VPC ownership
-    vpc_result = await db.execute(select(VPC).where(VPC.id == vpc_id, VPC.owner_id == user.id))
-    if not vpc_result.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found")
+    await _get_vpc(db, user.id, vpc_id, min_perm="admin")
 
     subnet_result = await db.execute(
         select(Subnet).where(Subnet.id == subnet_id, Subnet.vpc_id == vpc_id)

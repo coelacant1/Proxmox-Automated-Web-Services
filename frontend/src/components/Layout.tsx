@@ -30,6 +30,7 @@ import {
   Users,
   ScrollText,
   Crown,
+  KeyRound,
 } from 'lucide-react';
 
 const navSections = [
@@ -82,6 +83,7 @@ const navSections = [
     label: 'Account',
     items: [
       { to: '/groups', label: 'Groups', icon: Users },
+      { to: '/keys', label: 'API Keys', icon: KeyRound },
       { to: '/tiers', label: 'Account Tier', icon: Crown },
       { to: '/mfa', label: 'MFA Settings', icon: Smartphone },
       { to: '/api-docs', label: 'API Docs', icon: Book },

@@ -14,6 +14,7 @@ from app.models.models import InstanceType, SystemSetting, User, UserQuota, User
 from app.routers import (
     admin,
     admin_audit,
+    admin_groups,
     admin_quota_requests,
     admin_ha,
     admin_settings,
@@ -340,6 +341,7 @@ app.include_router(bug_reports.router)
 app.include_router(admin_tiers.router)
 app.include_router(admin_tiers.user_router)
 app.include_router(admin_ha.router)
+app.include_router(admin_groups.router)
 app.include_router(system_rules.router)
 app.include_router(groups.router)
 app.include_router(template_requests.router)

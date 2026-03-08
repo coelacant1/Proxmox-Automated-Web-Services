@@ -7,6 +7,7 @@ import Admin from './pages/Admin';
 import AdminDashboard from './pages/AdminDashboard';
 import Alarms from './pages/Alarms';
 import APIDocs from './pages/APIDocs';
+import APIKeys from './pages/APIKeys';
 import BackupDetail from './pages/BackupDetail';
 import BackupSettingsPage from './pages/BackupSettingsPage';
 import BackupsEnhanced from './pages/BackupsEnhanced';
@@ -88,6 +89,7 @@ function App() {
             <Route path="import-export" element={<ImportExport />} />
             <Route path="bug-reports" element={<BugReports />} />
             <Route path="groups" element={<Groups />} />
+            <Route path="keys" element={<APIKeys />} />
             <Route path="system-rules" element={<SystemRules />} />
             <Route path="tiers" element={<Tiers />} />
             <Route path="admin" element={<Admin />} />

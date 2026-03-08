@@ -501,5 +501,44 @@ class ProxmoxClient:
         """Get HA manager status (current HA resource states)."""
         return self.api.cluster.ha.status.current.get()
 
+    # --- Pool Management ---
+
+    def create_pool(self, poolid: str, comment: str = "") -> None:
+        """Create a resource pool on the cluster."""
+        self.api.pools.post(poolid=poolid, comment=comment)
+
+    def delete_pool(self, poolid: str) -> None:
+        """Delete an empty resource pool."""
+        self.api.pools(poolid).delete()
+
+    def get_pool(self, poolid: str) -> dict[str, Any]:
+        """Get pool info including members."""
+        return self.api.pools(poolid).get()
+
+    def list_pools(self) -> list[dict[str, Any]]:
+        """List all resource pools."""
+        return self.api.pools.get()
+
+    def pool_exists(self, poolid: str) -> bool:
+        """Check if a pool exists."""
+        try:
+            self.api.pools(poolid).get()
+            return True
+        except Exception:
+            return False
+
+    def add_to_pool(self, poolid: str, vmid: int) -> None:
+        """Add a VM/container to a pool."""
+        self.api.pools(poolid).put(vms=str(vmid))
+
+    def remove_from_pool(self, poolid: str, vmid: int) -> None:
+        """Remove a VM/container from a pool."""
+        self.api.pools(poolid).put(vms=str(vmid), delete=1)
+
+    def get_pool_name_for_user(self, username: str) -> str:
+        """Get the standard pool name for a PAWS user."""
+        safe = username.lower().replace(" ", "-")[:30]
+        return f"paws-{safe}"
+
 
 proxmox_client = ProxmoxClient()

@@ -20,11 +20,52 @@ def _extract_token(request: Request, token: str | None) -> str | None:
     return request.cookies.get("paws_access_token")
 
 
+def _extract_raw_bearer(request: Request) -> str | None:
+    """Extract the raw Authorization header value (for API key detection)."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return None
+
+
+async def _authenticate_api_key(raw_key: str, db: AsyncSession, request: Request) -> User:
+    """Authenticate via a paws_ API key (user or group-scoped). Returns the User."""
+    from app.services.api_key_service import verify_api_key, verify_group_api_key
+
+    # Try user-level key first
+    key_record = await verify_api_key(db, raw_key)
+    if key_record is not None:
+        result = await db.execute(select(User).where(User.id == key_record.user_id))
+        user = result.scalar_one_or_none()
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+        request.state.api_key_type = "user"
+        return user
+
+    # Try group-scoped key
+    group_key = await verify_group_api_key(db, raw_key)
+    if group_key is not None:
+        result = await db.execute(select(User).where(User.id == group_key.created_by))
+        user = result.scalar_one_or_none()
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+        request.state.api_key_type = "group"
+        request.state.api_key_group_id = str(group_key.group_id)
+        return user
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+
 async def get_current_user(
     request: Request,
     token: str | None = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    # Check for API key first (paws_ prefix)
+    raw_bearer = _extract_raw_bearer(request)
+    if raw_bearer and raw_bearer.startswith("paws_"):
+        return await _authenticate_api_key(raw_bearer, db, request)
+
     jwt_token = _extract_token(request, token)
     if jwt_token is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")

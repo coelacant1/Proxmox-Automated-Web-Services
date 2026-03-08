@@ -9,8 +9,8 @@ import { StatusBadge } from '@/components/ui/StatusBadge';
 import { DataTable } from '@/components/ui/DataTable';
 import type { Column } from '@/components/ui/DataTable';
 import { MetricCard } from '@/components/ui/MetricCard';
-import { Textarea, Modal, Select, useToast } from '@/components/ui';
-import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil } from 'lucide-react';
+import { Textarea, Modal, Select, useToast, Tabs } from '@/components/ui';
+import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, Search } from 'lucide-react';
 import {
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart, Bar, BarChart,
@@ -94,7 +94,7 @@ interface TemplateRequestData {
   reviewed_at: string | null; created_at: string | null;
 }
 
-const TABS = ['Overview', 'Analytics', 'Users', 'Tiers', 'Templates', 'Quota Requests', 'Bug Reports', 'Storage', 'Rules', 'Settings', 'Audit Log', 'Projects', 'API Keys', 'Cluster'] as const;
+const TABS = ['Overview', 'Analytics', 'Users', 'Groups', 'Tiers', 'Templates', 'Quota Requests', 'Bug Reports', 'Storage', 'Rules', 'Settings', 'Audit Log', 'Projects', 'API Keys', 'Cluster'] as const;
 type Tab = typeof TABS[number];
 
 // Helper type to satisfy DataTable's Record<string, unknown> constraint
@@ -128,6 +128,7 @@ export default function Admin() {
       {activeTab === 'Overview' && <OverviewTab />}
       {activeTab === 'Analytics' && <AnalyticsTab />}
       {activeTab === 'Users' && <UsersTab />}
+      {activeTab === 'Groups' && <GroupsTab />}
       {activeTab === 'Tiers' && <TiersTab />}
       {activeTab === 'Templates' && <TemplatesTab />}
       {activeTab === 'Quota Requests' && <QuotaRequestsTab />}
@@ -384,17 +385,67 @@ function AnalyticsTab() {
 function UsersTab() {
   const [users, setUsers] = useState<UserData[]>([]);
   const [tiers, setTiers] = useState<TierData[]>([]);
+  const [selectedUser, setSelectedUser] = useState<string | null>(null);
+  const [userStats, setUserStats] = useState<any>(null);
+  const [userResources, setUserResources] = useState<any[]>([]);
+  const [unmanagedVMs, setUnmanagedVMs] = useState<any[]>([]);
+  const [showImport, setShowImport] = useState(false);
+  const [showTransfer, setShowTransfer] = useState<string | null>(null);
+  const [transferTarget, setTransferTarget] = useState('');
+  const [importVmid, setImportVmid] = useState<number | null>(null);
+  const [importName, setImportName] = useState('');
+  const [detailTab, setDetailTab] = useState('overview');
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [auditPage, setAuditPage] = useState(1);
+  const [auditPages, setAuditPages] = useState(1);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditFilter, setAuditFilter] = useState('');
+  const [auditTypeFilter, setAuditTypeFilter] = useState('');
+  const toast = useToast();
+
   const fetchUsers = () => api.get('/api/admin/users/').then(r => setUsers(r.data.items ?? r.data)).catch(() => {});
   const fetchTiers = () => api.get('/api/admin/tiers/').then(r => setTiers(r.data)).catch(() => {});
   useEffect(() => { fetchUsers(); fetchTiers(); }, []);
 
+  const selectUser = async (userId: string) => {
+    setSelectedUser(userId);
+    setDetailTab('overview');
+    try {
+      const [statsRes, resRes] = await Promise.all([
+        api.get(`/api/admin/users/stats/${userId}`),
+        api.get(`/api/admin/users/${userId}/resources`),
+      ]);
+      setUserStats(statsRes.data);
+      setUserResources(resRes.data);
+    } catch { setUserStats(null); setUserResources([]); }
+  };
+
+  const fetchAuditLogs = async (userId: string, page = 1, action = '', resourceType = '') => {
+    try {
+      const params = new URLSearchParams({ page: String(page), per_page: '25' });
+      if (action) params.set('action', action);
+      if (resourceType) params.set('resource_type', resourceType);
+      const r = await api.get(`/api/admin/users/audit/${userId}?${params}`);
+      setAuditLogs(r.data.items);
+      setAuditPage(r.data.page);
+      setAuditPages(r.data.pages);
+      setAuditTotal(r.data.total);
+    } catch { setAuditLogs([]); }
+  };
+
   const toggleActive = async (id: string, active: boolean) => {
     await api.patch(`/api/admin/users/${id}/active?is_active=${active}`);
     fetchUsers();
+    if (selectedUser === id && userStats) {
+      setUserStats({ ...userStats, user: { ...userStats.user, is_active: active } });
+    }
   };
   const changeRole = async (id: string, role: string) => {
     await api.patch(`/api/admin/users/${id}/role?role=${role}`);
     fetchUsers();
+    if (selectedUser === id && userStats) {
+      setUserStats({ ...userStats, user: { ...userStats.user, role } });
+    }
   };
   const changeTier = async (userId: string, tierId: string) => {
     await api.patch(`/api/admin/tiers/users/${userId}/tier${tierId ? `?tier_id=${tierId}` : ''}`);
@@ -403,11 +454,393 @@ function UsersTab() {
   const deleteUser = async (id: string) => {
     if (!confirm('Delete this user and all their resources?')) return;
     await api.delete(`/api/admin/users/${id}`);
+    setSelectedUser(null);
     fetchUsers();
   };
 
+  const transferResource = async (resourceId: string) => {
+    if (!transferTarget) return;
+    try {
+      await api.post(`/api/admin/users/resources/${resourceId}/transfer`, { target_user_id: transferTarget });
+      toast.toast('Resource transferred', 'success');
+      setShowTransfer(null);
+      setTransferTarget('');
+      if (selectedUser) selectUser(selectedUser);
+    } catch (e: any) {
+      const d = e.response?.data?.detail;
+      toast.toast(typeof d === 'string' ? d : 'Transfer failed', 'error');
+    }
+  };
+
+  const removeResource = async (resourceId: string) => {
+    if (!selectedUser || !confirm('Remove this resource from user? The VM will remain on Proxmox but won\'t be tracked.')) return;
+    await api.post(`/api/admin/users/${selectedUser}/remove-resource/${resourceId}`);
+    toast.toast('Resource removed', 'success');
+    selectUser(selectedUser);
+  };
+
+  const openImportModal = async () => {
+    try {
+      const r = await api.get('/api/admin/users/unmanaged-vms');
+      setUnmanagedVMs(r.data);
+    } catch { setUnmanagedVMs([]); }
+    setShowImport(true);
+  };
+
+  const importVM = async () => {
+    if (!importVmid || !selectedUser) return;
+    try {
+      await api.post('/api/admin/users/resources/import', {
+        vmid: importVmid,
+        target_user_id: selectedUser,
+        display_name: importName || null,
+      });
+      toast.toast('VM imported successfully', 'success');
+      setShowImport(false);
+      setImportVmid(null);
+      setImportName('');
+      selectUser(selectedUser);
+    } catch (e: any) {
+      const d = e.response?.data?.detail;
+      toast.toast(typeof d === 'string' ? d : 'Import failed', 'error');
+    }
+  };
+
+  // --- User Detail View ---
+  if (selectedUser && userStats) {
+    const s = userStats;
+    const u = s.user;
+
+    const detailTabs = [
+      { id: 'overview', label: 'Overview' },
+      { id: 'resources', label: 'Resources', count: userResources.length },
+      { id: 'audit', label: 'Audit Log', count: auditTotal || undefined },
+      { id: 'admin', label: 'Admin Actions' },
+    ];
+
+    const onTabChange = (tab: string) => {
+      setDetailTab(tab);
+      if (tab === 'audit' && auditLogs.length === 0) {
+        fetchAuditLogs(selectedUser);
+      }
+    };
+
+    return (
+      <div className="space-y-4">
+        {/* Header */}
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => { setSelectedUser(null); setUserStats(null); setAuditLogs([]); setAuditTotal(0); }}>
+            <ChevronLeft className="w-4 h-4" />
+          </Button>
+          <h2 className="text-xl font-bold text-paws-text">{u.username}</h2>
+          <Badge variant={u.is_active ? 'success' : 'danger'}>{u.is_active ? 'Active' : 'Disabled'}</Badge>
+          <Badge variant="info">{u.role}</Badge>
+          <span className="text-xs text-paws-text-muted ml-auto">{u.email} | {u.auth_provider} | Joined {new Date(u.created_at).toLocaleDateString()}</span>
+        </div>
+
+        <Tabs tabs={detailTabs} activeTab={detailTab} onChange={onTabChange} />
+
+        {/* ── Overview Tab ── */}
+        {detailTab === 'overview' && (
+          <div className="space-y-4">
+            <div className="grid gap-3 grid-cols-2 sm:grid-cols-4 lg:grid-cols-6">
+              <Card><CardContent>
+                <p className="text-xs text-paws-text-muted">VMs</p>
+                <p className="text-2xl font-bold text-paws-text">{s.resources.vm || 0}</p>
+              </CardContent></Card>
+              <Card><CardContent>
+                <p className="text-xs text-paws-text-muted">Containers</p>
+                <p className="text-2xl font-bold text-paws-text">{s.resources.lxc || 0}</p>
+              </CardContent></Card>
+              <Card><CardContent>
+                <p className="text-xs text-paws-text-muted">Volumes</p>
+                <p className="text-2xl font-bold text-paws-text">{s.volumes.count} <span className="text-xs text-paws-text-muted">({s.volumes.total_size_gib} GiB)</span></p>
+              </CardContent></Card>
+              <Card><CardContent>
+                <p className="text-xs text-paws-text-muted">VPCs</p>
+                <p className="text-2xl font-bold text-paws-text">{s.vpcs}</p>
+              </CardContent></Card>
+              <Card><CardContent>
+                <p className="text-xs text-paws-text-muted">Backups</p>
+                <p className="text-2xl font-bold text-paws-text">{s.backups}</p>
+              </CardContent></Card>
+              <Card><CardContent>
+                <p className="text-xs text-paws-text-muted">Proxmox Pool</p>
+                <p className="text-sm font-mono text-paws-text truncate">{s.pool.name}</p>
+                <Badge variant={s.pool.exists ? 'success' : 'default'}>{s.pool.exists ? 'Active' : 'None'}</Badge>
+              </CardContent></Card>
+            </div>
+
+            {s.quota && (
+              <Card><CardContent>
+                <h3 className="text-sm font-semibold text-paws-text mb-2">Quota Usage</h3>
+                <div className="flex flex-wrap gap-4 text-xs text-paws-text-muted">
+                  <span>VMs: <strong className="text-paws-text">{s.resources.vm || 0}/{s.quota.max_vms}</strong></span>
+                  <span>Containers: <strong className="text-paws-text">{s.resources.lxc || 0}/{s.quota.max_containers}</strong></span>
+                  <span>vCPUs: <strong className="text-paws-text">{s.quota.max_vcpus}</strong></span>
+                  <span>RAM: <strong className="text-paws-text">{s.quota.max_ram_mb} MB</strong></span>
+                  <span>Disk: <strong className="text-paws-text">{s.quota.max_disk_gb} GB</strong></span>
+                </div>
+              </CardContent></Card>
+            )}
+
+            {/* Recent activity preview */}
+            <Card><CardContent>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-paws-text">Recent Activity</h3>
+                <Button variant="ghost" size="sm" onClick={() => { onTabChange('audit'); }}>
+                  View All
+                </Button>
+              </div>
+              {s.activity.length === 0 ? (
+                <p className="text-paws-text-muted text-sm py-2 text-center">No activity recorded</p>
+              ) : (
+                <div className="space-y-1">
+                  {s.activity.slice(0, 5).map((a: any) => (
+                    <div key={a.id} className="flex items-center gap-3 px-2 py-1.5 text-sm rounded hover:bg-paws-bg/50">
+                      <span className="text-xs text-paws-text-muted w-36 shrink-0">{new Date(a.created_at).toLocaleString()}</span>
+                      <Badge variant="info">{a.action}</Badge>
+                      {a.resource_type && <span className="text-xs text-paws-text-muted">{a.resource_type}</span>}
+                      {a.details && (() => { try { const d = JSON.parse(a.details); return <span className="text-xs text-paws-text-muted truncate max-w-xs">{d.display_name || d.name || ''}</span>; } catch { return null; } })()}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent></Card>
+          </div>
+        )}
+
+        {/* ── Resources Tab ── */}
+        {detailTab === 'resources' && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-paws-text">Managed Resources ({userResources.length})</h3>
+              <Button size="sm" onClick={openImportModal}><Plus className="w-3.5 h-3.5 mr-1" /> Import VM</Button>
+            </div>
+            {userResources.length === 0 ? (
+              <p className="text-paws-text-muted text-sm py-8 text-center">No resources assigned to this user.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {userResources.map((r: any) => (
+                  <div key={r.id} className="flex items-center justify-between px-3 py-2 rounded bg-paws-card border border-paws-border">
+                    <div className="flex items-center gap-3">
+                      <Badge variant="default">{r.resource_type}</Badge>
+                      <span className="text-paws-text font-medium">{r.display_name}</span>
+                      {r.proxmox_vmid && <span className="text-xs text-paws-text-muted font-mono">VMID {r.proxmox_vmid}</span>}
+                      {r.proxmox_node && <span className="text-xs text-paws-text-muted">{r.proxmox_node}</span>}
+                      <StatusBadge status={r.status} />
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Button variant="outline" size="sm" onClick={() => { setShowTransfer(r.id); setTransferTarget(''); }}>
+                        Transfer
+                      </Button>
+                      <Button variant="danger" size="sm" onClick={() => removeResource(r.id)}>
+                        Unlink
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Audit Log Tab ── */}
+        {detailTab === 'audit' && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-paws-text-muted" />
+                <input
+                  type="text"
+                  placeholder="Filter by action (e.g. create, delete, login)..."
+                  value={auditFilter}
+                  onChange={e => setAuditFilter(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { setAuditPage(1); fetchAuditLogs(selectedUser, 1, auditFilter, auditTypeFilter); } }}
+                  className="w-full pl-8 pr-3 py-1.5 text-sm rounded border border-paws-border bg-paws-bg text-paws-text placeholder-paws-text-muted"
+                />
+              </div>
+              <select
+                value={auditTypeFilter}
+                onChange={e => { setAuditTypeFilter(e.target.value); setAuditPage(1); fetchAuditLogs(selectedUser, 1, auditFilter, e.target.value); }}
+                className="rounded border border-paws-border bg-paws-bg text-paws-text text-sm px-2 py-1.5"
+              >
+                <option value="">All Types</option>
+                <option value="vm">VM</option>
+                <option value="lxc">Container</option>
+                <option value="volume">Volume</option>
+                <option value="vpc">VPC</option>
+                <option value="backup">Backup</option>
+                <option value="bucket">Bucket</option>
+                <option value="dns">DNS</option>
+                <option value="ssh_key">SSH Key</option>
+              </select>
+              <Button variant="outline" size="sm" onClick={() => fetchAuditLogs(selectedUser, auditPage, auditFilter, auditTypeFilter)}>
+                <RefreshCw className="w-3.5 h-3.5" />
+              </Button>
+            </div>
+
+            <p className="text-xs text-paws-text-muted">{auditTotal} total entries</p>
+
+            {auditLogs.length === 0 ? (
+              <p className="text-paws-text-muted text-sm py-8 text-center">No audit log entries found.</p>
+            ) : (
+              <div className="space-y-1">
+                {auditLogs.map((a: any) => (
+                  <div key={a.id} className="flex items-start gap-3 px-3 py-2 text-sm rounded border border-paws-border bg-paws-card hover:border-paws-text-muted transition-colors">
+                    <span className="text-xs text-paws-text-muted w-40 shrink-0 pt-0.5">{new Date(a.created_at).toLocaleString()}</span>
+                    <Badge variant="info">{a.action}</Badge>
+                    {a.resource_type && <Badge variant="default">{a.resource_type}</Badge>}
+                    {a.resource_id && <span className="text-xs text-paws-text-muted font-mono truncate max-w-[120px]">{a.resource_id.slice(0, 8)}</span>}
+                    {a.details && (() => {
+                      try {
+                        const d = JSON.parse(a.details);
+                        const summary = d.display_name || d.name || d.vmid || d.ip || '';
+                        return summary ? <span className="text-xs text-paws-text truncate flex-1">{summary}</span> : null;
+                      } catch {
+                        return <span className="text-xs text-paws-text truncate flex-1">{a.details}</span>;
+                      }
+                    })()}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Pagination */}
+            {auditPages > 1 && (
+              <div className="flex items-center justify-center gap-2 pt-2">
+                <Button variant="outline" size="sm" disabled={auditPage <= 1} onClick={() => { const p = auditPage - 1; setAuditPage(p); fetchAuditLogs(selectedUser, p, auditFilter, auditTypeFilter); }}>
+                  Previous
+                </Button>
+                <span className="text-sm text-paws-text-muted">Page {auditPage} of {auditPages}</span>
+                <Button variant="outline" size="sm" disabled={auditPage >= auditPages} onClick={() => { const p = auditPage + 1; setAuditPage(p); fetchAuditLogs(selectedUser, p, auditFilter, auditTypeFilter); }}>
+                  Next
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Admin Actions Tab ── */}
+        {detailTab === 'admin' && (
+          <div className="space-y-4">
+            <Card><CardContent>
+              <h3 className="text-sm font-semibold text-paws-text mb-3">Account Settings</h3>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs text-paws-text-muted block mb-1">Role</label>
+                  <select
+                    value={u.role}
+                    onChange={e => changeRole(u.id, e.target.value)}
+                    className="w-full rounded border border-paws-border bg-paws-bg text-paws-text text-sm px-3 py-2"
+                  >
+                    <option value="admin">admin</option>
+                    <option value="operator">operator</option>
+                    <option value="member">member</option>
+                    <option value="viewer">viewer</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-paws-text-muted block mb-1">Tier</label>
+                  <select
+                    value={(users.find(uu => uu.id === u.id) as any)?.tier_id || ''}
+                    onChange={e => changeTier(u.id, e.target.value)}
+                    className="w-full rounded border border-paws-border bg-paws-bg text-paws-text text-sm px-3 py-2"
+                  >
+                    <option value="">None</option>
+                    {tiers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </div>
+              </div>
+            </CardContent></Card>
+
+            <Card><CardContent>
+              <h3 className="text-sm font-semibold text-paws-text mb-3">Dangerous Actions</h3>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => toggleActive(u.id, !u.is_active)}>
+                  {u.is_active ? 'Disable Account' : 'Enable Account'}
+                </Button>
+                <Button variant="danger" size="sm" onClick={() => deleteUser(u.id)}>
+                  Delete Account
+                </Button>
+              </div>
+              <p className="text-xs text-paws-text-muted mt-2">
+                {u.is_active
+                  ? 'Disabling will prevent the user from logging in. Resources will remain intact.'
+                  : 'This account is currently disabled. Click Enable to restore access.'}
+              </p>
+            </CardContent></Card>
+          </div>
+        )}
+
+        {/* Transfer Modal */}
+        <Modal open={!!showTransfer} onClose={() => setShowTransfer(null)} title="Transfer Resource">
+          <div className="space-y-3">
+            <Select
+              label="Transfer to User"
+              options={users.filter(u2 => u2.id !== selectedUser).map(u2 => ({ value: u2.id, label: `${u2.username} (${u2.email})` }))}
+              value={transferTarget}
+              onChange={e => setTransferTarget(e.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setShowTransfer(null)}>Cancel</Button>
+              <Button onClick={() => showTransfer && transferResource(showTransfer)} disabled={!transferTarget}>Transfer</Button>
+            </div>
+          </div>
+        </Modal>
+
+        {/* Import VM Modal */}
+        <Modal open={showImport} onClose={() => setShowImport(false)} title="Import Unmanaged VM" size="lg">
+          <div className="space-y-3">
+            {unmanagedVMs.length === 0 ? (
+              <p className="text-paws-text-muted text-center py-4">No unmanaged VMs found on the cluster.</p>
+            ) : (
+              <>
+                <p className="text-xs text-paws-text-muted">Select a VM/container from the cluster that is not currently tracked by PAWS.</p>
+                <div className="max-h-60 overflow-y-auto space-y-1">
+                  {unmanagedVMs.map(vm => (
+                    <div
+                      key={vm.vmid}
+                      className={`flex items-center justify-between px-3 py-2 rounded border cursor-pointer transition-colors ${
+                        importVmid === vm.vmid
+                          ? 'border-paws-primary bg-paws-primary/10'
+                          : 'border-paws-border bg-paws-card hover:border-paws-text-muted'
+                      }`}
+                      onClick={() => { setImportVmid(vm.vmid); setImportName(vm.name); }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Badge variant="default">{vm.type}</Badge>
+                        <span className="text-paws-text font-medium">{vm.name}</span>
+                        <span className="text-xs text-paws-text-muted">VMID {vm.vmid}</span>
+                        <span className="text-xs text-paws-text-muted">{vm.node}</span>
+                      </div>
+                      <StatusBadge status={vm.status} />
+                    </div>
+                  ))}
+                </div>
+                <Input label="Display Name (optional)" value={importName} onChange={e => setImportName(e.target.value)} />
+              </>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setShowImport(false)}>Cancel</Button>
+              <Button onClick={importVM} disabled={!importVmid}>Import</Button>
+            </div>
+          </div>
+        </Modal>
+      </div>
+    );
+  }
+
+  // --- Users Table ---
   const columns: Column<TableRow<UserData>>[] = [
-    { key: 'username', header: 'Username' },
+    {
+      key: 'username', header: 'Username',
+      render: (u) => (
+        <span className="text-paws-accent cursor-pointer hover:underline" onClick={() => selectUser(u.id)}>
+          {u.username}
+        </span>
+      ),
+    },
     { key: 'email', header: 'Email' },
     {
       key: 'role', header: 'Role',
@@ -446,6 +879,9 @@ function UsersTab() {
       key: 'actions', header: 'Actions',
       render: (u) => (
         <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => selectUser(u.id)}>
+            View
+          </Button>
           <Button variant="outline" size="sm" onClick={() => toggleActive(u.id, !u.is_active)}>
             {u.is_active ? 'Disable' : 'Enable'}
           </Button>
@@ -465,6 +901,193 @@ function UsersTab() {
 }
 
 // --- Templates Tab -------------------------------------------------------
+
+function GroupsTab() {
+  const toast = useToast();
+  const [groups, setGroups] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [selectedGroup, setSelectedGroup] = useState<any | null>(null);
+  const [groupDetail, setGroupDetail] = useState<any | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
+
+  const fetchGroups = async () => {
+    setLoading(true);
+    try {
+      const res = await api.get('/api/admin/groups/', { params: { page, per_page: 50, search } });
+      setGroups(res.data.items || []);
+      setTotalPages(res.data.pages || 1);
+    } catch {
+      toast.toast('Failed to load groups', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchGroups(); }, [page, search]);
+
+  const fetchGroupDetail = async (groupId: string) => {
+    try {
+      const res = await api.get(`/api/admin/groups/${groupId}`);
+      setGroupDetail(res.data);
+    } catch {
+      toast.toast('Failed to load group details', 'error');
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      await api.delete(`/api/admin/groups/${deleteTarget.id}`);
+      toast.toast('Group deleted', 'success');
+      setShowDeleteConfirm(false);
+      setDeleteTarget(null);
+      setSelectedGroup(null);
+      setGroupDetail(null);
+      fetchGroups();
+    } catch {
+      toast.toast('Failed to delete group', 'error');
+    }
+  };
+
+  if (selectedGroup && groupDetail) {
+    return (
+      <div className="space-y-4">
+        <Button variant="ghost" onClick={() => { setSelectedGroup(null); setGroupDetail(null); }}>
+          <ChevronLeft className="w-4 h-4 mr-1" /> Back to Groups
+        </Button>
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold">{groupDetail.name}</h3>
+            <p className="text-sm text-gray-400">{groupDetail.description || 'No description'}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="info">Owner: {groupDetail.owner?.username}</Badge>
+            <Button variant="danger" size="sm" onClick={() => { setDeleteTarget(groupDetail); setShowDeleteConfirm(true); }}>
+              <Trash2 className="w-4 h-4 mr-1" /> Delete Group
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <MetricCard label="Members" value={groupDetail.members?.length || 0} />
+          <MetricCard label="Shared Resources" value={groupDetail.shared_resources?.length || 0} />
+          <MetricCard label="Created" value={groupDetail.created_at ? new Date(groupDetail.created_at).toLocaleDateString() : 'N/A'} />
+        </div>
+
+        <Card>
+          <CardContent className="p-4">
+            <h4 className="font-medium mb-3">Members</h4>
+            {groupDetail.members?.length === 0 ? (
+              <p className="text-sm text-gray-400">No members</p>
+            ) : (
+              <div className="space-y-2">
+                {groupDetail.members?.map((m: any) => (
+                  <div key={m.user_id} className="flex items-center justify-between p-2 bg-gray-800/50 rounded">
+                    <div>
+                      <span className="font-medium">{m.username}</span>
+                      <span className="text-sm text-gray-400 ml-2">{m.email}</span>
+                    </div>
+                    <Badge variant={m.role === 'owner' ? 'primary' : m.role === 'admin' ? 'warning' : 'default'}>
+                      {m.role}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-4">
+            <h4 className="font-medium mb-3">Shared Resources</h4>
+            {groupDetail.shared_resources?.length === 0 ? (
+              <p className="text-sm text-gray-400">No shared resources</p>
+            ) : (
+              <div className="space-y-2">
+                {groupDetail.shared_resources?.map((s: any) => (
+                  <div key={s.id} className="flex items-center justify-between p-2 bg-gray-800/50 rounded">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="info">{s.entity_type}</Badge>
+                      <span className="text-sm font-mono text-gray-300">{s.entity_id.slice(0, 8)}...</span>
+                    </div>
+                    <Badge variant={s.permission === 'admin' ? 'danger' : s.permission === 'operate' ? 'warning' : 'default'}>
+                      {s.permission}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Modal open={showDeleteConfirm} onClose={() => setShowDeleteConfirm(false)} title="Delete Group">
+          <p className="text-sm text-gray-300 mb-4">
+            Are you sure you want to delete the group <strong>{deleteTarget?.name}</strong>? This will remove all members and shared resource associations. This action cannot be undone.
+          </p>
+          <div className="flex gap-2 justify-end">
+            <Button variant="ghost" onClick={() => setShowDeleteConfirm(false)}>Cancel</Button>
+            <Button variant="danger" onClick={handleDelete}>Delete Group</Button>
+          </div>
+        </Modal>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <Input
+            placeholder="Search groups..."
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            className="pl-9"
+          />
+        </div>
+        <Button variant="ghost" onClick={fetchGroups}><RefreshCw className="w-4 h-4" /></Button>
+      </div>
+
+      {loading ? (
+        <div className="text-center text-gray-400 py-8">Loading groups...</div>
+      ) : groups.length === 0 ? (
+        <div className="text-center text-gray-400 py-8">No groups found</div>
+      ) : (
+        <div className="space-y-2">
+          {groups.map((g) => (
+            <div key={g.id} className="cursor-pointer" onClick={() => { setSelectedGroup(g); fetchGroupDetail(g.id); }}>
+            <Card className="hover:border-blue-500/50 transition-colors">
+              <CardContent className="p-4 flex items-center justify-between">
+                <div>
+                  <div className="font-medium">{g.name}</div>
+                  <div className="text-sm text-gray-400">
+                    Owner: {g.owner?.username} | {g.member_count} members | {g.share_count} shared resources
+                  </div>
+                </div>
+                <div className="text-sm text-gray-500">
+                  {g.created_at ? new Date(g.created_at).toLocaleDateString() : ''}
+                </div>
+              </CardContent>
+            </Card>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2 mt-4">
+          <Button variant="ghost" size="sm" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</Button>
+          <span className="text-sm text-gray-400">Page {page} of {totalPages}</span>
+          <Button variant="ghost" size="sm" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>Next</Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TemplatesTab() {
   const [templates, setTemplates] = useState<Template[]>([]);

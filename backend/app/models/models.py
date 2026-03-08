@@ -834,3 +834,22 @@ class TierRequest(Base):
     user: Mapped["User"] = relationship(foreign_keys=[user_id], lazy="selectin")
     tier: Mapped["UserTier"] = relationship(lazy="selectin")
     reviewer: Mapped["User | None"] = relationship(foreign_keys=[reviewed_by], lazy="selectin")
+
+
+class GroupAPIKey(Base):
+    """API key scoped to a group's shared resources."""
+
+    __tablename__ = "group_api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    group_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("user_groups.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    group: Mapped["UserGroup"] = relationship(lazy="selectin")
+    creator: Mapped["User"] = relationship(lazy="selectin")

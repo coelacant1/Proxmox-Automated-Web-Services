@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.1 - 2026-03-08
+
+### Added
+
+- **Admin Groups Management** - System-wide group list with search, pagination, member/share counts, group detail view with members and shared resources, audit log per group, and admin force-delete with modal confirmation
+- **Group-Aware Resource Access** - Shared VPCs, security groups, and volumes can now be viewed/modified by group members according to their permission level (read/operate/admin)
+- **Modal Confirmations** - Replaced browser `confirm()` dialogs with styled modals for API key revoke, group token revoke, group delete, and member removal
+
+### Changed
+
+- Security group endpoints (`get`, `delete`, `add_rule`, `delete_rule`) now use `_get_user_sg()` with group access fallback instead of inline `owner_id` checks
+- Volume endpoints (`get`, `attach`, `detach`, `delete`, `resize`) now use `_get_user_volume()` with group access fallback
+- Admin panel tabs expanded with Groups tab between Users and Tiers
+
+### Fixed
+
+- Group members with appropriate permissions can now actually modify shared security groups and volumes (previously returned 404)
+- Revoked group API tokens now visually match revoked personal API keys (opacity + muted styling)
+
 ## 0.2.0
 
 ### Added

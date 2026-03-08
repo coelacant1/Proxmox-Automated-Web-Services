@@ -19,7 +19,7 @@ class APIKey(Base):
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    key_prefix: Mapped[str] = mapped_column(String(8), nullable=False)  # first 8 chars for display
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)  # first 12 chars for display
     key_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -57,3 +57,38 @@ async def verify_api_key(db: AsyncSession, raw_key: str) -> APIKey | None:
             await db.commit()
             return key
     return None
+
+
+async def verify_group_api_key(db: AsyncSession, raw_key: str):
+    """Look up and verify a group API key. Returns the GroupAPIKey record if valid."""
+    from app.models.models import GroupAPIKey
+
+    prefix = raw_key[:12]
+    result = await db.execute(
+        select(GroupAPIKey).where(GroupAPIKey.key_prefix == prefix, GroupAPIKey.is_active.is_(True))
+    )
+    keys = result.scalars().all()
+    for key in keys:
+        if verify_password(raw_key, key.key_hash):
+            key.last_used_at = func.now()
+            await db.commit()
+            return key
+    return None
+
+
+async def create_group_api_key(db: AsyncSession, group_id: uuid.UUID, user_id: uuid.UUID, name: str):
+    """Create a group-scoped API key. Returns (GroupAPIKey record, raw key)."""
+    from app.models.models import GroupAPIKey
+
+    raw_key = generate_api_key()
+    key_record = GroupAPIKey(
+        group_id=group_id,
+        created_by=user_id,
+        name=name,
+        key_prefix=raw_key[:12],
+        key_hash=hash_password(raw_key),
+    )
+    db.add(key_record)
+    await db.commit()
+    await db.refresh(key_record)
+    return key_record, raw_key

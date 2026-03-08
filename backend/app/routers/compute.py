@@ -20,6 +20,7 @@ from app.services.audit_service import log_action
 from app.services.node_service import get_next_vmid, select_node
 from app.services.proxmox_client import proxmox_client
 from app.services.pbs_client import pbs_client
+from app.services.pool_service import ensure_user_pool, add_resource_to_pool, cleanup_user_pool
 
 logger = logging.getLogger(__name__)
 from app.services.rate_limiter import check_action_rate_limit
@@ -211,6 +212,13 @@ async def create_vm(
 
     await db.commit()
 
+    # Assign to Proxmox pool for cluster-side management
+    try:
+        await ensure_user_pool(db, user)
+        await add_resource_to_pool(db, user, new_vmid)
+    except Exception:
+        pass  # Best-effort pool assignment
+
     # Migrate to target node if template was on a different node
     if needs_migration:
         try:
@@ -369,7 +377,7 @@ async def vm_action(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
     node, vmid = resource.proxmox_node, resource.proxmox_vmid
     rtype = resource.resource_type
 
@@ -412,7 +420,7 @@ async def delete_vm(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     if resource.termination_protected:
         raise HTTPException(status_code=403, detail="Termination protection is enabled. Disable it first.")
     return await _terminate_vm(db, user, resource)
@@ -425,7 +433,7 @@ async def set_vm_termination_protection(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     resource.termination_protected = body.enabled
     await db.commit()
     return {"termination_protected": body.enabled}
@@ -439,7 +447,7 @@ async def resize_vm(
     user: User = Depends(get_current_active_user),
 ):
     """Resize CPU/RAM on a stopped VM."""
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     if resource.status not in ("stopped", "creating"):
         raise HTTPException(status_code=409, detail="VM must be stopped to resize")
 
@@ -483,7 +491,7 @@ async def vm_console(
     """Get VNC or terminal proxy ticket for a VM.
     Returns ticket, port, and the Proxmox websocket URL to connect to.
     """
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
         if console_type == "terminal":
@@ -540,7 +548,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
     # Look up the resource
     try:
         async for db in get_db():
-            resource = await _get_user_resource(db, user.id, resource_id, "vm")
+            resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
             break
     except Exception as e:
         print(f"[CONSOLE] Resource lookup failed: {e}", flush=True)
@@ -741,7 +749,7 @@ async def create_vm_snapshot(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
         upid = proxmox_client.create_snapshot(
@@ -760,7 +768,7 @@ async def rollback_vm_snapshot(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
         upid = proxmox_client.rollback_snapshot(
@@ -779,7 +787,7 @@ async def delete_vm_snapshot(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
         upid = proxmox_client.delete_snapshot(
@@ -880,7 +888,7 @@ async def update_vm_network(
     user: User = Depends(get_current_active_user),
 ):
     """Update a VM's network interface to use a specific user VPC."""
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
     # Validate the VPC belongs to this user
     from app.models.models import VPC
@@ -1027,7 +1035,7 @@ async def create_vm_backup(
     """Create a backup of a VM. Auto-creates PBS namespace for user isolation."""
     import json as _json
     from typing import Any as _Any
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
 
     # Validate storage against admin-configured list
     result = await db.execute(
@@ -1080,7 +1088,7 @@ async def delete_vm_backup(
     user: User = Depends(get_current_active_user),
 ):
     """Delete a backup file via PVE API."""
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
     try:
         proxmox_client.delete_storage_content(resource.proxmox_node, body.storage, body.volid)
@@ -1104,7 +1112,7 @@ async def restore_vm_backup(
     user: User = Depends(get_current_active_user),
 ):
     """Restore a VM from a backup (overwrites current state)."""
-    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
@@ -1293,6 +1301,13 @@ async def create_container(
         await db.commit()
         await log_action(db, user.id, "container_create", "lxc", resource.id, {"vmid": new_vmid})
 
+        # Assign to Proxmox pool
+        try:
+            await ensure_user_pool(db, user)
+            await add_resource_to_pool(db, user, new_vmid)
+        except Exception:
+            pass
+
         # Migrate to target node if cloned on a different node
         if body.template_vmid and needs_migration:
             try:
@@ -1394,7 +1409,7 @@ async def container_action(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "lxc")
+    resource = await _get_user_resource(db, user.id, resource_id, "lxc", min_group_perm="operate")
     node, vmid = resource.proxmox_node, resource.proxmox_vmid
 
     actions = {
@@ -1419,7 +1434,7 @@ async def delete_container(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    resource = await _get_user_resource(db, user.id, resource_id, "lxc")
+    resource = await _get_user_resource(db, user.id, resource_id, "lxc", min_group_perm="admin")
     try:
         proxmox_client.stop_container(resource.proxmox_node, resource.proxmox_vmid)
     except Exception:
@@ -1479,17 +1494,33 @@ async def _get_vmid_range(db: AsyncSession) -> tuple[int, int]:
     return start, end
 
 
-async def _get_user_resource(db: AsyncSession, user_id: uuid.UUID, resource_id: str, resource_type: str) -> Resource:
-    query = select(Resource).where(
-        Resource.id == uuid.UUID(resource_id), Resource.owner_id == user_id,
-    )
-    # VM endpoints should also find LXC resources (unified instance management)
+async def _get_user_resource(
+    db: AsyncSession, user_id: uuid.UUID, resource_id: str, resource_type: str,
+    min_group_perm: str = "read",
+) -> Resource:
+    rid = uuid.UUID(resource_id)
+    # First try ownership
+    query = select(Resource).where(Resource.id == rid, Resource.owner_id == user_id)
     if resource_type == "vm":
         query = query.where(Resource.resource_type.in_(["vm", "lxc"]))
     else:
         query = query.where(Resource.resource_type == resource_type)
     result = await db.execute(query)
     resource = result.scalar_one_or_none()
+
+    # Fall back to group-level access
+    if not resource:
+        from app.services.group_access import check_group_access
+        base = select(Resource).where(Resource.id == rid)
+        if resource_type == "vm":
+            base = base.where(Resource.resource_type.in_(["vm", "lxc"]))
+        else:
+            base = base.where(Resource.resource_type == resource_type)
+        res2 = await db.execute(base)
+        resource = res2.scalar_one_or_none()
+        if resource and not await check_group_access(db, user_id, "resource", rid, min_group_perm):
+            resource = None
+
     if not resource:
         raise HTTPException(status_code=404, detail="Resource not found")
     if resource.status == "destroyed":
@@ -1591,6 +1622,13 @@ async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dic
     await db.delete(resource)
     await db.commit()
     await log_action(db, user.id, f"{resource.resource_type}_delete", resource.resource_type, details={"vmid": old_vmid})
+
+    # Clean up Proxmox pool if user has no remaining VMs/LXCs
+    try:
+        await cleanup_user_pool(db, user)
+    except Exception:
+        pass
+
     return {"status": "destroyed"}
 
 

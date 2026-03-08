@@ -165,14 +165,9 @@ async def get_security_group(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(
-        select(SecurityGroup)
-        .where(SecurityGroup.id == sg_id, SecurityGroup.owner_id == user.id)
-        .options(selectinload(SecurityGroup.rules))
-    )
-    sg = result.scalar_one_or_none()
-    if not sg:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Security group not found")
+    sg = await _get_user_sg(db, user.id, sg_id)
+    # Reload with rules
+    await db.refresh(sg, ["rules"])
     return sg
 
 
@@ -182,13 +177,7 @@ async def delete_security_group(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(
-        select(SecurityGroup).where(SecurityGroup.id == sg_id, SecurityGroup.owner_id == user.id)
-    )
-    sg = result.scalar_one_or_none()
-    if not sg:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Security group not found")
-
+    sg = await _get_user_sg(db, user.id, sg_id, min_perm="admin")
     await db.delete(sg)
     await db.commit()
 
@@ -203,12 +192,7 @@ async def add_rule(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(
-        select(SecurityGroup).where(SecurityGroup.id == sg_id, SecurityGroup.owner_id == user.id)
-    )
-    sg = result.scalar_one_or_none()
-    if not sg:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Security group not found")
+    sg = await _get_user_sg(db, user.id, sg_id, min_perm="admin")
 
     if body.direction not in ("ingress", "egress"):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Direction must be ingress/egress")
@@ -229,12 +213,7 @@ async def delete_rule(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    # Verify ownership
-    result = await db.execute(
-        select(SecurityGroup).where(SecurityGroup.id == sg_id, SecurityGroup.owner_id == user.id)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Security group not found")
+    await _get_user_sg(db, user.id, sg_id, min_perm="admin")
 
     rule_result = await db.execute(
         select(SecurityGroupRule).where(SecurityGroupRule.id == rule_id, SecurityGroupRule.security_group_id == sg_id)
@@ -336,11 +315,20 @@ async def list_attached_resources(
 # --- Helpers ---
 
 
-async def _get_user_sg(db: AsyncSession, user_id: uuid.UUID, sg_id: str) -> SecurityGroup:
+async def _get_user_sg(
+    db: AsyncSession, user_id: uuid.UUID, sg_id: str, min_perm: str = "read",
+) -> SecurityGroup:
+    sid = uuid.UUID(sg_id) if isinstance(sg_id, str) else sg_id
     result = await db.execute(
-        select(SecurityGroup).where(SecurityGroup.id == sg_id, SecurityGroup.owner_id == user_id)
+        select(SecurityGroup).where(SecurityGroup.id == sid, SecurityGroup.owner_id == user_id)
     )
     sg = result.scalar_one_or_none()
+    if not sg:
+        from app.services.group_access import check_group_access
+        res2 = await db.execute(select(SecurityGroup).where(SecurityGroup.id == sid))
+        sg = res2.scalar_one_or_none()
+        if sg and not await check_group_access(db, user_id, "security_group", sid, min_perm):
+            sg = None
     if not sg:
         raise HTTPException(status_code=404, detail="Security group not found")
     return sg

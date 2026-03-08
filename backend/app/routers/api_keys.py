@@ -1,6 +1,7 @@
 """API key management endpoints."""
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -24,8 +25,8 @@ class APIKeyRead(BaseModel):
     name: str
     key_prefix: str
     is_active: bool
-    created_at: str
-    last_used_at: str | None
+    created_at: datetime
+    last_used_at: datetime | None
 
     model_config = {"from_attributes": True}
 
@@ -46,8 +47,8 @@ async def create_key(
         name=key_record.name,
         key_prefix=key_record.key_prefix,
         is_active=key_record.is_active,
-        created_at=str(key_record.created_at),
-        last_used_at=str(key_record.last_used_at) if key_record.last_used_at else None,
+        created_at=key_record.created_at,
+        last_used_at=key_record.last_used_at,
         raw_key=raw_key,
     )
 

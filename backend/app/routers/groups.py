@@ -14,6 +14,7 @@ from app.models.models import (
     Alarm,
     Backup,
     DNSRecord,
+    GroupAPIKey,
     GroupResourceShare,
     GroupRole,
     Resource,
@@ -233,7 +234,15 @@ async def get_group(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    group, _ = await _get_group_with_access(group_id, user, db)
+    group, membership = await _get_group_with_access(group_id, user, db)
+
+    my_role = "viewer"
+    if group.owner_id == user.id:
+        my_role = GroupRole.OWNER
+    elif user.role == "admin" or user.is_superuser:
+        my_role = GroupRole.ADMIN
+    elif membership:
+        my_role = membership.role
 
     members = []
     for m in group.members:
@@ -246,7 +255,9 @@ async def get_group(
             "joined_at": m.joined_at.isoformat() if m.joined_at else None,
         })
 
-    return _group_dict(group, members=members)
+    result = _group_dict(group, members=members)
+    result["my_role"] = my_role
+    return result
 
 
 @router.patch("/{group_id}")
@@ -491,4 +502,169 @@ async def list_shared_resources(
             "created_at": s.created_at.isoformat() if s.created_at else None,
         })
     return out
+
+
+# --- Detailed entity data for group dashboard ---
+
+# Define which fields to serialize for each entity type
+_ENTITY_DETAIL_FIELDS: dict[str, list[str]] = {
+    "resource": ["resource_type", "status", "proxmox_vmid", "proxmox_node", "specs", "tags"],
+    "vpc": ["cidr", "gateway", "status", "dhcp_enabled", "is_default"],
+    "volume": ["size_gib", "storage_pool", "status", "disk_slot", "proxmox_node"],
+    "bucket": ["region", "size_bytes", "object_count", "versioning_enabled", "is_public"],
+    "endpoint": ["protocol", "internal_port", "subdomain", "domain_suffix", "is_active", "tls_enabled"],
+    "ssh_key": ["fingerprint"],
+    "security_group": ["description"],
+    "dns_record": ["record_type", "value", "ttl"],
+    "backup": ["backup_type", "status", "size_bytes", "proxmox_storage", "started_at", "completed_at"],
+    "alarm": ["metric", "comparison", "threshold", "state", "is_active"],
+}
+
+
+def _serialize_field(val: Any) -> Any:
+    if val is None:
+        return None
+    if isinstance(val, uuid.UUID):
+        return str(val)
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return val
+
+
+@router.get("/{group_id}/dashboard")
+async def group_dashboard(
+    group_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Return all shared entities with full details, grouped by type."""
+    await _get_group_with_access(group_id, user, db)
+
+    result = await db.execute(
+        select(GroupResourceShare).where(GroupResourceShare.group_id == group_id)
+    )
+    shares = result.scalars().all()
+
+    by_type: dict[str, list[dict]] = {}
+    for s in shares:
+        cfg = ENTITY_TYPES.get(s.entity_type)
+        if not cfg:
+            continue
+        entity = await db.get(cfg["model"], s.entity_id)
+        name_field = cfg["name"]
+        name = str(getattr(entity, name_field, None) or f"{cfg['label']} {str(s.entity_id)[:8]}") if entity else "(deleted)"
+
+        item: dict[str, Any] = {
+            "share_id": str(s.id),
+            "entity_id": str(s.entity_id),
+            "entity_name": name,
+            "permission": s.permission,
+            "shared_by": str(s.shared_by),
+        }
+
+        if entity:
+            for field in _ENTITY_DETAIL_FIELDS.get(s.entity_type, []):
+                item[field] = _serialize_field(getattr(entity, field, None))
+
+        by_type.setdefault(s.entity_type, []).append(item)
+
+    return {
+        "types": {
+            etype: {"label": cfg["label"], "items": by_type.get(etype, [])}
+            for etype, cfg in ENTITY_TYPES.items()
+            if etype in by_type
+        }
+    }
+
+
+# ─── Group API Tokens ────────────────────────────────────────────────────
+
+
+class GroupTokenCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class GroupTokenRead(BaseModel):
+    id: str
+    name: str
+    key_prefix: str
+    is_active: bool
+    created_by_username: str
+    created_at: str
+    last_used_at: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class GroupTokenCreated(GroupTokenRead):
+    raw_key: str
+
+
+@router.get("/{group_id}/tokens", response_model=list[GroupTokenRead])
+async def list_group_tokens(
+    group_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """List API tokens for a group. Must be group admin or owner."""
+    member = await _get_group_with_access(group_id, user, db, min_role=GroupRole.ADMIN)  # noqa: F841
+    result = await db.execute(
+        select(GroupAPIKey).where(GroupAPIKey.group_id == group_id).order_by(GroupAPIKey.created_at.desc())
+    )
+    keys = result.scalars().all()
+    return [
+        GroupTokenRead(
+            id=str(k.id),
+            name=k.name,
+            key_prefix=k.key_prefix,
+            is_active=k.is_active,
+            created_by_username=k.creator.username if k.creator else "unknown",
+            created_at=str(k.created_at),
+            last_used_at=str(k.last_used_at) if k.last_used_at else None,
+        )
+        for k in keys
+    ]
+
+
+@router.post("/{group_id}/tokens", response_model=GroupTokenCreated, status_code=201)
+async def create_group_token(
+    group_id: uuid.UUID,
+    body: GroupTokenCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Create a group-scoped API token. Must be group admin or owner."""
+    member = await _get_group_with_access(group_id, user, db, min_role=GroupRole.ADMIN)  # noqa: F841
+    from app.services.api_key_service import create_group_api_key
+
+    key_record, raw_key = await create_group_api_key(db, group_id, user.id, body.name)
+    return GroupTokenCreated(
+        id=str(key_record.id),
+        name=key_record.name,
+        key_prefix=key_record.key_prefix,
+        is_active=key_record.is_active,
+        created_by_username=user.username,
+        created_at=str(key_record.created_at),
+        last_used_at=None,
+        raw_key=raw_key,
+    )
+
+
+@router.delete("/{group_id}/tokens/{token_id}", status_code=204)
+async def revoke_group_token(
+    group_id: uuid.UUID,
+    token_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Revoke a group API token. Must be group admin or owner."""
+    member = await _get_group_with_access(group_id, user, db, min_role=GroupRole.ADMIN)  # noqa: F841
+    result = await db.execute(
+        select(GroupAPIKey).where(GroupAPIKey.id == token_id, GroupAPIKey.group_id == group_id)
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        raise HTTPException(status_code=404, detail="Token not found")
+    key.is_active = False
+    await db.commit()
 

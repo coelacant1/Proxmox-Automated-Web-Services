@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, Monitor, Terminal, Maximize, Minimize, Cloud, RotateCcw,
   Play, Square, Power, Trash2, Clock, Shield, Globe,
@@ -46,7 +46,15 @@ interface NetInterface { [key: string]: string; }
 export default function InstanceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
+
+  // Permission from group sharing (undefined = owner/full access)
+  const groupPermission: string | undefined = (location.state as any)?.groupPermission;
+  const isReadOnly = groupPermission === 'read';
+  const canOperate = !groupPermission || groupPermission === 'operate' || groupPermission === 'admin';
+  const canAdmin = !groupPermission || groupPermission === 'admin';
+
   const [inst, setInst] = useState<Instance | null>(null);
   const [tab, setTab] = useState('overview');
   const [loading, setLoading] = useState(true);
@@ -743,29 +751,38 @@ export default function InstanceDetail() {
           </p>
         </div>
         <div className="flex gap-1.5">
-          <Button variant="outline" size="sm" onClick={() => doAction('start')}
-            disabled={vmStatus === 'running' || actionLoading !== null} title="Start">
-            <Play className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => doAction('shutdown')}
-            disabled={vmStatus === 'stopped' || actionLoading !== null} title="Graceful Shutdown">
-            <Square className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="sm"
-            onClick={() => confirmAction('stop', 'Force Stop', `Force stop "${inst.display_name}"? This is equivalent to pulling the power cord and may cause data loss.`)}
-            disabled={vmStatus === 'stopped' || actionLoading !== null} title="Force Stop">
-            <Power className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => doAction('reboot')}
-            disabled={vmStatus === 'stopped' || actionLoading !== null} title="Reboot">
-            <RotateCcw className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => setShowResize(true)} title="Resize">
-            <Maximize className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => setShowCloudInit(true)} title="Cloud-Init">
-            <Cloud className="h-3.5 w-3.5" />
-          </Button>
+          {isReadOnly && <Badge variant="info">Read Only</Badge>}
+          {canOperate && (
+            <>
+              <Button variant="outline" size="sm" onClick={() => doAction('start')}
+                disabled={vmStatus === 'running' || actionLoading !== null} title="Start">
+                <Play className="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => doAction('shutdown')}
+                disabled={vmStatus === 'stopped' || actionLoading !== null} title="Graceful Shutdown">
+                <Square className="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="outline" size="sm"
+                onClick={() => confirmAction('stop', 'Force Stop', `Force stop "${inst.display_name}"? This is equivalent to pulling the power cord and may cause data loss.`)}
+                disabled={vmStatus === 'stopped' || actionLoading !== null} title="Force Stop">
+                <Power className="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => doAction('reboot')}
+                disabled={vmStatus === 'stopped' || actionLoading !== null} title="Reboot">
+                <RotateCcw className="h-3.5 w-3.5" />
+              </Button>
+            </>
+          )}
+          {canAdmin && (
+            <>
+              <Button variant="outline" size="sm" onClick={() => setShowResize(true)} title="Resize">
+                <Maximize className="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setShowCloudInit(true)} title="Cloud-Init">
+                <Cloud className="h-3.5 w-3.5" />
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -1274,106 +1291,119 @@ export default function InstanceDetail() {
       {/* Lifecycle */}
       {tab === 'lifecycle' && (
         <div className="space-y-4">
-          <Card>
-            <CardHeader><CardTitle>Power Actions</CardTitle></CardHeader>
-            <CardContent className="flex flex-wrap gap-3">
-              <Button variant="outline" onClick={() => doAction('start')}
-                disabled={vmStatus === 'running' || actionLoading !== null}>
-                <Play className="h-4 w-4 mr-1" /> {actionLoading === 'start' ? 'Starting...' : 'Start'}
-              </Button>
-              <Button variant="outline" onClick={() => doAction('shutdown')}
-                disabled={vmStatus === 'stopped' || actionLoading !== null}>
-                <Square className="h-4 w-4 mr-1" /> {actionLoading === 'shutdown' ? 'Shutting down...' : 'Graceful Shutdown'}
-              </Button>
-              <Button variant="outline"
-                onClick={() => confirmAction('stop', 'Force Stop', `Force stop "${inst.display_name}"? This is equivalent to pulling the power cord and may cause data loss.`)}
-                disabled={vmStatus === 'stopped' || actionLoading !== null}>
-                <Power className="h-4 w-4 mr-1" /> {actionLoading === 'stop' ? 'Stopping...' : 'Force Stop'}
-              </Button>
-              <Button variant="outline" onClick={() => doAction('reboot')}
-                disabled={vmStatus === 'stopped' || actionLoading !== null}>
-                <RotateCcw className="h-4 w-4 mr-1" /> {actionLoading === 'reboot' ? 'Rebooting...' : 'Reboot'}
-              </Button>
-              <Button variant="outline" onClick={() => doAction('suspend')}
-                disabled={vmStatus !== 'running' || actionLoading !== null}>
-                <Clock className="h-4 w-4 mr-1" /> {actionLoading === 'suspend' ? 'Suspending...' : 'Suspend'}
-              </Button>
-              <Button variant="outline" onClick={() => doAction('resume')}
-                disabled={vmStatus !== 'suspended' || actionLoading !== null}>
-                <Play className="h-4 w-4 mr-1" /> {actionLoading === 'resume' ? 'Resuming...' : 'Resume'}
-              </Button>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader><CardTitle>Configuration</CardTitle></CardHeader>
-            <CardContent className="flex flex-wrap gap-3">
-              <Button variant="outline" onClick={() => setShowResize(true)}>
-                <Maximize className="h-4 w-4 mr-1" /> Resize
-              </Button>
-              <Button variant="outline" onClick={() => setShowCloudInit(true)}>
-                <Cloud className="h-4 w-4 mr-1" /> Cloud-Init
-              </Button>
-              <Button variant="outline" onClick={async () => {
-                if (!id || !inst) return;
-                try {
-                  await api.post('/api/templates/request', {
-                    resource_id: id,
-                    name: inst.display_name + ' Template',
-                    description: `Template from ${inst.display_name}`,
-                    category: inst.resource_type || 'vm',
-                    os_type: 'linux',
-                    min_cpu: inst.specs?.cores || 1,
-                    min_ram_mb: inst.specs?.memory_mb || 512,
-                    min_disk_gb: inst.specs?.disk_gb || 10,
-                  });
-                  toast('Template request submitted for admin review', 'success');
-                } catch (e: any) {
-                  const d = e?.response?.data?.detail;
-                  toast(typeof d === 'string' ? d : 'Failed to request template', 'error');
-                }
-              }}>
-                <Camera className="h-4 w-4 mr-1" /> Request as Template
-              </Button>
-            </CardContent>
-          </Card>
+          {isReadOnly && (
+            <Card><CardContent>
+              <p className="text-sm text-paws-text-muted italic">You have read-only access to this instance via group sharing.</p>
+            </CardContent></Card>
+          )}
+          {canOperate && (
+            <Card>
+              <CardHeader><CardTitle>Power Actions</CardTitle></CardHeader>
+              <CardContent className="flex flex-wrap gap-3">
+                <Button variant="outline" onClick={() => doAction('start')}
+                  disabled={vmStatus === 'running' || actionLoading !== null}>
+                  <Play className="h-4 w-4 mr-1" /> {actionLoading === 'start' ? 'Starting...' : 'Start'}
+                </Button>
+                <Button variant="outline" onClick={() => doAction('shutdown')}
+                  disabled={vmStatus === 'stopped' || actionLoading !== null}>
+                  <Square className="h-4 w-4 mr-1" /> {actionLoading === 'shutdown' ? 'Shutting down...' : 'Graceful Shutdown'}
+                </Button>
+                <Button variant="outline"
+                  onClick={() => confirmAction('stop', 'Force Stop', `Force stop "${inst.display_name}"? This is equivalent to pulling the power cord and may cause data loss.`)}
+                  disabled={vmStatus === 'stopped' || actionLoading !== null}>
+                  <Power className="h-4 w-4 mr-1" /> {actionLoading === 'stop' ? 'Stopping...' : 'Force Stop'}
+                </Button>
+                <Button variant="outline" onClick={() => doAction('reboot')}
+                  disabled={vmStatus === 'stopped' || actionLoading !== null}>
+                  <RotateCcw className="h-4 w-4 mr-1" /> {actionLoading === 'reboot' ? 'Rebooting...' : 'Reboot'}
+                </Button>
+                <Button variant="outline" onClick={() => doAction('suspend')}
+                  disabled={vmStatus !== 'running' || actionLoading !== null}>
+                  <Clock className="h-4 w-4 mr-1" /> {actionLoading === 'suspend' ? 'Suspending...' : 'Suspend'}
+                </Button>
+                <Button variant="outline" onClick={() => doAction('resume')}
+                  disabled={vmStatus !== 'suspended' || actionLoading !== null}>
+                  <Play className="h-4 w-4 mr-1" /> {actionLoading === 'resume' ? 'Resuming...' : 'Resume'}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+          {canAdmin && (
+            <Card>
+              <CardHeader><CardTitle>Configuration</CardTitle></CardHeader>
+              <CardContent className="flex flex-wrap gap-3">
+                <Button variant="outline" onClick={() => setShowResize(true)}>
+                  <Maximize className="h-4 w-4 mr-1" /> Resize
+                </Button>
+                <Button variant="outline" onClick={() => setShowCloudInit(true)}>
+                  <Cloud className="h-4 w-4 mr-1" /> Cloud-Init
+                </Button>
+                <Button variant="outline" onClick={async () => {
+                  if (!id || !inst) return;
+                  try {
+                    await api.post('/api/templates/request', {
+                      resource_id: id,
+                      name: inst.display_name + ' Template',
+                      description: `Template from ${inst.display_name}`,
+                      category: inst.resource_type || 'vm',
+                      os_type: 'linux',
+                      min_cpu: inst.specs?.cores || 1,
+                      min_ram_mb: inst.specs?.memory_mb || 512,
+                      min_disk_gb: inst.specs?.disk_gb || 10,
+                    });
+                    toast('Template request submitted for admin review', 'success');
+                  } catch (e: any) {
+                    const d = e?.response?.data?.detail;
+                    toast(typeof d === 'string' ? d : 'Failed to request template', 'error');
+                  }
+                }}>
+                  <Camera className="h-4 w-4 mr-1" /> Request as Template
+                </Button>
+              </CardContent>
+            </Card>
+          )}
           {/* High Availability */}
-          <Card>
-            <CardHeader><CardTitle className="flex items-center gap-2"><Shield className="h-4 w-4" /> High Availability</CardTitle></CardHeader>
-            <CardContent>
-              {haStatus === null ? (
-                <p className="text-paws-text-muted text-sm">Loading HA status...</p>
-              ) : haStatus.enabled ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Badge variant="success">HA Enabled</Badge>
-                    {haStatus.state && <span className="text-sm text-paws-text-muted">State: {haStatus.state}</span>}
-                    {haStatus.group && <span className="text-sm text-paws-text-muted">Group: {haStatus.group}</span>}
+          {canAdmin && (
+            <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><Shield className="h-4 w-4" /> High Availability</CardTitle></CardHeader>
+              <CardContent>
+                {haStatus === null ? (
+                  <p className="text-paws-text-muted text-sm">Loading HA status...</p>
+                ) : haStatus.enabled ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="success">HA Enabled</Badge>
+                      {haStatus.state && <span className="text-sm text-paws-text-muted">State: {haStatus.state}</span>}
+                      {haStatus.group && <span className="text-sm text-paws-text-muted">Group: {haStatus.group}</span>}
+                    </div>
+                    <Button variant="outline" size="sm" onClick={disableHA} disabled={haLoading}>
+                      {haLoading ? 'Disabling...' : 'Disable HA'}
+                    </Button>
                   </div>
-                  <Button variant="outline" size="sm" onClick={disableHA} disabled={haLoading}>
-                    {haLoading ? 'Disabling...' : 'Disable HA'}
-                  </Button>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <p className="text-paws-text-muted text-sm">HA is not enabled for this instance.</p>
-                  {haGroups.length > 0 && (
-                    <Select label="HA Group (optional)" placeholder="Auto-assign" options={[{ value: '', label: 'Auto-assign' }, ...haGroups.map(g => ({ value: g.id, label: g.name }))]} value={haGroupId} onChange={e => setHaGroupId(e.target.value)} />
-                  )}
-                  <Button size="sm" onClick={enableHA} disabled={haLoading}>
-                    {haLoading ? 'Enabling...' : 'Enable HA'}
-                  </Button>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader><CardTitle className="text-paws-danger">Danger Zone</CardTitle></CardHeader>
-            <CardContent>
-              <Button variant="danger" onClick={() => setShowDestroy(true)}>
-                <Trash2 className="h-4 w-4 mr-1" /> Destroy Instance
-              </Button>
-            </CardContent>
-          </Card>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-paws-text-muted text-sm">HA is not enabled for this instance.</p>
+                    {haGroups.length > 0 && (
+                      <Select label="HA Group (optional)" placeholder="Auto-assign" options={[{ value: '', label: 'Auto-assign' }, ...haGroups.map(g => ({ value: g.id, label: g.name }))]} value={haGroupId} onChange={e => setHaGroupId(e.target.value)} />
+                    )}
+                    <Button size="sm" onClick={enableHA} disabled={haLoading}>
+                      {haLoading ? 'Enabling...' : 'Enable HA'}
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+          {canAdmin && (
+            <Card>
+              <CardHeader><CardTitle className="text-paws-danger">Danger Zone</CardTitle></CardHeader>
+              <CardContent>
+                <Button variant="danger" onClick={() => setShowDestroy(true)}>
+                  <Trash2 className="h-4 w-4 mr-1" /> Destroy Instance
+                </Button>
+              </CardContent>
+            </Card>
+          )}
         </div>
       )}
 

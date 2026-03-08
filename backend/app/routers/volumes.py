@@ -7,6 +7,7 @@ to virtual machines.  They can be detached and re-attached to other VMs.
 import json
 import logging
 import re
+import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -87,6 +88,24 @@ async def _get_vm_resource(
             detail="VM not found or not owned by you",
         )
     return resource
+
+
+async def _get_user_volume(
+    db: AsyncSession, user_id: _uuid.UUID, volume_id: str, min_perm: str = "read",
+) -> Volume:
+    """Get a volume by ownership or group share."""
+    vid = _uuid.UUID(volume_id) if isinstance(volume_id, str) else volume_id
+    result = await db.execute(select(Volume).where(Volume.id == vid, Volume.owner_id == user_id))
+    vol = result.scalar_one_or_none()
+    if not vol:
+        from app.services.group_access import check_group_access
+        res2 = await db.execute(select(Volume).where(Volume.id == vid))
+        vol = res2.scalar_one_or_none()
+        if vol and not await check_group_access(db, user_id, "volume", vid, min_perm):
+            vol = None
+    if not vol:
+        raise HTTPException(status_code=404, detail="Volume not found")
+    return vol
 
 
 def _enrich_volume(vol: Volume, db_resources: dict | None = None) -> dict:
@@ -212,10 +231,7 @@ async def get_volume(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(select(Volume).where(Volume.id == volume_id, Volume.owner_id == user.id))
-    vol = result.scalar_one_or_none()
-    if not vol:
-        raise HTTPException(status_code=404, detail="Volume not found")
+    vol = await _get_user_volume(db, user.id, volume_id)
     return _enrich_volume(vol)
 
 
@@ -226,8 +242,7 @@ async def detach_volume(
     user: User = Depends(get_current_active_user),
 ):
     """Detach disk from VM. Disk stays on storage as an unused volume."""
-    vol_result = await db.execute(select(Volume).where(Volume.id == volume_id, Volume.owner_id == user.id))
-    vol = vol_result.scalar_one_or_none()
+    vol = await _get_user_volume(db, user.id, volume_id, min_perm="admin")
     if not vol:
         raise HTTPException(status_code=404, detail="Volume not found")
     if vol.status != "attached" or not vol.disk_slot:
@@ -281,10 +296,7 @@ async def attach_volume(
     user: User = Depends(get_current_active_user),
 ):
     """Attach an available volume to a VM."""
-    vol_result = await db.execute(select(Volume).where(Volume.id == volume_id, Volume.owner_id == user.id))
-    vol = vol_result.scalar_one_or_none()
-    if not vol:
-        raise HTTPException(status_code=404, detail="Volume not found")
+    vol = await _get_user_volume(db, user.id, volume_id, min_perm="admin")
     if vol.status != "available":
         raise HTTPException(status_code=400, detail="Volume is not available for attachment")
     if not vol.proxmox_volid or not vol.proxmox_owner_vmid:
@@ -366,10 +378,7 @@ async def delete_volume(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    vol_result = await db.execute(select(Volume).where(Volume.id == volume_id, Volume.owner_id == user.id))
-    vol = vol_result.scalar_one_or_none()
-    if not vol:
-        raise HTTPException(status_code=404, detail="Volume not found")
+    vol = await _get_user_volume(db, user.id, volume_id, min_perm="admin")
     if vol.status == "attached":
         raise HTTPException(status_code=400, detail="Detach volume before deleting")
 
@@ -408,10 +417,7 @@ async def resize_volume(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    vol_result = await db.execute(select(Volume).where(Volume.id == volume_id, Volume.owner_id == user.id))
-    vol = vol_result.scalar_one_or_none()
-    if not vol:
-        raise HTTPException(status_code=404, detail="Volume not found")
+    vol = await _get_user_volume(db, user.id, volume_id, min_perm="admin")
     if vol.status != "attached" or not vol.disk_slot:
         raise HTTPException(status_code=400, detail="Volume must be attached to a VM to resize")
     if body.size_gib <= vol.size_gib:
