@@ -119,6 +119,11 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
+    # Track impersonation context so middleware / audit can distinguish
+    impersonator_id = payload.get("impersonating")
+    if impersonator_id:
+        request.state.impersonated_by = impersonator_id
+
     return user
 
 

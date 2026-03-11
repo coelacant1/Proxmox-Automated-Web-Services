@@ -33,6 +33,9 @@ class TierCreate(BaseModel):
     description: str | None = None
     capabilities: list[str] = []
     is_default: bool = False
+    idle_shutdown_days: int | None = None
+    idle_destroy_days: int | None = None
+    account_inactive_days: int | None = None
 
 
 class TierUpdate(BaseModel):
@@ -40,6 +43,23 @@ class TierUpdate(BaseModel):
     description: str | None = None
     capabilities: list[str] | None = None
     is_default: bool | None = None
+    idle_shutdown_days: int | None = Field(None)
+    idle_destroy_days: int | None = Field(None)
+    account_inactive_days: int | None = Field(None)
+
+
+def _tier_dict(t: UserTier) -> dict:
+    return {
+        "id": str(t.id),
+        "name": t.name,
+        "description": t.description,
+        "capabilities": json.loads(t.capabilities),
+        "is_default": t.is_default,
+        "idle_shutdown_days": t.idle_shutdown_days,
+        "idle_destroy_days": t.idle_destroy_days,
+        "account_inactive_days": t.account_inactive_days,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+    }
 
 
 @router.get("/capabilities")
@@ -55,17 +75,7 @@ async def list_tiers(
 ):
     result = await db.execute(select(UserTier).order_by(UserTier.name))
     tiers = result.scalars().all()
-    return [
-        {
-            "id": str(t.id),
-            "name": t.name,
-            "description": t.description,
-            "capabilities": json.loads(t.capabilities),
-            "is_default": t.is_default,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-        }
-        for t in tiers
-    ]
+    return [_tier_dict(t) for t in tiers]
 
 
 @router.post("/", status_code=201)
@@ -88,17 +98,14 @@ async def create_tier(
         description=body.description,
         capabilities=json.dumps(body.capabilities),
         is_default=body.is_default,
+        idle_shutdown_days=body.idle_shutdown_days,
+        idle_destroy_days=body.idle_destroy_days,
+        account_inactive_days=body.account_inactive_days,
     )
     db.add(tier)
     await db.commit()
     await db.refresh(tier)
-    return {
-        "id": str(tier.id),
-        "name": tier.name,
-        "description": tier.description,
-        "capabilities": json.loads(tier.capabilities),
-        "is_default": tier.is_default,
-    }
+    return _tier_dict(tier)
 
 
 @router.patch("/{tier_id}")
@@ -126,16 +133,16 @@ async def update_tier(
         if body.is_default:
             await db.execute(update(UserTier).values(is_default=False))
         tier.is_default = body.is_default
+    if body.idle_shutdown_days is not None:
+        tier.idle_shutdown_days = body.idle_shutdown_days if body.idle_shutdown_days >= 0 else None
+    if body.idle_destroy_days is not None:
+        tier.idle_destroy_days = body.idle_destroy_days if body.idle_destroy_days >= 0 else None
+    if body.account_inactive_days is not None:
+        tier.account_inactive_days = body.account_inactive_days if body.account_inactive_days >= 0 else None
 
     await db.commit()
     await db.refresh(tier)
-    return {
-        "id": str(tier.id),
-        "name": tier.name,
-        "description": tier.description,
-        "capabilities": json.loads(tier.capabilities),
-        "is_default": tier.is_default,
-    }
+    return _tier_dict(tier)
 
 
 @router.delete("/{tier_id}", status_code=204)
@@ -264,6 +271,9 @@ async def list_available_tiers(
             "description": t.description,
             "capabilities": json.loads(t.capabilities),
             "is_default": t.is_default,
+            "idle_shutdown_days": t.idle_shutdown_days,
+            "idle_destroy_days": t.idle_destroy_days,
+            "account_inactive_days": t.account_inactive_days,
         }
         for t in result.scalars().all()
     ]
@@ -278,6 +288,9 @@ async def get_my_tier(user: User = Depends(get_current_active_user)):
             "name": user.tier.name,
             "description": user.tier.description,
             "capabilities": json.loads(user.tier.capabilities),
+            "idle_shutdown_days": user.tier.idle_shutdown_days,
+            "idle_destroy_days": user.tier.idle_destroy_days,
+            "account_inactive_days": user.tier.account_inactive_days,
         }
     return None
 

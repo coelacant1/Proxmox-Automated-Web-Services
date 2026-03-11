@@ -4,7 +4,9 @@ import api from '../api/client';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/StatusBadge';
+import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/context/AuthContext';
 
 interface VM {
   id: string;
@@ -16,6 +18,7 @@ interface VM {
   live_status?: string;
   specs: { cores?: number; memory_mb?: number; disk_gb?: number };
   created_at: string;
+  last_accessed_at: string | null;
 }
 
 const statusDotColor = (s: string) => {
@@ -27,6 +30,7 @@ const statusDotColor = (s: string) => {
 
 export default function VMs() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [vms, setVms] = useState<VM[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -46,6 +50,14 @@ export default function VMs() {
     await api.delete(`/api/compute/vms/${id}`);
     fetchVMs();
   };
+
+  const keepAlive = async (id: string) => {
+    await api.post(`/api/compute/vms/${id}/keepalive`);
+    fetchVMs();
+  };
+
+  const lp = user?.lifecycle_policy;
+  const auditing = !!user?.impersonated_by;
 
   return (
     <div className="space-y-6">
@@ -90,6 +102,16 @@ export default function VMs() {
                     </p>
                   </div>
                   <StatusBadge status={effectiveStatus} />
+                  {lp && (
+                    <LifecycleCountdown
+                      lastAccessedAt={vm.last_accessed_at}
+                      shutdownDays={lp.idle_shutdown_days}
+                      destroyDays={lp.idle_destroy_days}
+                      status={effectiveStatus}
+                      onKeepAlive={() => keepAlive(vm.id)}
+                      readOnly={auditing}
+                    />
+                  )}
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={() => doAction(vm.id, 'start')}>Start</Button>

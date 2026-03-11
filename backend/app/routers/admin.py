@@ -3,7 +3,7 @@
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import require_admin
 from app.core.pagination import PaginatedParams, PaginatedResponse
+from app.core.security import create_access_token
 from app.models.models import AuditLog, Backup, Resource, StorageBucket, User, UserQuota, VMIDPool, Volume, VPC
 from app.schemas.schemas import QuotaRead, ResourceRead, UserRead
 from app.services.proxmox_client import proxmox_client
@@ -243,13 +244,30 @@ async def get_user_stats(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Resource counts by type
+    # Resource counts by type (exclude destroyed)
     type_result = await db.execute(
         select(Resource.resource_type, func.count(Resource.id))
-        .where(Resource.owner_id == uid)
+        .where(Resource.owner_id == uid, Resource.status != "destroyed")
         .group_by(Resource.resource_type)
     )
     type_counts = {t: c for t, c in type_result.all()}
+
+    # Compute utilization from resource specs
+    active_resources = await db.execute(
+        select(Resource).where(Resource.owner_id == uid, Resource.status != "destroyed")
+    )
+    total_vcpus = 0
+    total_ram_mb = 0
+    total_disk_gb = 0
+    for r in active_resources.scalars().all():
+        if r.specs:
+            try:
+                specs = json.loads(r.specs)
+                total_vcpus += specs.get("cores", 0)
+                total_ram_mb += specs.get("memory_mb", 0)
+                total_disk_gb += specs.get("disk_gb", 0)
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     # Volume count and total size
     vol_result = await db.execute(
@@ -312,18 +330,26 @@ async def get_user_stats(
         },
         "resources": type_counts,
         "total_resources": sum(type_counts.values()),
+        "utilization": {
+            "vcpus": total_vcpus,
+            "ram_mb": total_ram_mb,
+            "disk_gb": total_disk_gb,
+        },
         "volumes": {"count": vol_count, "total_size_gib": float(vol_size)},
         "vpcs": vpc_count,
         "backups": backup_count,
         "buckets": bucket_count,
         "pool": {"name": pool_name, "exists": pool_exists},
         "quota": {
-            "max_vms": quota.max_vms if quota else 0,
-            "max_containers": quota.max_containers if quota else 0,
-            "max_vcpus": quota.max_vcpus if quota else 0,
-            "max_ram_mb": quota.max_ram_mb if quota else 0,
-            "max_disk_gb": quota.max_disk_gb if quota else 0,
-        } if quota else None,
+            "max_vms": quota.max_vms if quota else 5,
+            "max_containers": quota.max_containers if quota else 10,
+            "max_vcpus": quota.max_vcpus if quota else 16,
+            "max_ram_mb": quota.max_ram_mb if quota else 32768,
+            "max_disk_gb": quota.max_disk_gb if quota else 500,
+            "max_snapshots": quota.max_snapshots if quota else 10,
+            "max_backups": quota.max_backups if quota else 20,
+            "max_backup_size_gb": quota.max_backup_size_gb if quota else 100,
+        },
         "activity": activity,
     }
 
@@ -374,6 +400,47 @@ async def get_user_audit_log(
         "total": total,
         "page": page,
         "pages": (total + per_page - 1) // per_page,
+    }
+
+
+@router.post("/impersonate/{user_id}")
+async def impersonate_user(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Issue a short-lived token that lets the admin view the platform as the target user.
+
+    The token carries an ``impersonating`` claim with the admin's user ID so
+    the backend can distinguish impersonated requests from real ones.
+    """
+    target = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    target_user = target.scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    from datetime import timedelta
+
+    token = create_access_token(
+        data={
+            "sub": str(target_user.id),
+            "impersonating": str(admin.id),
+        },
+        expires_delta=timedelta(hours=1),
+    )
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "impersonated_user": {
+            "id": str(target_user.id),
+            "username": target_user.username,
+            "email": target_user.email,
+            "role": target_user.role,
+        },
+        "admin_user": {
+            "id": str(admin.id),
+            "username": admin.username,
+        },
     }
 
 
@@ -430,6 +497,11 @@ async def transfer_resource(
             await add_resource_to_pool(db, target_user, resource.proxmox_vmid)
         except Exception:
             pass
+
+    # Re-stamp PAWS metadata with new owner info
+    if resource.proxmox_vmid and resource.proxmox_node:
+        from app.routers.compute import _apply_paws_metadata
+        _apply_paws_metadata(resource.proxmox_node, resource.proxmox_vmid, resource.resource_type, target_user, resource)
 
     return {
         "status": "transferred",
@@ -508,6 +580,10 @@ async def import_unmanaged_resource(
     except Exception:
         pass
 
+    # Stamp PAWS ownership tags and notes on the Proxmox resource
+    from app.routers.compute import _apply_paws_metadata
+    _apply_paws_metadata(node, body.vmid, resource_type, target_user, resource)
+
     return {
         "status": "imported",
         "resource_id": str(resource.id),
@@ -585,6 +661,17 @@ async def remove_resource_from_user(
                 proxmox_client.remove_from_pool(pool_name, old_vmid)
             except Exception:
                 pass
+
+        # Remove PAWS tags and notes from Proxmox
+        try:
+            node = resource.proxmox_node or proxmox_client.find_vm_node(old_vmid)
+            if node:
+                if resource.resource_type == "lxc":
+                    proxmox_client.set_container_config(node, old_vmid, tags="", description="")
+                else:
+                    proxmox_client.update_vm_config(node, old_vmid, tags="", description="")
+        except Exception:
+            pass
 
     await db.delete(resource)
     await db.commit()
@@ -683,17 +770,77 @@ async def get_user_detail(
     return user
 
 
-@router.get("/{user_id}/resources", response_model=list[ResourceRead])
+@router.get("/{user_id}/resources")
 async def get_user_resources(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    """List all resources owned by a user."""
+    """List all resources owned by a user with live Proxmox status."""
     result = await db.execute(
         select(Resource).where(Resource.owner_id == uuid.UUID(user_id)).order_by(Resource.created_at.desc())
     )
-    return result.scalars().all()
+    resources = list(result.scalars().all())
+
+    # Sync live status from Proxmox for each resource
+    for r in resources:
+        if r.proxmox_vmid and r.proxmox_node:
+            try:
+                if r.resource_type == "lxc":
+                    st = proxmox_client.get_container_status(r.proxmox_node, r.proxmox_vmid)
+                else:
+                    st = proxmox_client.get_vm_status(r.proxmox_node, r.proxmox_vmid)
+                live_status = st.get("status", r.status)
+                if live_status != r.status:
+                    r.status = live_status
+            except Exception:
+                pass
+
+    await db.commit()
+    return resources
+
+
+@router.patch("/{user_id}/resources/{resource_id}/lifecycle")
+async def update_resource_lifecycle(
+    user_id: str,
+    resource_id: str,
+    body: dict | None = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Admin: manually set last_accessed_at on a resource (reset idle timer)."""
+    if body is None:
+        body = {}
+    result = await db.execute(
+        select(Resource).where(
+            Resource.id == uuid.UUID(resource_id),
+            Resource.owner_id == uuid.UUID(user_id),
+        )
+    )
+    resource = result.scalar_one_or_none()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found for this user")
+
+    if "last_accessed_at" in body:
+        val = body["last_accessed_at"]
+        if val is None:
+            resource.last_accessed_at = None
+        else:
+            from datetime import datetime as dt, timezone
+            try:
+                resource.last_accessed_at = dt.fromisoformat(val.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                resource.last_accessed_at = dt.now(timezone.utc)
+    else:
+        from datetime import datetime as dt, timezone
+        resource.last_accessed_at = dt.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(resource)
+    return {
+        "id": str(resource.id),
+        "last_accessed_at": resource.last_accessed_at.isoformat() if resource.last_accessed_at else None,
+    }
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -712,5 +859,6 @@ async def delete_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    await db.delete(user)
-    await db.commit()
+    from app.services.user_cleanup import purge_user
+    summary = await purge_user(db, uid)
+    return {"detail": "User and all resources purged", "cleanup": summary}

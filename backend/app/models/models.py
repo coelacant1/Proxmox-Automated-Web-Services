@@ -65,6 +65,10 @@ class UserTier(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     capabilities: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON array
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Lifecycle overrides (NULL = use system default, 0 = exempt/disabled)
+    idle_shutdown_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    idle_destroy_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    account_inactive_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
@@ -89,6 +93,7 @@ class User(Base):
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tier_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("user_tiers.id"), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -113,6 +118,8 @@ class UserQuota(Base):
     max_ram_mb: Mapped[int] = mapped_column(Integer, default=32768)  # 32 GB
     max_disk_gb: Mapped[int] = mapped_column(Integer, default=500)
     max_snapshots: Mapped[int] = mapped_column(Integer, default=10)
+    max_backups: Mapped[int] = mapped_column(Integer, default=20)
+    max_backup_size_gb: Mapped[int] = mapped_column(Integer, default=100)
     max_buckets: Mapped[int] = mapped_column(Integer, default=5)
     max_storage_gb: Mapped[int] = mapped_column(Integer, default=50)  # total S3 storage
 
@@ -180,6 +187,7 @@ class Resource(Base):
     specs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON blob for flexible metadata
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of tag strings
     termination_protected: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -3,13 +3,17 @@
 import json
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, func, select, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
-from app.models.models import AuditLog, QuotaRequest, Resource, User, UserQuota
+from app.models.models import (
+    Alarm, AuditLog, Backup, DNSRecord, QuotaRequest, Resource,
+    SSHKeyPair, SecurityGroup, ServiceEndpoint, StorageBucket,
+    User, UserQuota, Volume, VPC,
+)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -31,6 +35,36 @@ async def user_dashboard_summary(
     # Quota
     q_result = await db.execute(select(UserQuota).where(UserQuota.user_id == user.id))
     quota = q_result.scalar_one_or_none()
+
+    # Compute actual vCPU / RAM / Disk usage from active resources
+    active_resources = await db.execute(
+        select(Resource).where(
+            Resource.owner_id == user.id,
+            Resource.status.in_(["running", "stopped", "provisioning", "paused", "suspended"]),
+        )
+    )
+    total_vcpus = 0
+    total_ram_mb = 0
+    total_disk_gb = 0
+    for r in active_resources.scalars().all():
+        if r.specs:
+            specs = json.loads(r.specs)
+            total_vcpus += specs.get("cores", 0)
+            total_ram_mb += specs.get("memory_mb", 0)
+            total_disk_gb += specs.get("disk_gb", 0)
+
+    # Snapshot count
+    snapshot_count = 0
+    try:
+        snap_result = await db.execute(
+            select(func.count(Backup.id)).where(
+                Backup.owner_id == user.id,
+                Backup.backup_type == "snapshot",
+            )
+        )
+        snapshot_count = snap_result.scalar() or 0
+    except Exception:
+        pass
 
     # Recent activity
     activity_result = await db.execute(
@@ -60,6 +94,10 @@ async def user_dashboard_summary(
             "containers": counts.get("lxc", 0),
             "networks": counts.get("network", 0),
             "storage_buckets": counts.get("storage", 0),
+            "vcpus_used": total_vcpus,
+            "ram_mb_used": total_ram_mb,
+            "disk_gb_used": total_disk_gb,
+            "snapshots": snapshot_count,
         },
         "quota": {
             "max_vms": quota.max_vms if quota else 5,
@@ -67,6 +105,9 @@ async def user_dashboard_summary(
             "max_vcpus": quota.max_vcpus if quota else 16,
             "max_ram_mb": quota.max_ram_mb if quota else 32768,
             "max_disk_gb": quota.max_disk_gb if quota else 500,
+            "max_snapshots": quota.max_snapshots if quota else 10,
+            "max_backups": quota.max_backups if quota else 20,
+            "max_backup_size_gb": quota.max_backup_size_gb if quota else 100,
         },
         "status_breakdown": status_counts,
         "recent_activity": recent_activity,
@@ -275,4 +316,169 @@ async def admin_analytics(
         "top_endpoints": top_endpoints,
         "logins_by_day": logins_by_day,
         "recent_logins": recent_logins,
+    }
+
+
+# ---- Admin All-Resources Endpoint ----
+
+RESOURCE_CATEGORIES = {
+    "instances": {"model": Resource, "filter": lambda q: q.where(Resource.status != "destroyed")},
+    "volumes": {"model": Volume},
+    "vpcs": {"model": VPC},
+    "security_groups": {"model": SecurityGroup},
+    "storage_buckets": {"model": StorageBucket},
+    "backups": {"model": Backup},
+    "dns_records": {"model": DNSRecord},
+    "alarms": {"model": Alarm},
+    "ssh_keys": {"model": SSHKeyPair},
+    "endpoints": {"model": ServiceEndpoint},
+}
+
+
+def _serialize_row(row, model_name: str, user_map: dict) -> dict:
+    """Generic serializer for admin resource listing rows."""
+    d: dict = {"id": str(row.id), "owner_id": str(row.owner_id)}
+    d["owner_username"] = user_map.get(str(row.owner_id), "unknown")
+
+    if model_name == "instances":
+        d.update({
+            "display_name": row.display_name,
+            "resource_type": row.resource_type,
+            "status": row.status,
+            "proxmox_vmid": row.proxmox_vmid,
+            "proxmox_node": row.proxmox_node,
+            "specs": json.loads(row.specs) if row.specs else {},
+            "created_at": str(row.created_at),
+            "last_accessed_at": row.last_accessed_at.isoformat() if row.last_accessed_at else None,
+        })
+    elif model_name == "volumes":
+        d.update({
+            "name": row.name,
+            "size_gib": row.size_gib,
+            "storage_pool": getattr(row, "storage_pool", None),
+            "status": getattr(row, "status", None),
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "vpcs":
+        d.update({
+            "name": row.name,
+            "cidr": row.cidr,
+            "vxlan_tag": getattr(row, "vxlan_tag", None),
+            "is_default": getattr(row, "is_default", False),
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "security_groups":
+        d.update({
+            "name": row.name,
+            "description": row.description,
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "storage_buckets":
+        d.update({
+            "name": row.name,
+            "region": getattr(row, "region", None),
+            "versioning_enabled": getattr(row, "versioning_enabled", False),
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "backups":
+        d.update({
+            "backup_type": row.backup_type,
+            "status": getattr(row, "status", None),
+            "resource_id": str(row.resource_id) if row.resource_id else None,
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "dns_records":
+        d.update({
+            "name": row.name,
+            "record_type": row.record_type,
+            "value": getattr(row, "value", None),
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "alarms":
+        d.update({
+            "name": row.name,
+            "metric": getattr(row, "metric", None),
+            "state": getattr(row, "state", None),
+            "resource_id": str(row.resource_id) if row.resource_id else None,
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "ssh_keys":
+        d.update({
+            "name": row.name,
+            "fingerprint": getattr(row, "fingerprint", None),
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+    elif model_name == "endpoints":
+        d.update({
+            "name": row.name,
+            "protocol": getattr(row, "protocol", None),
+            "subdomain": getattr(row, "subdomain", None),
+            "fqdn": getattr(row, "fqdn", None),
+            "is_active": getattr(row, "is_active", True),
+            "resource_id": str(row.resource_id) if row.resource_id else None,
+            "created_at": str(row.created_at) if row.created_at else None,
+        })
+
+    return d
+
+
+@router.get("/admin/resources")
+async def admin_all_resources(
+    category: str = Query("instances", description="Resource category to list"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    search: str = Query("", description="Search filter"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """List all resources of a given category across all users."""
+    if category not in RESOURCE_CATEGORIES:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Unknown category: {category}. Valid: {list(RESOURCE_CATEGORIES.keys())}")
+
+    cat = RESOURCE_CATEGORIES[category]
+    model = cat["model"]
+    query = select(model)
+
+    # Apply category-specific filters
+    if "filter" in cat:
+        query = cat["filter"](query)
+
+    # Apply search filter
+    if search:
+        if hasattr(model, "display_name"):
+            query = query.where(model.display_name.ilike(f"%{search}%"))
+        elif hasattr(model, "name"):
+            query = query.where(model.name.ilike(f"%{search}%"))
+
+    # Count
+    from sqlalchemy import func as sqfunc
+    count_q = select(sqfunc.count()).select_from(query.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+
+    # Order and paginate
+    if hasattr(model, "created_at"):
+        query = query.order_by(desc(model.created_at))
+    query = query.offset((page - 1) * per_page).limit(per_page)
+
+    result = await db.execute(query)
+    rows = list(result.scalars().all())
+
+    # Resolve owner usernames
+    owner_ids = list({str(r.owner_id) for r in rows if r.owner_id})
+    user_map: dict = {}
+    if owner_ids:
+        user_result = await db.execute(
+            select(User.id, User.username).where(User.id.in_(owner_ids))
+        )
+        user_map = {str(u.id): u.username for u in user_result.all()}
+
+    items = [_serialize_row(r, category, user_map) for r in rows]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "categories": list(RESOURCE_CATEGORIES.keys()),
     }

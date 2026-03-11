@@ -40,6 +40,8 @@ class QuotaRead(BaseModel):
     max_ram_mb: int
     max_disk_gb: int
     max_snapshots: int
+    max_backups: int = 20
+    max_backup_size_gb: int = 100
 
     model_config = {"from_attributes": True}
 

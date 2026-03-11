@@ -1,4 +1,5 @@
 import secrets
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,11 +77,12 @@ async def _record_failed_login(db: AsyncSession, user: User) -> None:
 
 
 async def _clear_failed_logins(db: AsyncSession, user: User) -> None:
-    """Reset failed login counter on successful login."""
+    """Reset failed login counter and record login time on successful login."""
+    user.last_login_at = datetime.now(timezone.utc)
     if user.failed_login_attempts and user.failed_login_attempts > 0:
         user.failed_login_attempts = 0
         user.locked_until = None
-        await db.commit()
+    await db.commit()
 
 
 def _set_token_cookies(response: Response, tokens: Token) -> None:
@@ -377,9 +379,25 @@ async def oauth_callback(
 # --- Current User ---
 
 
-@router.get("/me", response_model=UserRead)
-async def get_me(user: User = Depends(get_current_active_user)):
-    return user
+@router.get("/me")
+async def get_me(request: Request, user: User = Depends(get_current_active_user), db: AsyncSession = Depends(get_db)):
+    from app.services.lifecycle_policy import get_effective_lifecycle
+    lifecycle = await get_effective_lifecycle(db, user)
+    data = {
+        "id": str(user.id),
+        "email": user.email,
+        "username": user.username,
+        "full_name": user.full_name,
+        "role": user.role,
+        "is_active": user.is_active,
+        "auth_provider": user.auth_provider,
+        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "lifecycle_policy": lifecycle,
+    }
+    impersonator = getattr(request.state, "impersonated_by", None)
+    if impersonator:
+        data["impersonated_by"] = impersonator
+    return data
 
 
 # --- Helpers ---

@@ -6,6 +6,7 @@ const statusVariants: Record<string, 'success' | 'warning' | 'danger' | 'info' |
   active: 'success',
   approved: 'success',
   creating: 'info',
+  provisioning: 'info',
   pending: 'warning',
   stopped: 'default',
   offline: 'default',

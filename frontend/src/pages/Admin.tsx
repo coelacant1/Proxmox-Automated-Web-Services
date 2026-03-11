@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '@/components/ui/Button';
@@ -10,7 +11,8 @@ import { DataTable } from '@/components/ui/DataTable';
 import type { Column } from '@/components/ui/DataTable';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { Textarea, Modal, Select, useToast, Tabs } from '@/components/ui';
-import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, Search } from 'lucide-react';
+import { QuotaBar } from '@/components/ui/QuotaBar';
+import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, Search, Eye } from 'lucide-react';
 import {
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart, Bar, BarChart,
@@ -64,13 +66,6 @@ interface AdminOverview {
   active_resources: number; pending_quota_requests: number;
   recent_users: { username: string; email: string; created_at: string }[];
 }
-interface ProjectData {
-  id: string; name: string; slug: string; description: string | null;
-  owner_id: string; is_personal: boolean; created_at: string;
-}
-interface ProjectMemberData {
-  id: string; project_id: string; user_id: string; role: string; created_at: string;
-}
 export interface ApiKeyData {
   id: string; name: string; prefix: string; created_at: string;
   expires_at: string | null; is_active: boolean; user_id: string;
@@ -78,6 +73,7 @@ export interface ApiKeyData {
 interface TierData {
   id: string; name: string; description: string | null;
   capabilities: string[]; is_default: boolean; created_at: string | null;
+  idle_shutdown_days: number | null; idle_destroy_days: number | null; account_inactive_days: number | null;
 }
 interface SystemRuleData {
   id: string; category: string; title: string; description: string;
@@ -94,8 +90,35 @@ interface TemplateRequestData {
   reviewed_at: string | null; created_at: string | null;
 }
 
-const TABS = ['Overview', 'Analytics', 'Users', 'Groups', 'Tiers', 'Templates', 'Quota Requests', 'Bug Reports', 'Storage', 'Rules', 'Settings', 'Audit Log', 'Projects', 'API Keys', 'Cluster'] as const;
-type Tab = typeof TABS[number];
+const ADMIN_SECTIONS = [
+  {
+    label: 'Dashboard',
+    tabs: ['Overview', 'Analytics', 'Instances', 'Volumes', 'VPCs', 'Security Groups', 'Object Storage', 'Backups', 'DNS Records', 'Alarms', 'SSH Keys', 'Endpoints'] as const,
+  },
+  {
+    label: 'Users & Groups',
+    tabs: ['Users', 'Groups', 'Tiers', 'Quota Requests', 'API Keys'] as const,
+  },
+  {
+    label: 'System',
+    tabs: ['Settings', 'Rules', 'Bug Reports', 'Templates', 'Audit Log'] as const,
+  },
+  {
+    label: 'Infrastructure',
+    tabs: ['Storage', 'Cluster'] as const,
+  },
+] as const;
+
+type SectionLabel = typeof ADMIN_SECTIONS[number]['label'];
+const ALL_TABS = ADMIN_SECTIONS.flatMap(s => s.tabs);
+type Tab = typeof ALL_TABS[number];
+
+function sectionForTab(tab: Tab): SectionLabel {
+  for (const s of ADMIN_SECTIONS) {
+    if ((s.tabs as readonly string[]).includes(tab)) return s.label;
+  }
+  return 'Dashboard';
+}
 
 // Helper type to satisfy DataTable's Record<string, unknown> constraint
 type TableRow<T> = T & Record<string, unknown>;
@@ -104,29 +127,76 @@ type TableRow<T> = T & Record<string, unknown>;
 
 export default function Admin() {
   const [activeTab, setActiveTab] = useState<Tab>('Overview');
+  const [activeSection, setActiveSection] = useState<SectionLabel>('Dashboard');
   const { user } = useAuth();
 
   if (user?.role !== 'admin') {
     return <p className="text-paws-danger">Access denied. Admin only.</p>;
   }
 
+  const currentSection = ADMIN_SECTIONS.find(s => s.label === activeSection)!;
+
+  const handleSectionClick = (label: SectionLabel) => {
+    setActiveSection(label);
+    const section = ADMIN_SECTIONS.find(s => s.label === label)!;
+    // If current tab isn't in this section, switch to the first tab
+    if (!(section.tabs as readonly string[]).includes(activeTab)) {
+      setActiveTab(section.tabs[0] as Tab);
+    }
+  };
+
+  const handleTabClick = (tab: Tab) => {
+    setActiveTab(tab);
+    setActiveSection(sectionForTab(tab));
+  };
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-paws-text">Administration</h1>
-      <div className="flex gap-1 flex-wrap">
-        {TABS.map((tab) => (
+
+      {/* Primary nav — category sections */}
+      <div className="flex gap-1 border-b border-paws-border pb-2">
+        {ADMIN_SECTIONS.map((section) => (
           <Button
-            key={tab}
-            variant={activeTab === tab ? 'primary' : 'ghost'}
+            key={section.label}
+            variant={activeSection === section.label ? 'primary' : 'ghost'}
             size="sm"
-            onClick={() => setActiveTab(tab)}
+            onClick={() => handleSectionClick(section.label)}
           >
-            {tab}
+            {section.label}
           </Button>
         ))}
       </div>
+
+      {/* Secondary nav — sub-tabs within the selected section */}
+      {currentSection.tabs.length > 1 && (
+        <div className="flex gap-1">
+          {currentSection.tabs.map((tab) => (
+            <Button
+              key={tab}
+              variant={activeTab === tab ? 'outline' : 'ghost'}
+              size="sm"
+              onClick={() => handleTabClick(tab as Tab)}
+              className={activeTab === tab ? 'border-paws-primary text-paws-primary' : ''}
+            >
+              {tab}
+            </Button>
+          ))}
+        </div>
+      )}
+
       {activeTab === 'Overview' && <OverviewTab />}
       {activeTab === 'Analytics' && <AnalyticsTab />}
+      {activeTab === 'Instances' && <AdminResourcesTab category="instances" />}
+      {activeTab === 'Volumes' && <AdminResourcesTab category="volumes" />}
+      {activeTab === 'VPCs' && <AdminResourcesTab category="vpcs" />}
+      {activeTab === 'Security Groups' && <AdminResourcesTab category="security_groups" />}
+      {activeTab === 'Object Storage' && <AdminResourcesTab category="storage_buckets" />}
+      {activeTab === 'Backups' && <AdminResourcesTab category="backups" />}
+      {activeTab === 'DNS Records' && <AdminResourcesTab category="dns_records" />}
+      {activeTab === 'Alarms' && <AdminResourcesTab category="alarms" />}
+      {activeTab === 'SSH Keys' && <AdminResourcesTab category="ssh_keys" />}
+      {activeTab === 'Endpoints' && <AdminResourcesTab category="endpoints" />}
       {activeTab === 'Users' && <UsersTab />}
       {activeTab === 'Groups' && <GroupsTab />}
       {activeTab === 'Tiers' && <TiersTab />}
@@ -137,8 +207,7 @@ export default function Admin() {
       {activeTab === 'Rules' && <RulesTab />}
       {activeTab === 'Settings' && <SettingsTab />}
       {activeTab === 'Audit Log' && <AuditLogTab />}
-      {activeTab === 'Projects' && <ProjectsTab />}
-      {activeTab === 'API Keys' && <ApiKeysTab onSwitchTab={setActiveTab} />}
+      {activeTab === 'API Keys' && <ApiKeysTab onSwitchTab={handleTabClick} />}
       {activeTab === 'Cluster' && <ClusterTab />}
     </div>
   );
@@ -380,6 +449,238 @@ function AnalyticsTab() {
   );
 }
 
+// --- Admin Resources Tab -------------------------------------------------
+
+function AdminResourcesTab({ category }: { category: string }) {
+  const navigate = useNavigate();
+  const { startImpersonating } = useAuth();
+  const toast = useToast();
+  const [items, setItems] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const perPage = 50;
+
+  const fetchResources = (pg: number, q: string) => {
+    setLoading(true);
+    api.get('/api/dashboard/admin/resources', { params: { category, page: pg, per_page: perPage, search: q } })
+      .then((r) => { setItems(r.data.items || []); setTotal(r.data.total || 0); })
+      .catch(() => { setItems([]); setTotal(0); })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchResources(page, search); }, [category, page]);
+
+  const doSearch = () => { setPage(1); fetchResources(1, search); };
+
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+
+  const openItem = async (row: any) => {
+    // Resources with dedicated detail pages — navigate directly
+    if (category === 'instances') {
+      const route = row.resource_type === 'lxc' ? 'containers' : 'vms';
+      // Impersonate the owner so the detail page can load their resource
+      try {
+        const res = await api.post(`/api/admin/users/impersonate/${row.owner_id}`);
+        await startImpersonating(res.data.access_token);
+        navigate(`/${route}/${row.id}`);
+      } catch {
+        toast.toast('Failed to open resource', 'error');
+      }
+      return;
+    }
+    if (category === 'backups') {
+      try {
+        const res = await api.post(`/api/admin/users/impersonate/${row.owner_id}`);
+        await startImpersonating(res.data.access_token);
+        navigate(`/backups/${row.id}`);
+      } catch {
+        toast.toast('Failed to open backup', 'error');
+      }
+      return;
+    }
+    if (category === 'storage_buckets') {
+      try {
+        const res = await api.post(`/api/admin/users/impersonate/${row.owner_id}`);
+        await startImpersonating(res.data.access_token);
+        navigate(`/storage/${row.name}/detail`);
+      } catch {
+        toast.toast('Failed to open bucket', 'error');
+      }
+      return;
+    }
+
+    // All other resource types — impersonate and go to the list page
+    const categoryRouteMap: Record<string, string> = {
+      volumes: '/volumes',
+      vpcs: '/vpcs',
+      security_groups: '/security-groups',
+      dns_records: '/dns',
+      alarms: '/alarms',
+      ssh_keys: '/ssh-keys',
+      endpoints: '/endpoints',
+    };
+    const route = categoryRouteMap[category];
+    if (route) {
+      try {
+        const res = await api.post(`/api/admin/users/impersonate/${row.owner_id}`);
+        await startImpersonating(res.data.access_token);
+        navigate(route);
+      } catch {
+        toast.toast('Failed to open as user', 'error');
+      }
+    }
+  };
+
+  const columns = getCategoryColumns(category);
+
+  return (
+    <div className="space-y-4">
+      {/* Search + count */}
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-paws-text-muted" />
+          <Input
+            placeholder="Search..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && doSearch()}
+            className="pl-8"
+          />
+        </div>
+        <Button variant="outline" size="sm" onClick={doSearch}>Search</Button>
+        <span className="text-xs text-paws-text-muted ml-auto">{total} total</span>
+      </div>
+
+      {/* Table */}
+      {loading ? (
+        <p className="text-paws-text-muted py-8 text-center">Loading...</p>
+      ) : items.length === 0 ? (
+        <p className="text-paws-text-dim py-8 text-center">No items found.</p>
+      ) : (
+        <DataTable<TableRow<any>> columns={columns} data={items} onRowClick={openItem} />
+      )}
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2">
+          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>Prev</Button>
+          <span className="text-sm text-paws-text-muted">Page {page} of {totalPages}</span>
+          <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>Next</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function getCategoryColumns(category: string): Column<TableRow<any>>[] {
+  const ownerCol: Column<TableRow<any>> = {
+    key: 'owner_username', header: 'Owner',
+    render: (row) => <span className="text-paws-text-muted text-xs">{row.owner_username}</span>,
+  };
+  const createdCol: Column<TableRow<any>> = {
+    key: 'created_at', header: 'Created',
+    render: (row) => <span className="text-xs text-paws-text-dim">{row.created_at ? new Date(row.created_at).toLocaleDateString() : '-'}</span>,
+  };
+
+  switch (category) {
+    case 'instances':
+      return [
+        { key: 'display_name', header: 'Name', render: (row) => (
+          <div>
+            <span className="font-medium text-paws-text">{row.display_name}</span>
+            <span className="ml-2 text-[10px] text-paws-text-dim uppercase">{row.resource_type}</span>
+          </div>
+        )},
+        ownerCol,
+        { key: 'proxmox_vmid', header: 'VMID', render: (row) => <span className="font-mono text-xs">{row.proxmox_vmid}</span> },
+        { key: 'proxmox_node', header: 'Node' },
+        { key: 'status', header: 'Status', render: (row) => <StatusBadge status={row.status} /> },
+        { key: 'specs', header: 'Specs', render: (row) => {
+          const s = row.specs || {};
+          return <span className="text-xs text-paws-text-muted">{s.cores || 0}c / {s.memory_mb || 0}MB / {s.disk_gb || 0}GB</span>;
+        }},
+        createdCol,
+      ];
+    case 'volumes':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'size_gib', header: 'Size', render: (row) => <span>{row.size_gib} GiB</span> },
+        { key: 'storage_pool', header: 'Pool' },
+        { key: 'status', header: 'Status', render: (row) => row.status ? <StatusBadge status={row.status} /> : <span className="text-paws-text-dim">-</span> },
+        createdCol,
+      ];
+    case 'vpcs':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'cidr', header: 'CIDR', render: (row) => <span className="font-mono text-xs">{row.cidr}</span> },
+        { key: 'is_default', header: 'Default', render: (row) => row.is_default ? <Badge variant="info">Default</Badge> : null },
+        createdCol,
+      ];
+    case 'security_groups':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'description', header: 'Description', render: (row) => <span className="text-xs text-paws-text-muted truncate max-w-[200px] block">{row.description || '-'}</span> },
+        createdCol,
+      ];
+    case 'storage_buckets':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'region', header: 'Region' },
+        { key: 'versioning_enabled', header: 'Versioning', render: (row) => row.versioning_enabled ? <Badge variant="success">On</Badge> : <Badge variant="default">Off</Badge> },
+        createdCol,
+      ];
+    case 'backups':
+      return [
+        { key: 'backup_type', header: 'Type' },
+        ownerCol,
+        { key: 'status', header: 'Status', render: (row) => row.status ? <StatusBadge status={row.status} /> : <span>-</span> },
+        { key: 'resource_id', header: 'Resource', render: (row) => <span className="font-mono text-[10px]">{row.resource_id?.slice(0, 8) || '-'}</span> },
+        createdCol,
+      ];
+    case 'dns_records':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'record_type', header: 'Type', render: (row) => <Badge variant="default">{row.record_type}</Badge> },
+        { key: 'value', header: 'Value', render: (row) => <span className="font-mono text-xs">{row.value || '-'}</span> },
+        createdCol,
+      ];
+    case 'alarms':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'metric', header: 'Metric' },
+        { key: 'state', header: 'State', render: (row) => row.state ? <StatusBadge status={row.state} /> : <span>-</span> },
+        createdCol,
+      ];
+    case 'ssh_keys':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'fingerprint', header: 'Fingerprint', render: (row) => <span className="font-mono text-[10px] text-paws-text-muted">{row.fingerprint || '-'}</span> },
+        createdCol,
+      ];
+    case 'endpoints':
+      return [
+        { key: 'name', header: 'Name' },
+        ownerCol,
+        { key: 'protocol', header: 'Protocol', render: (row) => <Badge variant="default">{row.protocol}</Badge> },
+        { key: 'fqdn', header: 'FQDN', render: (row) => <span className="font-mono text-xs">{row.fqdn || row.subdomain || '-'}</span> },
+        { key: 'is_active', header: 'Active', render: (row) => row.is_active ? <Badge variant="success">Yes</Badge> : <Badge variant="danger">No</Badge> },
+        createdCol,
+      ];
+    default:
+      return [{ key: 'id', header: 'ID' }, ownerCol, createdCol];
+  }
+}
+
 // --- Users Tab -----------------------------------------------------------
 
 function UsersTab() {
@@ -402,6 +703,19 @@ function UsersTab() {
   const [auditFilter, setAuditFilter] = useState('');
   const [auditTypeFilter, setAuditTypeFilter] = useState('');
   const toast = useToast();
+  const navigate = useNavigate();
+  const { startImpersonating } = useAuth();
+
+  const viewAsUser = async (userId: string) => {
+    try {
+      const res = await api.post(`/api/admin/users/impersonate/${userId}`);
+      await startImpersonating(res.data.access_token);
+      navigate('/');
+    } catch (e: any) {
+      const d = e.response?.data?.detail;
+      toast.toast(typeof d === 'string' ? d : 'Failed to start audit mode', 'error');
+    }
+  };
 
   const fetchUsers = () => api.get('/api/admin/users/').then(r => setUsers(r.data.items ?? r.data)).catch(() => {});
   const fetchTiers = () => api.get('/api/admin/tiers/').then(r => setTiers(r.data)).catch(() => {});
@@ -573,13 +887,16 @@ function UsersTab() {
 
             {s.quota && (
               <Card><CardContent>
-                <h3 className="text-sm font-semibold text-paws-text mb-2">Quota Usage</h3>
-                <div className="flex flex-wrap gap-4 text-xs text-paws-text-muted">
-                  <span>VMs: <strong className="text-paws-text">{s.resources.vm || 0}/{s.quota.max_vms}</strong></span>
-                  <span>Containers: <strong className="text-paws-text">{s.resources.lxc || 0}/{s.quota.max_containers}</strong></span>
-                  <span>vCPUs: <strong className="text-paws-text">{s.quota.max_vcpus}</strong></span>
-                  <span>RAM: <strong className="text-paws-text">{s.quota.max_ram_mb} MB</strong></span>
-                  <span>Disk: <strong className="text-paws-text">{s.quota.max_disk_gb} GB</strong></span>
+                <h3 className="text-sm font-semibold text-paws-text mb-3">Quota Usage</h3>
+                <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+                  <QuotaBar label="VMs" used={s.resources.vm || 0} limit={s.quota.max_vms} />
+                  <QuotaBar label="Containers" used={s.resources.lxc || 0} limit={s.quota.max_containers} />
+                  <QuotaBar label="vCPUs" used={s.utilization?.vcpus || 0} limit={s.quota.max_vcpus} />
+                  <QuotaBar label="RAM" used={s.utilization?.ram_mb || 0} limit={s.quota.max_ram_mb} unit=" MB" />
+                  <QuotaBar label="Disk" used={s.utilization?.disk_gb || 0} limit={s.quota.max_disk_gb} unit=" GB" />
+                  <QuotaBar label="Snapshots" used={0} limit={s.quota.max_snapshots} />
+                  <QuotaBar label="Backups" used={s.backups || 0} limit={s.quota.max_backups ?? 20} />
+                  <QuotaBar label="Backup Storage" used={0} limit={s.quota.max_backup_size_gb ?? 100} unit=" GB" />
                 </div>
               </CardContent></Card>
             )}
@@ -621,7 +938,9 @@ function UsersTab() {
               <p className="text-paws-text-muted text-sm py-8 text-center">No resources assigned to this user.</p>
             ) : (
               <div className="space-y-1.5">
-                {userResources.map((r: any) => (
+                {userResources.map((r: any) => {
+                  const la = r.last_accessed_at ? new Date(r.last_accessed_at) : null;
+                  return (
                   <div key={r.id} className="flex items-center justify-between px-3 py-2 rounded bg-paws-card border border-paws-border">
                     <div className="flex items-center gap-3">
                       <Badge variant="default">{r.resource_type}</Badge>
@@ -629,8 +948,21 @@ function UsersTab() {
                       {r.proxmox_vmid && <span className="text-xs text-paws-text-muted font-mono">VMID {r.proxmox_vmid}</span>}
                       {r.proxmox_node && <span className="text-xs text-paws-text-muted">{r.proxmox_node}</span>}
                       <StatusBadge status={r.status} />
+                      {la && (
+                        <span className="text-[10px] text-paws-text-dim" title={`Last accessed: ${la.toLocaleString()}`}>
+                          Idle {Math.floor((Date.now() - la.getTime()) / 86400000)}d
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-1.5">
+                      <Button variant="outline" size="sm" title="Reset idle timer to now" onClick={() => {
+                        api.patch(`/api/admin/users/${selectedUser}/resources/${r.id}/lifecycle`).then(() => {
+                          toast.toast('Idle timer reset', 'success');
+                          api.get(`/api/admin/users/${selectedUser}/resources`).then((res) => setUserResources(res.data)).catch(() => {});
+                        }).catch(() => toast.toast('Failed to reset timer', 'error'));
+                      }}>
+                        Reset Timer
+                      </Button>
                       <Button variant="outline" size="sm" onClick={() => { setShowTransfer(r.id); setTransferTarget(''); }}>
                         Transfer
                       </Button>
@@ -639,7 +971,8 @@ function UsersTab() {
                       </Button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -755,6 +1088,16 @@ function UsersTab() {
             </CardContent></Card>
 
             <Card><CardContent>
+              <h3 className="text-sm font-semibold text-paws-text mb-3">Audit Mode</h3>
+              <p className="text-xs text-paws-text-muted mb-3">
+                View the platform exactly as this user sees it. You will be switched to their account with their permissions. A banner will indicate you are in audit mode.
+              </p>
+              <Button size="sm" onClick={() => viewAsUser(u.id)}>
+                <Eye className="w-4 h-4 mr-1" /> View as {u.username}
+              </Button>
+            </CardContent></Card>
+
+            <Card><CardContent>
               <h3 className="text-sm font-semibold text-paws-text mb-3">Dangerous Actions</h3>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" onClick={() => toggleActive(u.id, !u.is_active)}>
@@ -778,6 +1121,7 @@ function UsersTab() {
           <div className="space-y-3">
             <Select
               label="Transfer to User"
+              placeholder="Select a user..."
               options={users.filter(u2 => u2.id !== selectedUser).map(u2 => ({ value: u2.id, label: `${u2.username} (${u2.email})` }))}
               value={transferTarget}
               onChange={e => setTransferTarget(e.target.value)}
@@ -1855,31 +2199,85 @@ function SettingsTab() {
     fetchSettings();
   };
 
+  const SETTING_GROUPS: Record<string, string[]> = {
+    'Resource Quotas': ['default_max_vms', 'default_max_containers', 'default_max_vcpus', 'default_max_ram_mb', 'default_max_disk_gb', 'default_max_networks', 'default_max_volumes', 'default_max_volume_size_gb', 'default_max_security_groups', 'default_max_sg_rules', 'default_max_backups', 'default_max_backup_size_gb', 'default_max_snapshots'],
+    'Cluster Settings': ['cpu_overcommit_ratio', 'ram_overcommit_ratio', 'placement_strategy', 'vmid_range_start', 'vmid_range_end'],
+    'Authentication': ['registration_mode', 'session_timeout_minutes'],
+    'Resource Lifecycle': ['idle_shutdown_days', 'idle_destroy_days'],
+    'Account Lifecycle': ['account_inactive_days'],
+    'General': ['motd'],
+  };
+
+  const grouped: Record<string, Setting[]> = {};
+  settings.forEach(s => {
+    const group = Object.entries(SETTING_GROUPS).find(([, keys]) => keys.includes(s.key))?.[0] || 'Other';
+    if (!grouped[group]) grouped[group] = [];
+    grouped[group].push(s);
+  });
+
+  const groupOrder = [...Object.keys(SETTING_GROUPS), 'Other'];
+
+  const toast = useToast();
+  const [syncing, setSyncing] = useState(false);
+
+  const syncMetadata = async () => {
+    setSyncing(true);
+    try {
+      const res = await api.post('/api/compute/admin/sync-metadata');
+      toast.toast(`Synced ${res.data.synced} resources (${res.data.failed} failed)`, 'success');
+    } catch {
+      toast.toast('Failed to sync metadata', 'error');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col gap-4">
-      {settings.map(s => (
-        <Card key={s.key}>
+    <div className="flex flex-col gap-6">
+      {groupOrder.filter(g => (grouped[g] ?? []).length > 0).map(group => (
+        <div key={group}>
+          <h3 className="text-sm font-semibold text-paws-text-dim uppercase tracking-wider mb-2">{group}</h3>
+          <div className="flex flex-col gap-2">
+            {(grouped[group] ?? []).map(s => (
+              <Card key={s.key}>
+                <CardContent className="flex gap-4 items-center">
+                  <div className="flex-1">
+                    <p className="font-bold text-sm text-paws-text">{s.key}</p>
+                    <p className="text-xs text-paws-text-dim">{s.description}</p>
+                  </div>
+                  <Input
+                    className="w-[200px]"
+                    value={editValues[s.key] || ''}
+                    onChange={e => setEditValues({ ...editValues, [s.key]: e.target.value })}
+                  />
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => save(s.key)}
+                    disabled={editValues[s.key] === s.value}
+                  >
+                    Save
+                  </Button>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div>
+        <h3 className="text-sm font-semibold text-paws-text-dim uppercase tracking-wider mb-2">Maintenance</h3>
+        <Card>
           <CardContent className="flex gap-4 items-center">
             <div className="flex-1">
-              <p className="font-bold text-sm text-paws-text">{s.key}</p>
-              <p className="text-xs text-paws-text-dim">{s.description}</p>
+              <p className="font-bold text-sm text-paws-text">Sync PAWS Metadata</p>
+              <p className="text-xs text-paws-text-dim">Re-stamp PAWS ownership tags and notes on all Proxmox VMs and containers</p>
             </div>
-            <Input
-              className="w-[200px]"
-              value={editValues[s.key] || ''}
-              onChange={e => setEditValues({ ...editValues, [s.key]: e.target.value })}
-            />
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => save(s.key)}
-              disabled={editValues[s.key] === s.value}
-            >
-              Save
+            <Button variant="primary" size="sm" onClick={syncMetadata} disabled={syncing}>
+              {syncing ? 'Syncing...' : 'Sync All'}
             </Button>
           </CardContent>
         </Card>
-      ))}
+      </div>
     </div>
   );
 }
@@ -1931,70 +2329,6 @@ function AuditLogTab() {
   );
 }
 
-// --- Projects Tab --------------------------------------------------------
-
-function ProjectsTab() {
-  const [projects, setProjects] = useState<ProjectData[]>([]);
-  const [selectedProject, setSelectedProject] = useState<ProjectData | null>(null);
-  const [members, setMembers] = useState<ProjectMemberData[]>([]);
-
-  useEffect(() => {
-    api.get('/api/projects/').then(r => setProjects(r.data.items || [])).catch(() => {});
-  }, []);
-
-  const viewMembers = (project: ProjectData) => {
-    setSelectedProject(project);
-    api.get(`/api/projects/${project.id}/members`).then(r => setMembers(r.data.items || [])).catch(() => setMembers([]));
-  };
-
-  const columns: Column<TableRow<ProjectData>>[] = [
-    { key: 'name', header: 'Name' },
-    { key: 'slug', header: 'Slug' },
-    { key: 'owner_id', header: 'Owner' },
-    {
-      key: 'is_personal', header: 'Personal',
-      render: (p) => <Badge variant={p.is_personal ? 'default' : 'info'}>{p.is_personal ? 'Personal' : 'Team'}</Badge>,
-    },
-    {
-      key: 'created_at', header: 'Created',
-      render: (p) => <span>{new Date(p.created_at).toLocaleDateString()}</span>,
-    },
-  ];
-
-  return (
-    <div className="space-y-6">
-      <DataTable
-        columns={columns}
-        data={projects as TableRow<ProjectData>[]}
-        emptyMessage="No projects found."
-        onRowClick={(p) => viewMembers(p)}
-      />
-      {selectedProject && (
-        <Card className="mt-4">
-          <CardContent>
-            <div className="flex justify-between items-center mb-3">
-              <h4 className="text-paws-text font-bold">Members of "{selectedProject.name}"</h4>
-              <Button variant="ghost" size="sm" onClick={() => setSelectedProject(null)}>Close</Button>
-            </div>
-            {members.length === 0 ? (
-              <p className="text-paws-text-dim">No members found.</p>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {members.map(m => (
-                  <div key={m.id} className="flex justify-between py-2 border-b border-paws-border-subtle">
-                    <span className="text-paws-text text-sm">{m.user_id}</span>
-                    <Badge variant="default">{m.role}</Badge>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  );
-}
-
 // --- API Keys Tab --------------------------------------------------------
 
 function ApiKeysTab({ onSwitchTab }: { onSwitchTab: (tab: Tab) => void }) {
@@ -2027,26 +2361,32 @@ function TiersTab() {
   const [tiers, setTiers] = useState<TierData[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<TierData | null>(null);
-  const [form, setForm] = useState({ name: '', description: '', capabilities: [] as string[], is_default: false });
+  const [form, setForm] = useState({ name: '', description: '', capabilities: [] as string[], is_default: false, idle_shutdown_days: '' as string, idle_destroy_days: '' as string, account_inactive_days: '' as string });
   const toast = useToast();
 
   const fetch = () => { api.get('/api/admin/tiers/').then(r => setTiers(r.data)).catch(() => {}); };
   useEffect(() => { fetch(); }, []);
 
-  const openCreate = () => { setEditing(null); setForm({ name: '', description: '', capabilities: [], is_default: false }); setShowModal(true); };
-  const openEdit = (t: TierData) => { setEditing(t); setForm({ name: t.name, description: t.description || '', capabilities: [...t.capabilities], is_default: t.is_default }); setShowModal(true); };
+  const openCreate = () => { setEditing(null); setForm({ name: '', description: '', capabilities: [], is_default: false, idle_shutdown_days: '', idle_destroy_days: '', account_inactive_days: '' }); setShowModal(true); };
+  const openEdit = (t: TierData) => { setEditing(t); setForm({ name: t.name, description: t.description || '', capabilities: [...t.capabilities], is_default: t.is_default, idle_shutdown_days: t.idle_shutdown_days != null ? String(t.idle_shutdown_days) : '', idle_destroy_days: t.idle_destroy_days != null ? String(t.idle_destroy_days) : '', account_inactive_days: t.account_inactive_days != null ? String(t.account_inactive_days) : '' }); setShowModal(true); };
 
   const toggleCap = (cap: string) => {
     setForm(f => ({ ...f, capabilities: f.capabilities.includes(cap) ? f.capabilities.filter(c => c !== cap) : [...f.capabilities, cap] }));
   };
 
   const save = async () => {
+    const payload = {
+      ...form,
+      idle_shutdown_days: form.idle_shutdown_days !== '' ? Number(form.idle_shutdown_days) : null,
+      idle_destroy_days: form.idle_destroy_days !== '' ? Number(form.idle_destroy_days) : null,
+      account_inactive_days: form.account_inactive_days !== '' ? Number(form.account_inactive_days) : null,
+    };
     try {
       if (editing) {
-        await api.patch(`/api/admin/tiers/${editing.id}`, form);
+        await api.patch(`/api/admin/tiers/${editing.id}`, payload);
         toast.toast('Tier updated', 'success');
       } else {
-        await api.post('/api/admin/tiers/', form);
+        await api.post('/api/admin/tiers/', payload);
         toast.toast('Tier created', 'success');
       }
       setShowModal(false);
@@ -2089,6 +2429,13 @@ function TiersTab() {
                   {t.capabilities.map(c => <Badge key={c} variant="default">{c}</Badge>)}
                   {t.capabilities.length === 0 && <span className="text-xs text-paws-text-muted">No capabilities</span>}
                 </div>
+                {(t.idle_shutdown_days != null || t.idle_destroy_days != null || t.account_inactive_days != null) && (
+                  <div className="mt-2 text-xs text-paws-text-muted space-y-0.5">
+                    {t.idle_shutdown_days != null && <p>Idle shutdown: {t.idle_shutdown_days === 0 ? 'exempt' : `${t.idle_shutdown_days}d`}</p>}
+                    {t.idle_destroy_days != null && <p>Idle destroy: {t.idle_destroy_days === 0 ? 'exempt' : `${t.idle_destroy_days}d`}</p>}
+                    {t.account_inactive_days != null && <p>Account timeout: {t.account_inactive_days === 0 ? 'exempt' : `${t.account_inactive_days}d`}</p>}
+                  </div>
+                )}
               </CardContent>
             </Card>
           ))}
@@ -2111,6 +2458,23 @@ function TiersTab() {
                   {cap}
                 </label>
               ))}
+            </div>
+          </div>
+          <div>
+            <span className="text-sm text-paws-text-muted">Lifecycle Overrides <span className="text-xs">(blank = use system default, 0 = exempt)</span></span>
+            <div className="grid grid-cols-3 gap-2 mt-1">
+              <div>
+                <label className="text-xs text-paws-text-dim">Idle Shutdown (days)</label>
+                <Input type="number" min={0} placeholder="default" value={form.idle_shutdown_days} onChange={e => setForm(f => ({ ...f, idle_shutdown_days: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-xs text-paws-text-dim">Idle Destroy (days)</label>
+                <Input type="number" min={0} placeholder="default" value={form.idle_destroy_days} onChange={e => setForm(f => ({ ...f, idle_destroy_days: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-xs text-paws-text-dim">Account Timeout (days)</label>
+                <Input type="number" min={0} placeholder="default" value={form.account_inactive_days} onChange={e => setForm(f => ({ ...f, account_inactive_days: e.target.value }))} />
+              </div>
             </div>
           </div>
           <div className="flex justify-end gap-2 pt-2">

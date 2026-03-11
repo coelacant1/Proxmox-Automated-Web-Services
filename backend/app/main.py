@@ -188,6 +188,10 @@ SYSTEM_SETTING_DEFAULTS = {
     "vmid_range_end": ("999999", "Ending VMID for new VMs/containers"),
     # Session management
     "session_timeout_minutes": ("0", "Force logout after N minutes (0 = use token expiry, no forced timeout)"),
+    # Resource lifecycle
+    "idle_shutdown_days": ("14", "Power down running instances after N days of no access (0 = disabled)"),
+    "idle_destroy_days": ("30", "Automatically destroy stopped instances after N days of no access (0 = disabled)"),
+    "account_inactive_days": ("0", "Deactivate and purge user accounts after N days of inactivity (0 = disabled)"),
 }
 
 

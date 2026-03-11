@@ -5,6 +5,7 @@ import json
 import logging
 import ssl
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
@@ -88,6 +89,35 @@ class InstanceResizeRequest(BaseModel):
 
 
 # --- VM Endpoints ---
+
+
+def _apply_paws_metadata(
+    node: str,
+    vmid: int,
+    vmtype: str,
+    user: User,
+    resource: Resource,
+) -> None:
+    """Stamp PAWS ownership tags and description on a Proxmox VM/container."""
+    tags = "paws-managed"
+    description = (
+        f"PAWS Managed Resource\n\n"
+        f"Owner: {user.username} ({user.email or 'N/A'})\n\n"
+        f"User ID: {user.id}\n\n"
+        f"Resource ID: {resource.id}\n\n"
+        f"Name: {resource.display_name}\n\n"
+        f"Created: {resource.created_at or 'N/A'}\n\n"
+        f"---\n\n"
+        f"This instance is managed by PAWS. Do not modify tags or description manually."
+    )
+    try:
+        if vmtype == "lxc":
+            proxmox_client.set_container_config(node, vmid, tags=tags, description=description)
+        else:
+            proxmox_client.update_vm_config(node, vmid, tags=tags, description=description)
+        logger.info("Applied PAWS metadata to VMID %s on %s (type=%s)", vmid, node, vmtype)
+    except Exception as e:
+        logger.warning("Failed to apply PAWS metadata to VMID %s on %s: %s", vmid, node, e)
 
 
 @router.post("/vms", status_code=status.HTTP_202_ACCEPTED)
@@ -232,6 +262,12 @@ async def create_vm(
             await db.commit()
         except Exception:
             pass  # Best-effort migration; resource still usable on source node
+    else:
+        # Wait for clone to finish before reconfiguring
+        try:
+            proxmox_client.wait_for_task(clone_node, upid, timeout=120)
+        except Exception:
+            pass
 
     # Reconfigure specs after clone
     try:
@@ -260,6 +296,9 @@ async def create_vm(
             proxmox_client.update_vm_config(resource.proxmox_node, new_vmid, cores=body.cores, memory=body.memory_mb, **ci_config)
     except Exception:
         pass  # Config update is best-effort; clone already succeeded
+
+    # Stamp PAWS ownership tags and notes on the Proxmox resource
+    _apply_paws_metadata(resource.proxmox_node, new_vmid, resource_type, user, resource)
 
     await log_action(db, user.id, f"{resource_type}_create", resource_type, resource.id, {"vmid": new_vmid, "node": resource.proxmox_node})
     return {"id": str(resource.id), "vmid": new_vmid, "node": resource.proxmox_node, "status": "provisioning", "task": upid, "type": resource_type}
@@ -302,6 +341,7 @@ async def list_vms(
             "termination_protected": r.termination_protected,
             "tags": json.loads(r.tags) if r.tags else [],
             "created_at": str(r.created_at),
+            "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
         }
         # Fetch live status if running
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
@@ -338,6 +378,7 @@ async def get_vm(
         "termination_protected": r.termination_protected,
         "tags": json.loads(r.tags) if r.tags else [],
         "created_at": str(r.created_at),
+        "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
     }
     if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
         try:
@@ -424,6 +465,17 @@ async def delete_vm(
     if resource.termination_protected:
         raise HTTPException(status_code=403, detail="Termination protection is enabled. Disable it first.")
     return await _terminate_vm(db, user, resource)
+
+
+@router.post("/vms/{resource_id}/keepalive")
+async def keepalive_vm(
+    resource_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Touch last_accessed_at to prevent idle lifecycle enforcement."""
+    r = await _get_user_resource(db, user.id, resource_id, "vm")
+    return {"last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None}
 
 
 @router.patch("/vms/{resource_id}/termination-protection")
@@ -1037,6 +1089,30 @@ async def create_vm_backup(
     from typing import Any as _Any
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
 
+    # Check backup quota
+    quota_result = await db.execute(select(UserQuota).where(UserQuota.user_id == user.id))
+    user_quota = quota_result.scalar_one_or_none()
+    max_backups = user_quota.max_backups if user_quota else 20
+    user_tag = f"[paws:{user.id}]"
+    current_count = 0
+    try:
+        storages = proxmox_client.get_storage_list()
+        for st in storages:
+            if "backup" not in st.get("content", ""):
+                continue
+            try:
+                node = st.get("node") or resource.proxmox_node
+                contents = proxmox_client.get_storage_content(node, st["storage"])
+                for item in contents:
+                    if item.get("content") == "backup" and user_tag in (item.get("notes", "") or ""):
+                        current_count += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if current_count >= max_backups:
+        raise HTTPException(status_code=409, detail=f"Backup quota exceeded ({current_count}/{max_backups}). Delete old backups or request a quota increase.")
+
     # Validate storage against admin-configured list
     result = await db.execute(
         select(SystemSetting).where(SystemSetting.key == "backup_storages")
@@ -1054,8 +1130,6 @@ async def create_vm_backup(
             "mode": body.mode,
             "compress": body.compress,
         }
-        # Embed user ID tag in notes for ownership filtering
-        user_tag = f"[paws:{user.id}]"
         auto_note = (
             f"{user_tag} PAWS backup | {resource.display_name}"
             f" | VMID {resource.proxmox_vmid} | {resource.proxmox_node}"
@@ -1317,6 +1391,12 @@ async def create_container(
                 await db.commit()
             except Exception:
                 pass  # Migration is best-effort; clone succeeded
+        else:
+            # Wait for create/clone to finish before reconfiguring
+            try:
+                proxmox_client.wait_for_task(clone_node, upid, timeout=120)
+            except Exception:
+                pass
 
         # Reconfigure specs after clone (cores, memory, disk)
         if body.template_vmid:
@@ -1327,6 +1407,9 @@ async def create_container(
                 )
             except Exception:
                 pass  # Config update is best-effort
+
+        # Stamp PAWS ownership tags and notes on the Proxmox container
+        _apply_paws_metadata(resource.proxmox_node, new_vmid, "lxc", user, resource)
 
         return {"id": str(resource.id), "vmid": new_vmid, "node": resource.proxmox_node, "status": "provisioning", "task": upid}
     except Exception as e:
@@ -1364,6 +1447,7 @@ async def list_containers(
             "status": r.status,
             "specs": json.loads(r.specs) if r.specs else {},
             "created_at": str(r.created_at),
+            "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
         }
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
             try:
@@ -1392,6 +1476,7 @@ async def get_container(
         "status": r.status,
         "specs": json.loads(r.specs) if r.specs else {},
         "created_at": str(r.created_at),
+        "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
     }
     if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
         try:
@@ -1455,6 +1540,67 @@ async def delete_container(
     await db.commit()
     await log_action(db, user.id, "container_delete", "lxc", details={"vmid": old_vmid})
     return {"status": "destroyed"}
+
+
+@router.post("/containers/{resource_id}/keepalive")
+async def keepalive_container(
+    resource_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Touch last_accessed_at to prevent idle lifecycle enforcement."""
+    r = await _get_user_resource(db, user.id, resource_id, "lxc")
+    return {"last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None}
+
+
+# --- Metadata Sync ---
+
+
+@router.post("/instances/{resource_id}/sync-metadata")
+async def sync_instance_metadata(
+    resource_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Re-stamp PAWS tags and notes on a single instance."""
+    r = await _get_user_resource(db, user.id, resource_id, "vm")
+    if not r.proxmox_vmid or not r.proxmox_node:
+        raise HTTPException(status_code=400, detail="Resource has no Proxmox VMID/node")
+    vmtype = "lxc" if r.resource_type == "lxc" else "qemu"
+    _apply_paws_metadata(r.proxmox_node, r.proxmox_vmid, vmtype, user, r)
+    return {"status": "ok"}
+
+
+@router.post("/admin/sync-metadata")
+async def admin_sync_all_metadata(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Re-stamp PAWS tags and notes on ALL active resources (admin only)."""
+    result = await db.execute(
+        select(Resource).where(
+            Resource.status.notin_(["destroyed", "error"]),
+            Resource.proxmox_vmid.isnot(None),
+            Resource.proxmox_node.isnot(None),
+        )
+    )
+    resources = result.scalars().all()
+    success = 0
+    failed = 0
+    for r in resources:
+        # Look up owner
+        user_result = await db.execute(select(User).where(User.id == r.owner_id))
+        owner = user_result.scalar_one_or_none()
+        if not owner:
+            failed += 1
+            continue
+        vmtype = "lxc" if r.resource_type == "lxc" else "qemu"
+        try:
+            _apply_paws_metadata(r.proxmox_node, r.proxmox_vmid, vmtype, owner, r)
+            success += 1
+        except Exception:
+            failed += 1
+    return {"synced": success, "failed": failed, "total": len(resources)}
 
 
 # --- Helpers ---
@@ -1525,6 +1671,9 @@ async def _get_user_resource(
         raise HTTPException(status_code=404, detail="Resource not found")
     if resource.status == "destroyed":
         raise HTTPException(status_code=410, detail="Resource has been destroyed")
+    # Touch last_accessed_at for lifecycle tracking
+    resource.last_accessed_at = datetime.now(timezone.utc)
+    await db.commit()
     return resource
 
 

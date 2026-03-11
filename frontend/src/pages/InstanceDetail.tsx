@@ -15,6 +15,8 @@ import {
   Input, Modal, Badge, StatusBadge, Tabs, Select, ConfirmDialog,
   useToast,
 } from '@/components/ui';
+import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
+import { useAuth } from '@/context/AuthContext';
 
 interface Instance {
   id: string;
@@ -48,12 +50,15 @@ export default function InstanceDetail() {
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
+  const { user: authUser } = useAuth();
 
   // Permission from group sharing (undefined = owner/full access)
   const groupPermission: string | undefined = (location.state as any)?.groupPermission;
   const isReadOnly = groupPermission === 'read';
   const canOperate = !groupPermission || groupPermission === 'operate' || groupPermission === 'admin';
   const canAdmin = !groupPermission || groupPermission === 'admin';
+  const auditing = !!authUser?.impersonated_by;
+  const lp = authUser?.lifecycle_policy;
 
   const [inst, setInst] = useState<Instance | null>(null);
   const [tab, setTab] = useState('overview');
@@ -745,6 +750,22 @@ export default function InstanceDetail() {
             <h1 className="text-2xl font-bold text-paws-text truncate">{inst.display_name}</h1>
             <StatusBadge status={vmStatus} />
             <Badge variant="default">{inst.resource_type.toUpperCase()}</Badge>
+            {lp && (
+              <LifecycleCountdown
+                lastAccessedAt={(inst as any).last_accessed_at ?? null}
+                shutdownDays={lp.idle_shutdown_days}
+                destroyDays={lp.idle_destroy_days}
+                status={vmStatus}
+                onKeepAlive={!auditing ? () => {
+                  const type = inst.resource_type === 'lxc' ? 'containers' : 'vms';
+                  api.post(`/api/compute/${type}/${id}/keepalive`).then(() => {
+                    toast('Idle timer reset', 'success');
+                    fetchData();
+                  }).catch(() => toast('Failed to reset timer', 'error'));
+                } : undefined}
+                readOnly={auditing}
+              />
+            )}
           </div>
           <p className="text-sm text-paws-text-muted mt-0.5">
             VMID {inst.proxmox_vmid} · {inst.proxmox_node} · {String(specs.cores || 1)} vCPU · {String(specs.memory_mb || 512)} MB
@@ -1291,6 +1312,59 @@ export default function InstanceDetail() {
       {/* Lifecycle */}
       {tab === 'lifecycle' && (
         <div className="space-y-4">
+          {/* Idle Timer Card */}
+          {lp && (lp.idle_shutdown_days > 0 || lp.idle_destroy_days > 0) && (
+            <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><Clock className="h-4 w-4" /> Idle Timer</CardTitle></CardHeader>
+              <CardContent className="space-y-3">
+                {(inst as any).last_accessed_at ? (() => {
+                  const lastAccess = new Date((inst as any).last_accessed_at).getTime();
+                  const now = Date.now();
+                  const shutdownLeft = lp.idle_shutdown_days > 0
+                    ? Math.max(0, Math.ceil((lastAccess + lp.idle_shutdown_days * 86400000 - now) / 86400000))
+                    : null;
+                  const destroyLeft = lp.idle_destroy_days > 0
+                    ? Math.max(0, Math.ceil((lastAccess + lp.idle_destroy_days * 86400000 - now) / 86400000))
+                    : null;
+                  return (
+                    <div className="space-y-2">
+                      <p className="text-sm text-paws-text-muted">
+                        Last accessed: {new Date((inst as any).last_accessed_at).toLocaleString()}
+                      </p>
+                      <div className="flex items-center gap-4">
+                        {shutdownLeft !== null && (
+                          <Badge variant={shutdownLeft <= 3 ? 'danger' : shutdownLeft <= 7 ? 'warning' : 'default'}>
+                            {shutdownLeft}d until auto-shutdown
+                          </Badge>
+                        )}
+                        {destroyLeft !== null && (
+                          <Badge variant={destroyLeft <= 3 ? 'danger' : destroyLeft <= 7 ? 'warning' : 'default'}>
+                            {destroyLeft}d until auto-destroy
+                          </Badge>
+                        )}
+                      </div>
+                      {!auditing && (
+                        <Button variant="outline" size="sm" onClick={() => {
+                          const type = inst.resource_type === 'lxc' ? 'containers' : 'vms';
+                          api.post(`/api/compute/${type}/${id}/keepalive`).then(() => {
+                            toast('Idle timer reset', 'success');
+                            fetchData();
+                          }).catch(() => toast('Failed to reset timer', 'error'));
+                        }}>
+                          <RotateCcw className="h-3.5 w-3.5 mr-1" /> Keep Alive
+                        </Button>
+                      )}
+                      {auditing && (
+                        <p className="text-xs text-paws-text-dim italic">Audit mode - timer not modifiable</p>
+                      )}
+                    </div>
+                  );
+                })() : (
+                  <p className="text-sm text-paws-text-muted">No access recorded yet.</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
           {isReadOnly && (
             <Card><CardContent>
               <p className="text-sm text-paws-text-muted italic">You have read-only access to this instance via group sharing.</p>

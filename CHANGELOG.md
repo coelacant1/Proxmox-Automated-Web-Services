@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.2 - 2026-03-11
+
+### Added
+
+- **Admin Audit Mode** - "View as user" impersonation with 1-hour scoped tokens, audit banner with exit button, and automatic token backup/restore in localStorage
+- **Admin Resources View** - Global resource dashboard with 10 categories (Instances, Volumes, VPCs, Security Groups, Object Storage, Backups, DNS Records, Alarms, SSH Keys, Endpoints), search, pagination, and click-to-impersonate navigation
+- **Resource Lifecycle Management** - `last_accessed_at` tracking on resources, `last_login_at` on users, tier-based lifecycle policy overrides (`idle_shutdown_days`, `idle_destroy_days`, `account_inactive_days`), hourly auto-shutdown/destroy of idle resources, daily account purge of inactive users with full 28-table cascade cleanup
+- **Lifecycle UI** - LifecycleCountdown component on instance cards and detail pages with keep-alive button, account lifecycle countdown card on Dashboard, Idle Timer card in InstanceDetail Lifecycle tab
+- **Backup System Rewrite** - Backend endpoints for Proxmox-native backup listing, quota summary, file browsing, and admin pruning policies; comprehensive BackupsEnhanced page with Backups/Snapshots/Plans tabs; reusable file browser from InstanceDetail; parallel snapshot fetching; non-blocking data loading for slow PBS
+- **Backup Quotas** - `max_backups` (default 20) and `max_backup_size_gb` (default 100) on UserQuota with enforcement on backup creation (409 if over limit)
+- **Comprehensive Quotas Page** - Usage tab with grouped quota bars (Compute, Backups & Snapshots, Object Storage) and summary table; Requests tab with improved request form showing current limits and request history
+- **Dashboard Quota Display** - Extended from 3 to 8 QuotaBar components (VMs, Containers, vCPUs, RAM, Disk, Snapshots, Backups, Backup Storage) with over-quota warning banner and "Request Increase" button
+- **Over-Quota Enforcement** - Celery task that auto-shuts down newest running instances when quota is exceeded, with per-user event notifications and grace period handling
+- **PAWS Metadata Stamping** - `paws-managed` tag and structured description (owner info, resource ID, creation date) applied to Proxmox VMs/containers on provisioning, admin import, and resource transfer; user sync and admin bulk re-stamp endpoints; metadata clearing on resource unlink
+- **Keep-Alive Endpoints** - `POST /compute/vms/{id}/keepalive` and `POST /compute/containers/{id}/keepalive` to reset idle timers
+- **Admin User Detail** - QuotaBar grid showing 8 utilization metrics with proper vCPU/RAM/Disk calculation from resource specs
+
+### Changed
+
+- Admin navigation restructured from 15 flat tabs to 4 categorized sections (Dashboard, Users & Groups, System, Infrastructure)
+- Dashboard summary endpoint now calculates actual vCPU/RAM/Disk usage from `Resource.specs` instead of showing 0
+- Backup storage resolution changed from hardcoded node to dynamic node discovery via `_resolve_node()`
+- Admin `delete_user` now uses full `purge_user()` cascade service instead of bare delete
+- Admin resource view syncs live Proxmox status before returning results
+- Tier API responses now include lifecycle override fields
+- Resource access endpoints auto-touch `last_accessed_at` on every access
+- Auth login flow always sets `last_login_at` on successful login (local + OAuth)
+- Clone/create operations now wait for Proxmox task completion before applying config/metadata
+- StatusBadge component added `provisioning` → `info` variant mapping
+
+### Fixed
+
+- Audit mode exit race condition where `stopImpersonating()` wasn't awaited before navigation
+- Transfer modal showing greyed-out button due to missing Select placeholder
+- Backup count and total size showing 0 due to hardcoded node fallback
+- 422 error on lifecycle PATCH endpoint with empty body (`Body(default=None)`)
+- Metadata not applied after cloning from template (missing wait-for-task in non-migration branch)
+- Metadata not applied on ostemplate container create (wait branch skipped for non-clone creates)
+- Page crash "Objects are not valid as React child" on backup storage Select rendering objects instead of strings
+- Snapshot creation button staying greyed out due to missing onChange handler
+- Dashboard vCPUs/RAM/Disk always showing 0 (backend now sums from resource specs)
+- Admin user stats excluding destroyed resources and returning all quota fields with defaults
+- Slow PBS responses blocking entire page render (now non-blocking with async loading)
+
 ## 0.2.1 - 2026-03-08
 
 ### Added
@@ -19,7 +63,7 @@
 - Group members with appropriate permissions can now actually modify shared security groups and volumes (previously returned 404)
 - Revoked group API tokens now visually match revoked personal API keys (opacity + muted styling)
 
-## 0.2.0
+## 0.2.0 - 2026-03-06
 
 ### Added
 

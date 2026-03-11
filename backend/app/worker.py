@@ -16,6 +16,21 @@ celery_app.conf.update(
     # RedBeat scheduler config
     redbeat_redis_url=settings.redis_url,
     redbeat_lock_timeout=30,
+    # Periodic tasks
+    beat_schedule={
+        "enforce-resource-lifecycle": {
+            "task": "paws.enforce_resource_lifecycle",
+            "schedule": 3600.0,  # every hour
+        },
+        "enforce-account-lifecycle": {
+            "task": "paws.enforce_account_lifecycle",
+            "schedule": 86400.0,  # daily
+        },
+        "enforce-quota": {
+            "task": "paws.enforce_quota",
+            "schedule": 900.0,  # every 15 minutes
+        },
+    },
 )
 
 celery_app.autodiscover_tasks(["app.tasks"], force=True)

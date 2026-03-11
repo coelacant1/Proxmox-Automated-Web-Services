@@ -1,20 +1,24 @@
 """Backup and snapshot management endpoints."""
 
+import json as _json
+import logging
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import Response
 
 from app.core.database import get_db
-from app.core.deps import get_current_active_user
-from app.models.models import Backup, BackupPlan, Resource, User, UserQuota
+from app.core.deps import get_current_active_user, require_admin
+from app.models.models import Backup, BackupPlan, Resource, SystemSetting, User, UserQuota
 from app.services.audit_service import log_action
 from app.services.proxmox_client import proxmox_client
 
 router = APIRouter(prefix="/api/backups", tags=["backups"])
+logger = logging.getLogger(__name__)
 
 
 class SnapshotCreate(BaseModel):
@@ -540,3 +544,407 @@ async def list_restore_jobs(
         }
         for r in resources
     ]
+
+
+# --- Global Proxmox Backups (all user resources) ---
+
+
+def _get_any_node() -> str:
+    """Get any available cluster node name for storage queries."""
+    try:
+        nodes = proxmox_client.get_nodes()
+        if nodes:
+            return nodes[0].get("node", "pve")
+    except Exception:
+        pass
+    return "pve"
+
+
+def _resolve_node(storage_entry: dict, fallback_node: str | None = None) -> str:
+    """Resolve the node to use for a storage content query."""
+    return storage_entry.get("node") or fallback_node or _get_any_node()
+
+
+@router.get("/proxmox/all")
+async def list_all_proxmox_backups(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """List ALL Proxmox backup files across all user's resources."""
+    # Get user's resources
+    result = await db.execute(
+        select(Resource).where(
+            Resource.owner_id == user.id,
+            Resource.resource_type.in_(["vm", "lxc"]),
+            Resource.status != "destroyed",
+        )
+    )
+    resources = result.scalars().all()
+    resource_map = {}
+    vmid_to_resource = {}
+    for r in resources:
+        resource_map[str(r.id)] = r
+        if r.proxmox_vmid:
+            vmid_to_resource[str(r.proxmox_vmid)] = r
+
+    fallback_node = resources[0].proxmox_node if resources else None
+    user_tag = f"[paws:{user.id}]"
+    backups: list[dict] = []
+
+    try:
+        storages = proxmox_client.get_storage_list()
+        for s in storages:
+            if "backup" not in s.get("content", ""):
+                continue
+            try:
+                node = _resolve_node(s, fallback_node)
+                contents = proxmox_client.get_storage_content(node, s["storage"])
+                is_pbs = s.get("type") == "pbs"
+                for item in contents:
+                    if item.get("content") != "backup":
+                        continue
+                    notes = item.get("notes", "") or ""
+                    if user_tag not in notes:
+                        continue
+                    volid = item.get("volid", "")
+                    # Match to resource by VMID
+                    matched_resource = None
+                    for vmid_str, r in vmid_to_resource.items():
+                        if vmid_str in volid:
+                            matched_resource = r
+                            break
+
+                    entry = {
+                        "volid": volid,
+                        "size": item.get("size", 0),
+                        "ctime": item.get("ctime", 0),
+                        "format": item.get("format", "pbs" if is_pbs else ""),
+                        "storage": s["storage"],
+                        "notes": notes,
+                        "pbs": is_pbs,
+                        "resource_id": str(matched_resource.id) if matched_resource else None,
+                        "resource_name": matched_resource.display_name if matched_resource else None,
+                        "resource_type": matched_resource.resource_type if matched_resource else None,
+                        "vmid": matched_resource.proxmox_vmid if matched_resource else None,
+                        "node": matched_resource.proxmox_node if matched_resource else (s.get("node") or None),
+                    }
+                    if is_pbs:
+                        entry["backup_type"] = "ct" if "/ct/" in volid else "vm"
+                        entry["backup_time"] = item.get("ctime", 0)
+                    backups.append(entry)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    backups.sort(key=lambda b: b.get("ctime", 0), reverse=True)
+    return {"backups": backups, "total": len(backups)}
+
+
+@router.get("/quota-summary")
+async def backup_quota_summary(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Get backup quota usage for the current user."""
+    # Quota limits
+    q_result = await db.execute(select(UserQuota).where(UserQuota.user_id == user.id))
+    quota = q_result.scalar_one_or_none()
+    max_snapshots = quota.max_snapshots if quota else 10
+    max_backups = quota.max_backups if quota else 20
+    max_backup_size_gb = quota.max_backup_size_gb if quota else 100
+
+    # DB backup records count
+    count_result = await db.execute(
+        select(func.count(Backup.id)).where(
+            Backup.owner_id == user.id,
+            Backup.status.in_(["pending", "running", "completed"]),
+        )
+    )
+    db_backup_count = count_result.scalar() or 0
+
+    # Snapshot count from Proxmox (live per-resource)
+    res_result = await db.execute(
+        select(Resource).where(
+            Resource.owner_id == user.id,
+            Resource.resource_type.in_(["vm", "lxc"]),
+            Resource.status != "destroyed",
+        )
+    )
+    all_resources = res_result.scalars().all()
+    snapshot_count = 0
+    for r in all_resources:
+        if not r.proxmox_vmid or not r.proxmox_node:
+            continue
+        try:
+            vmtype = "lxc" if r.resource_type == "lxc" else "qemu"
+            snaps = proxmox_client.list_snapshots(r.proxmox_node, r.proxmox_vmid, vmtype)
+            snapshot_count += len([s for s in snaps if s.get("name") != "current"])
+        except Exception:
+            pass
+
+    # Proxmox backup files total size
+    fallback_node = all_resources[0].proxmox_node if all_resources else None
+    user_tag = f"[paws:{user.id}]"
+    total_backup_size = 0
+    proxmox_backup_count = 0
+    try:
+        storages = proxmox_client.get_storage_list()
+        for s in storages:
+            if "backup" not in s.get("content", ""):
+                continue
+            try:
+                node = _resolve_node(s, fallback_node)
+                contents = proxmox_client.get_storage_content(node, s["storage"])
+                for item in contents:
+                    if item.get("content") != "backup":
+                        continue
+                    if user_tag not in (item.get("notes", "") or ""):
+                        continue
+                    proxmox_backup_count += 1
+                    total_backup_size += item.get("size", 0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {
+        "max_snapshots": max_snapshots,
+        "max_backups": max_backups,
+        "max_backup_size_gb": max_backup_size_gb,
+        "snapshot_count": snapshot_count,
+        "db_backup_count": db_backup_count,
+        "proxmox_backup_count": proxmox_backup_count,
+        "total_backup_size": total_backup_size,
+        "total_count": snapshot_count + proxmox_backup_count,
+    }
+
+
+@router.post("/proxmox/{resource_id}/download")
+async def download_proxmox_backup(
+    resource_id: str,
+    volid: str = Query(...),
+    storage: str = Query(...),
+    filepath: str = Query(default="/"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Download a file from a Proxmox backup."""
+    resource = await _get_resource(db, user.id, resource_id)
+
+    try:
+        data = proxmox_client.download_backup_file(
+            resource.proxmox_node, storage, volid, filepath,
+        )
+        if isinstance(data, dict):
+            content = data.get("errors", b"")
+            if isinstance(content, str):
+                content = content.encode()
+        elif isinstance(data, bytes):
+            content = data
+        else:
+            content = str(data).encode()
+        filename = filepath.rsplit("/", 1)[-1] if "/" in filepath else filepath
+        if not filename or filename == "/":
+            filename = f"backup-{resource_id[:8]}.tar"
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/proxmox/{resource_id}/browse")
+async def browse_proxmox_backup(
+    resource_id: str,
+    volid: str = Query(...),
+    storage: str = Query(...),
+    filepath: str = Query(default="/"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Browse files inside a Proxmox backup."""
+    resource = await _get_resource(db, user.id, resource_id)
+
+    try:
+        files = proxmox_client.list_backup_files(
+            resource.proxmox_node, storage, volid, filepath,
+        )
+        return {"files": files}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# --- Admin Pruning & Management ---
+
+
+class PrunePolicy(BaseModel):
+    keep_last: int = 3
+    keep_daily: int = 7
+    keep_weekly: int = 4
+    keep_monthly: int = 6
+
+
+@router.get("/admin/pruning-policy")
+async def get_pruning_policy(
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """Get admin backup pruning policy."""
+    result = await db.execute(
+        select(SystemSetting).where(SystemSetting.key == "backup_pruning_policy")
+    )
+    setting = result.scalar_one_or_none()
+    if setting:
+        return _json.loads(setting.value)
+    return {"keep_last": 3, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
+
+
+@router.put("/admin/pruning-policy")
+async def set_pruning_policy(
+    body: PrunePolicy,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Set admin backup pruning policy."""
+    result = await db.execute(
+        select(SystemSetting).where(SystemSetting.key == "backup_pruning_policy")
+    )
+    setting = result.scalar_one_or_none()
+    value = _json.dumps(body.model_dump())
+    if setting:
+        setting.value = value
+    else:
+        db.add(SystemSetting(key="backup_pruning_policy", value=value))
+    await db.commit()
+    await log_action(db, admin.id, "backup_pruning_policy_update", "system", None, body.model_dump())
+    return {"status": "updated", **body.model_dump()}
+
+
+@router.post("/admin/prune")
+async def admin_prune_backups(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Run pruning on expired DB backup records."""
+    now = datetime.now(UTC)
+    result = await db.execute(
+        select(Backup).where(
+            Backup.expires_at.isnot(None),
+            Backup.expires_at < now,
+            Backup.status == "completed",
+        )
+    )
+    expired = result.scalars().all()
+    pruned = 0
+    for b in expired:
+        try:
+            if b.proxmox_volid and b.proxmox_storage:
+                resource = await db.get(Resource, b.resource_id)
+                if resource and resource.proxmox_node:
+                    proxmox_client.delete_storage_content(resource.proxmox_node, b.proxmox_storage, b.proxmox_volid)
+            await db.delete(b)
+            pruned += 1
+        except Exception:
+            logger.exception("Failed to prune backup %s", b.id)
+    await db.commit()
+    await log_action(db, admin.id, "backup_prune", "system", None, {"pruned": pruned})
+    return {"pruned": pruned, "total_expired": len(expired)}
+
+
+@router.get("/admin/all")
+async def admin_list_all_backups(
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """Admin: list ALL Proxmox backup files across all users."""
+    backups: list[dict] = []
+
+    # Build resource lookup
+    result = await db.execute(
+        select(Resource).where(
+            Resource.resource_type.in_(["vm", "lxc"]),
+            Resource.status != "destroyed",
+        )
+    )
+    vmid_map: dict[str, Resource] = {}
+    for r in result.scalars().all():
+        if r.proxmox_vmid:
+            vmid_map[str(r.proxmox_vmid)] = r
+
+    # Owner lookup
+    user_result = await db.execute(select(User))
+    user_map = {str(u.id): u.username for u in user_result.scalars().all()}
+
+    try:
+        storages = proxmox_client.get_storage_list()
+        for s in storages:
+            if "backup" not in s.get("content", ""):
+                continue
+            try:
+                node = s.get("node", "pve")
+                contents = proxmox_client.get_storage_content(node, s["storage"])
+                is_pbs = s.get("type") == "pbs"
+                for item in contents:
+                    if item.get("content") != "backup":
+                        continue
+                    volid = item.get("volid", "")
+                    notes = item.get("notes", "") or ""
+                    # Extract owner from paws tag
+                    owner_id = None
+                    owner_name = None
+                    if "[paws:" in notes:
+                        try:
+                            tag = notes.split("[paws:")[1].split("]")[0]
+                            owner_id = tag
+                            owner_name = user_map.get(tag, tag[:8])
+                        except Exception:
+                            pass
+
+                    # Match resource
+                    matched_resource = None
+                    for vmid_str, r in vmid_map.items():
+                        if vmid_str in volid:
+                            matched_resource = r
+                            break
+
+                    backups.append({
+                        "volid": volid,
+                        "size": item.get("size", 0),
+                        "ctime": item.get("ctime", 0),
+                        "format": item.get("format", "pbs" if is_pbs else ""),
+                        "storage": s["storage"],
+                        "notes": notes,
+                        "pbs": is_pbs,
+                        "owner_id": owner_id,
+                        "owner_name": owner_name,
+                        "resource_id": str(matched_resource.id) if matched_resource else None,
+                        "resource_name": matched_resource.display_name if matched_resource else None,
+                        "node": s.get("node") or (matched_resource.proxmox_node if matched_resource else None),
+                    })
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    backups.sort(key=lambda b: b.get("ctime", 0), reverse=True)
+    return {"backups": backups, "total": len(backups)}
+
+
+@router.delete("/admin/backup")
+async def admin_delete_backup(
+    volid: str = Query(...),
+    storage: str = Query(...),
+    node: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Admin: delete a specific Proxmox backup file."""
+    try:
+        proxmox_client.delete_storage_content(node, storage, volid)
+        await log_action(db, admin.id, "admin_backup_delete", "backup", None, {"volid": volid, "storage": storage})
+        return {"status": "deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))

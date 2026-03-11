@@ -4,6 +4,8 @@ import api from '../api/client';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/StatusBadge';
+import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
+import { useAuth } from '@/context/AuthContext';
 
 interface Container {
   id: string;
@@ -14,10 +16,12 @@ interface Container {
   live_status?: string;
   specs: { cores?: number; memory_mb?: number; disk_gb?: number };
   created_at: string;
+  last_accessed_at: string | null;
 }
 
 export default function Containers() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [containers, setContainers] = useState<Container[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -37,6 +41,14 @@ export default function Containers() {
     await api.delete(`/api/compute/containers/${id}`);
     fetch();
   };
+
+  const keepAlive = async (id: string) => {
+    await api.post(`/api/compute/containers/${id}/keepalive`);
+    fetch();
+  };
+
+  const lp = user?.lifecycle_policy;
+  const auditing = !!user?.impersonated_by;
 
   return (
     <div className="space-y-6">
@@ -58,6 +70,16 @@ export default function Containers() {
                   </p>
                 </div>
                 <StatusBadge status={ct.live_status || ct.status} />
+                {lp && (
+                  <LifecycleCountdown
+                    lastAccessedAt={ct.last_accessed_at}
+                    shutdownDays={lp.idle_shutdown_days}
+                    destroyDays={lp.idle_destroy_days}
+                    status={ct.live_status || ct.status}
+                    onKeepAlive={() => keepAlive(ct.id)}
+                    readOnly={auditing}
+                  />
+                )}
               </div>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" onClick={() => doAction(ct.id, 'start')}>Start</Button>

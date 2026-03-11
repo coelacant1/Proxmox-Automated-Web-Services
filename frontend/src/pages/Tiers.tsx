@@ -14,6 +14,9 @@ interface Tier {
   description: string | null;
   capabilities: string[];
   is_default: boolean;
+  idle_shutdown_days: number | null;
+  idle_destroy_days: number | null;
+  account_inactive_days: number | null;
 }
 
 interface TierRequest {
@@ -166,6 +169,16 @@ export default function Tiers() {
                         </div>
                       )}
                     </div>
+                    {(tier.idle_shutdown_days != null || tier.idle_destroy_days != null || tier.account_inactive_days != null) && (
+                      <div className="space-y-1 mb-4">
+                        <p className="text-xs text-paws-text-muted font-medium uppercase tracking-wide">Lifecycle Policy</p>
+                        <div className="text-xs text-paws-text space-y-0.5">
+                          {tier.idle_shutdown_days != null && <p>Idle shutdown: {tier.idle_shutdown_days === 0 ? <span className="text-green-400">exempt</span> : `${tier.idle_shutdown_days} days`}</p>}
+                          {tier.idle_destroy_days != null && <p>Idle destroy: {tier.idle_destroy_days === 0 ? <span className="text-green-400">exempt</span> : `${tier.idle_destroy_days} days`}</p>}
+                          {tier.account_inactive_days != null && <p>Account timeout: {tier.account_inactive_days === 0 ? <span className="text-green-400">exempt</span> : `${tier.account_inactive_days} days`}</p>}
+                        </div>
+                      </div>
+                    )}
                     {!isCurrent && (
                       <Button
                         size="sm"

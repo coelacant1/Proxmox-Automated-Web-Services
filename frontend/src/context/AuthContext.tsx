@@ -9,6 +9,13 @@ interface User {
   role: string;
   is_active: boolean;
   auth_provider: string;
+  impersonated_by?: string;
+  last_login_at?: string | null;
+  lifecycle_policy?: {
+    idle_shutdown_days: number;
+    idle_destroy_days: number;
+    account_inactive_days: number;
+  };
 }
 
 interface AuthContextType {
@@ -19,6 +26,9 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   sessionTimeoutMinutes: number;
+  isImpersonating: boolean;
+  stopImpersonating: () => Promise<void>;
+  startImpersonating: (token: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -54,10 +64,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const doLogout = useCallback(() => {
+    // If impersonating, also clear the saved admin token
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
+    localStorage.removeItem('admin_token_backup');
     setUser(null);
   }, []);
+
+  const stopImpersonating = useCallback((): Promise<void> => {
+    const adminToken = localStorage.getItem('admin_token_backup');
+    if (adminToken) {
+      localStorage.setItem('access_token', adminToken);
+      localStorage.removeItem('admin_token_backup');
+      // Reload user info as the admin before resolving
+      return api.get('/api/auth/me')
+        .then((res) => setUser(res.data))
+        .catch(() => doLogout());
+    }
+    return Promise.resolve();
+  }, [doLogout]);
+
+  const startImpersonating = useCallback(async (token: string) => {
+    // Save current admin token so we can restore it
+    const currentToken = localStorage.getItem('access_token');
+    if (currentToken) {
+      localStorage.setItem('admin_token_backup', currentToken);
+    }
+    localStorage.setItem('access_token', token);
+    try {
+      const me = await api.get('/api/auth/me');
+      setUser(me.data);
+    } catch {
+      // Restore admin token on failure
+      if (currentToken) localStorage.setItem('access_token', currentToken);
+      localStorage.removeItem('admin_token_backup');
+      throw new Error('Failed to impersonate user');
+    }
+  }, []);
+
+  const isImpersonating = !!user?.impersonated_by;
 
   // Session timeout checker
   useEffect(() => {
@@ -108,7 +153,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, loginWithOAuth, logout: doLogout, isAuthenticated: !!user, sessionTimeoutMinutes }}>
+    <AuthContext.Provider value={{ user, loading, login, loginWithOAuth, logout: doLogout, isAuthenticated: !!user, sessionTimeoutMinutes, isImpersonating, stopImpersonating, startImpersonating }}>
       {children}
     </AuthContext.Provider>
   );

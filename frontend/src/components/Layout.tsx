@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation } from 'react-router-dom';
+import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui';
@@ -31,6 +31,7 @@ import {
   ScrollText,
   Crown,
   KeyRound,
+  Eye,
 } from 'lucide-react';
 
 const navSections = [
@@ -95,12 +96,30 @@ const navSections = [
 ];
 
 export default function Layout() {
-  const { user, logout } = useAuth();
+  const { user, logout, isImpersonating, stopImpersonating } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
+
+  const handleExitAudit = async () => {
+    await stopImpersonating();
+    navigate('/admin');
+  };
 
   return (
     <div className="flex min-h-screen">
-      <nav className="w-60 bg-paws-bg border-r border-paws-border flex flex-col p-4 gap-0.5 overflow-y-auto">
+      {isImpersonating && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-amber-600 text-black text-center py-2 px-4 flex items-center justify-center gap-3 text-sm font-medium">
+          <Eye className="w-4 h-4" />
+          <span>Viewing as <strong>{user?.username}</strong> ({user?.role})</span>
+          <button
+            onClick={handleExitAudit}
+            className="ml-2 px-3 py-0.5 bg-black/20 hover:bg-black/30 rounded text-sm font-semibold transition-colors"
+          >
+            Exit Audit Mode
+          </button>
+        </div>
+      )}
+      <nav className={cn("w-60 bg-paws-bg border-r border-paws-border flex flex-col p-4 gap-0.5 overflow-y-auto", isImpersonating && "pt-14")}>
         <h2 className="text-xl font-bold text-paws-primary mb-4 px-3">pAWS</h2>
         {navSections.map((section) => (
           <div key={section.label} className="mb-3">
@@ -146,7 +165,7 @@ export default function Layout() {
           </Button>
         </div>
       </nav>
-      <main className="flex-1 p-8 overflow-auto">
+      <main className={cn("flex-1 p-8 overflow-auto", isImpersonating && "pt-14")}>
         <Outlet />
       </main>
     </div>
