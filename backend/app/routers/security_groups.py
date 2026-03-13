@@ -4,7 +4,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -178,6 +178,7 @@ async def delete_security_group(
     user: User = Depends(get_current_active_user),
 ):
     sg = await _get_user_sg(db, user.id, sg_id, min_perm="admin")
+    await db.execute(delete(ResourceSecurityGroup).where(ResourceSecurityGroup.security_group_id == sg.id))
     await db.delete(sg)
     await db.commit()
 

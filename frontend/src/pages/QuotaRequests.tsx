@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Monitor, Box, Cpu, MemoryStick, HardDrive, Camera, Archive, Database, ArrowUpRight } from 'lucide-react';
+import { Monitor, Box, Cpu, MemoryStick, HardDrive, Camera, Archive, Database, ArrowUpRight, Network, AlertTriangle } from 'lucide-react';
 import api from '../api/client';
 import { Button, Card, CardHeader, CardTitle, CardContent, Input, QuotaBar, StatusBadge, Tabs } from '@/components/ui';
 
@@ -18,6 +18,7 @@ interface DashboardSummary {
     max_vms: number; max_containers: number; max_vcpus: number;
     max_ram_mb: number; max_disk_gb: number; max_snapshots: number;
     max_backups: number; max_backup_size_gb: number;
+    max_networks: number; max_subnets_per_network: number; max_elastic_ips: number;
   };
 }
 
@@ -34,6 +35,8 @@ const QUOTA_LABELS: Record<string, string> = {
   max_vms: 'Max VMs', max_containers: 'Max Containers', max_vcpus: 'Max vCPUs',
   max_ram_mb: 'Max RAM (MB)', max_disk_gb: 'Max Disk (GB)', max_snapshots: 'Max Snapshots',
   max_backups: 'Max Backups', max_backup_size_gb: 'Max Backup Storage (GB)',
+  max_networks: 'Max Networks', max_subnets_per_network: 'Max Subnets per Network',
+  max_elastic_ips: 'Max Elastic IPs',
 };
 
 function formatSize(bytes: number): string {
@@ -93,6 +96,39 @@ export default function QuotaRequests() {
       </div>
 
       <Tabs tabs={tabs} activeTab={tab} onChange={setTab} />
+
+      {/* Over-quota warning */}
+      {summary && (() => {
+        const overItems: string[] = [];
+        const r = summary.resources;
+        const q = summary.quota;
+        if (r.vms >= q.max_vms) overItems.push('VMs');
+        if (r.containers >= q.max_containers) overItems.push('Containers');
+        if (r.vcpus_used >= q.max_vcpus) overItems.push('vCPUs');
+        if (r.ram_mb_used >= q.max_ram_mb) overItems.push('RAM');
+        if (r.disk_gb_used >= q.max_disk_gb) overItems.push('Disk');
+        if (r.networks >= (q.max_networks ?? Infinity)) overItems.push('Networks');
+        if (r.snapshots >= q.max_snapshots) overItems.push('Snapshots');
+        if (backupQuota && backupQuota.proxmox_backup_count >= backupQuota.max_backups) overItems.push('Backups');
+        if (backupQuota && backupQuota.total_backup_size >= backupQuota.max_backup_size_gb * 1073741824) overItems.push('Backup Storage');
+        return overItems.length > 0 ? (
+          <Card className="border-paws-danger/30">
+            <CardContent className="py-3">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-full bg-paws-danger/10">
+                  <AlertTriangle className="h-5 w-5 text-paws-danger" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-paws-text">Over Quota</p>
+                  <p className="text-xs text-paws-text-dim">
+                    You are over quota for: {overItems.join(', ')}. Reduce usage or request a quota increase.
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null;
+      })()}
 
       {/* Usage Tab */}
       {tab === 'usage' && summary && (
@@ -158,6 +194,27 @@ export default function QuotaRequests() {
             </CardContent>
           </Card>
 
+          {/* Networking Quotas */}
+          <Card>
+            <CardHeader><CardTitle>Networking</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+                <div className="flex items-center gap-3">
+                  <Network className="h-5 w-5 text-paws-primary shrink-0" />
+                  <div className="flex-1"><QuotaBar label="Networks (VPCs)" used={summary.resources.networks} limit={summary.quota.max_networks} /></div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Network className="h-5 w-5 text-paws-info shrink-0" />
+                  <div className="flex-1"><QuotaBar label="Subnets per Network" used={0} limit={summary.quota.max_subnets_per_network} /></div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Network className="h-5 w-5 text-paws-warning shrink-0" />
+                  <div className="flex-1"><QuotaBar label="Elastic IPs" used={0} limit={summary.quota.max_elastic_ips} /></div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Storage Quotas */}
           <Card>
             <CardHeader><CardTitle>Object Storage</CardTitle></CardHeader>
@@ -195,6 +252,9 @@ export default function QuotaRequests() {
                       { label: 'Snapshots', used: backupQuota?.snapshot_count ?? summary.resources.snapshots, limit: summary.quota.max_snapshots },
                       { label: 'Backups', used: backupQuota?.proxmox_backup_count ?? 0, limit: summary.quota.max_backups },
                       { label: 'Backup Storage (GB)', used: backupQuota ? Math.round(backupQuota.total_backup_size / (1024 * 1024 * 1024)) : 0, limit: summary.quota.max_backup_size_gb },
+                      { label: 'Networks (VPCs)', used: summary.resources.networks, limit: summary.quota.max_networks },
+                      { label: 'Subnets per Network', used: 0, limit: summary.quota.max_subnets_per_network },
+                      { label: 'Elastic IPs', used: 0, limit: summary.quota.max_elastic_ips },
                     ].map((row) => {
                       const avail = Math.max(0, row.limit - row.used);
                       const ratio = row.limit > 0 ? row.used / row.limit : 0;

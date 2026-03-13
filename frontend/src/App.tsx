@@ -5,7 +5,6 @@ import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './components/ui';
 import Admin from './pages/Admin';
 import AdminDashboard from './pages/AdminDashboard';
-import Alarms from './pages/Alarms';
 import APIDocs from './pages/APIDocs';
 import APIKeys from './pages/APIKeys';
 import BackupDetail from './pages/BackupDetail';
@@ -20,15 +19,12 @@ import SystemRules from './pages/SystemRules';
 import CreateInstance from './pages/CreateInstance';
 import CustomImages from './pages/CustomImages';
 import Dashboard from './pages/Dashboard';
-import DNSManagement from './pages/DNSManagement';
 import Endpoints from './pages/Endpoints';
 import FileBrowser from './pages/FileBrowser';
 import ImportExport from './pages/ImportExport';
 import InstanceDetail from './pages/InstanceDetail';
-import IPManagement from './pages/IPManagement';
 import Login from './pages/Login';
 import MFASettings from './pages/MFASettings';
-import MonitoringDashboard from './pages/MonitoringDashboard';
 import Networking from './pages/Networking';
 import OAuthCallback from './pages/OAuthCallback';
 import QuotaRequests from './pages/QuotaRequests';
@@ -68,18 +64,17 @@ function App() {
             <Route path="storage/:bucketName" element={<FileBrowser />} />
             <Route path="storage/:bucketName/detail" element={<BucketDetail />} />
             <Route path="storage/:bucketName/files" element={<FileBrowser />} />
+            <Route path="networks" element={<VPCs />} />
             <Route path="vpcs" element={<VPCs />} />
+            <Route path="firewalls" element={<SecurityGroups />} />
             <Route path="security-groups" element={<SecurityGroups />} />
             <Route path="networking" element={<Networking />} />
             <Route path="endpoints" element={<Endpoints />} />
             <Route path="ssh-keys" element={<SSHKeys />} />
-            <Route path="ip-addresses" element={<IPManagement />} />
-            <Route path="dns" element={<DNSManagement />} />
+
             <Route path="backups" element={<BackupsEnhanced />} />
             <Route path="backups/:backupId" element={<BackupDetail />} />
             <Route path="backups/settings" element={<BackupSettingsPage />} />
-            <Route path="alarms" element={<Alarms />} />
-            <Route path="monitoring" element={<MonitoringDashboard />} />
             <Route path="costs" element={<CostDashboard />} />
             <Route path="tags" element={<Tags />} />
             <Route path="quota-requests" element={<QuotaRequests />} />

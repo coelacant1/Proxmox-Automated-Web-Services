@@ -64,10 +64,18 @@ export default function InstanceDetail() {
   const [tab, setTab] = useState('overview');
   const [loading, setLoading] = useState(true);
   const [showResize, setShowResize] = useState(false);
-  const [showCloudInit, setShowCloudInit] = useState(false);
+  const [showConfig, setShowConfig] = useState(false);
   const [showDestroy, setShowDestroy] = useState(false);
   const [resizeForm, setResizeForm] = useState({ cores: 1, memory_mb: 512, disk_gb: 10 });
-  const [cloudInitForm, setCloudInitForm] = useState({ hostname: '', ssh_keys: '', user_data: '' });
+  const [configForm, setConfigForm] = useState({
+    username: '', password: '', ssh_key_ids: [] as string[], dns_domain: '',
+    dns_server: '', hostname: '',
+  });
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configPasswordSet, setConfigPasswordSet] = useState(false);
+  const [configIpAddress, setConfigIpAddress] = useState<string | null>(null);
+  const [configAllocatedIp, setConfigAllocatedIp] = useState<string | null>(null);
+  const [userSshKeys, setUserSshKeys] = useState<Array<{ id: string; name: string }>>([]);
 
   // Networking
   const [attachedSGs, setAttachedSGs] = useState<SGRef[]>([]);
@@ -77,6 +85,7 @@ export default function InstanceDetail() {
   const [showAddEndpoint, setShowAddEndpoint] = useState(false);
   const [newEndpoint, setNewEndpoint] = useState({ name: '', protocol: 'http', internal_port: 80, subdomain: '' });
   const [showAddSG, setShowAddSG] = useState(false);
+  const [networkMode, setNetworkMode] = useState<{ network_mode: string; bandwidth_limit_mbps: number | null; effective_bandwidth_mbps: number } | null>(null);
 
   // Snapshots
   const [snapshots, setSnapshots] = useState<SnapshotRef[]>([]);
@@ -100,7 +109,7 @@ export default function InstanceDetail() {
   const [taskHistory, setTaskHistory] = useState<TaskItem[]>([]);
   const [backups, setBackups] = useState<BackupItem[]>([]);
   const [netInterfaces, setNetInterfaces] = useState<NetInterface>({});
-  const [vpcs, setVpcs] = useState<Array<{ id: string; name: string; vnet?: string; vxlan_tag?: number; cidr?: string }>>([]);
+  const [vpcs, setVpcs] = useState<Array<{ id: string; name: string; vnet?: string; vxlan_tag?: number; cidr?: string; network_mode?: string }>>([]);
   const [showBackupModal, setShowBackupModal] = useState(false);
   const [backupForm, setBackupForm] = useState({ storage: '', mode: 'snapshot', compress: 'zstd', notes: '' });
   const [backupStorages, setBackupStorages] = useState<Array<{ storage: string }>>([]);
@@ -112,6 +121,10 @@ export default function InstanceDetail() {
   const [backupFileLoading, setBackupFileLoading] = useState(false);
   const [showNetModal, setShowNetModal] = useState(false);
   const [netForm, setNetForm] = useState({ net_id: 'net0', vpc_id: '' });
+  const [ipAddresses, setIpAddresses] = useState<Record<string, string[]>>({});
+  const [resourceType, setResourceType] = useState<string>('');
+  const [showAddNic, setShowAddNic] = useState(false);
+  const [addNicVpc, setAddNicVpc] = useState('');
 
   // Generic confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -163,6 +176,8 @@ export default function InstanceDetail() {
     api.get(`/api/compute/vms/${id}/network`).then((r) => {
       setNetInterfaces(r.data?.interfaces || {});
       setVpcs(r.data?.vpcs || []);
+      setIpAddresses(r.data?.ip_addresses || {});
+      setResourceType(r.data?.resource_type || '');
     }).catch(() => {});
     api.get(`/api/volumes/?resource_id=${id}`).then((r) => setVolumes(r.data || [])).catch(() => {});
     api.get(`/api/compute/instances/${id}/ha`).then((r) => setHaStatus(r.data)).catch(() => setHaStatus(null));
@@ -215,6 +230,8 @@ export default function InstanceDetail() {
     api.get(`/api/compute/vms/${id}/network`).then((r) => {
       setNetInterfaces(r.data?.interfaces || {});
       setVpcs(r.data?.vpcs || []);
+      setIpAddresses(r.data?.ip_addresses || {});
+      setResourceType(r.data?.resource_type || '');
     }).catch(() => {});
   };
 
@@ -230,8 +247,15 @@ export default function InstanceDetail() {
       .catch(() => {});
   };
 
+  const fetchNetworkMode = () => {
+    if (!id) return;
+    api.get(`/api/networking/instances/${id}/network-mode`)
+      .then((r) => setNetworkMode(r.data))
+      .catch(() => {});
+  };
+
   useEffect(fetchData, [id]);
-  useEffect(() => { if (inst && tab === 'networking') fetchFirewall(); }, [inst, tab]);
+  useEffect(() => { if (inst && tab === 'networking') { fetchFirewall(); fetchNetworkMode(); } }, [inst, tab]);
   useEffect(() => {
     if (!id) return;
     api.get(`/api/compute/vms/${id}/metrics?timeframe=${metricsTimeframe}`)
@@ -284,10 +308,50 @@ export default function InstanceDetail() {
     }
   };
 
-  const handleCloudInit = async () => {
+  const loadConfig = async () => {
     if (!id) return;
-    await api.put(`/api/compute/vms/${id}/cloud-init`, cloudInitForm);
-    setShowCloudInit(false);
+    setConfigLoading(true);
+    try {
+      const [configRes, keysRes] = await Promise.all([
+        api.get(`/api/compute/vms/${id}/config`),
+        api.get('/api/ssh-keys/'),
+      ]);
+      const d = configRes.data;
+      setUserSshKeys(keysRes.data.map((k: any) => ({ id: k.id, name: k.name })));
+      setConfigForm({
+        username: d.username || '',
+        password: '',
+        ssh_key_ids: d.ssh_key_ids || [],
+        dns_domain: d.dns_domain || '',
+        dns_server: d.dns_server || '',
+        hostname: d.hostname || '',
+      });
+      setConfigPasswordSet(d.password_set || false);
+      setConfigIpAddress(d.ip_address || null);
+      setConfigAllocatedIp(d.allocated_ip || null);
+    } catch {
+      toast('Failed to load instance config', 'error');
+    } finally {
+      setConfigLoading(false);
+    }
+  };
+
+  const handleSaveConfig = async () => {
+    if (!id) return;
+    try {
+      const payload: Record<string, unknown> = {};
+      if (configForm.username) payload.username = configForm.username;
+      if (configForm.password) payload.password = configForm.password;
+      payload.ssh_key_ids = configForm.ssh_key_ids;
+      if (configForm.dns_domain) payload.dns_domain = configForm.dns_domain;
+      if (configForm.dns_server) payload.dns_server = configForm.dns_server;
+      if (configForm.hostname) payload.hostname = configForm.hostname;
+      await api.put(`/api/compute/vms/${id}/config`, payload);
+      setShowConfig(false);
+      toast('Configuration updated', 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to save config', 'error');
+    }
   };
 
   const handleDestroy = async () => {
@@ -557,9 +621,11 @@ export default function InstanceDetail() {
   const handleNetworkUpdate = async () => {
     if (!id) return;
     try {
-      await api.put(`/api/compute/vms/${id}/network`, netForm);
+      const res = await api.put(`/api/compute/vms/${id}/network`, netForm);
       setShowNetModal(false);
       refreshNetwork();
+      const msg = res.data?.message || 'Network updated';
+      toast(msg, res.data?.restarted ? 'warning' : 'success');
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Network update failed', 'error');
     }
@@ -799,7 +865,7 @@ export default function InstanceDetail() {
               <Button variant="outline" size="sm" onClick={() => setShowResize(true)} title="Resize">
                 <Maximize className="h-3.5 w-3.5" />
               </Button>
-              <Button variant="outline" size="sm" onClick={() => setShowCloudInit(true)} title="Cloud-Init">
+              <Button variant="outline" size="sm" onClick={() => { setShowConfig(true); loadConfig(); }} title="Instance Config">
                 <Cloud className="h-3.5 w-3.5" />
               </Button>
             </>
@@ -939,27 +1005,123 @@ export default function InstanceDetail() {
       {/* Networking */}
       {tab === 'networking' && (
         <div className="space-y-4">
+          {/* Network Mode (inherited from network) */}
+          <Card>
+            <CardHeader><CardTitle>Network Mode</CardTitle></CardHeader>
+            <CardContent>
+              {networkMode ? (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <Badge variant={networkMode.network_mode === 'published' ? 'warning' : networkMode.network_mode === 'isolated' ? 'danger' : 'success'} className="text-sm px-3 py-1">
+                      {networkMode.network_mode.charAt(0).toUpperCase() + networkMode.network_mode.slice(1)}
+                    </Badge>
+                    <span className="text-xs text-paws-text-dim">
+                      {networkMode.network_mode === 'private' && 'Full LAN + Internet access'}
+                      {networkMode.network_mode === 'published' && 'Internet only, LAN blocked'}
+                      {networkMode.network_mode === 'isolated' && 'Own subnet only'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-paws-text-dim">
+                    Network mode is set per-network.
+                    {(networkMode as any).vpc_name && <> Inherited from <span className="text-paws-text font-medium">{(networkMode as any).vpc_name}</span>.</>}
+                    {' '}Change it in the <a href="/networks" className="text-paws-primary hover:underline">Networks</a> page.
+                  </p>
+                  <div className="flex items-center gap-4 text-xs text-paws-text-dim">
+                    <span>Bandwidth: <span className="text-paws-text font-mono">{networkMode.effective_bandwidth_mbps} MB/s</span></span>
+                    {networkMode.bandwidth_limit_mbps !== null && (
+                      <span className="text-paws-warning">(Override: {networkMode.bandwidth_limit_mbps} MB/s)</span>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-paws-text-dim">No network assigned — network mode not available.</p>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Network Interfaces */}
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between w-full">
                 <CardTitle>Network Interfaces</CardTitle>
-                <Button variant="outline" size="sm" onClick={() => setShowNetModal(true)}>
-                  <Network className="h-3.5 w-3.5 mr-1" /> Change Network
-                </Button>
+                <div className="flex gap-2">
+                  {resourceType === 'qemu' && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!networkMode || networkMode.network_mode === 'isolated' || Object.keys(netInterfaces).length >= 2}
+                      title={
+                        !networkMode ? 'No network assigned' :
+                        networkMode.network_mode === 'isolated' ? 'Cannot add NIC on isolated network' :
+                        Object.keys(netInterfaces).length >= 2 ? 'Maximum 2 NICs' : 'Add network interface'
+                      }
+                      onClick={() => { setAddNicVpc(''); setShowAddNic(true); }}
+                    >
+                      <Plus className="h-3.5 w-3.5 mr-1" /> Add NIC
+                    </Button>
+                  )}
+                  <Button variant="outline" size="sm" onClick={() => setShowNetModal(true)}>
+                    <Network className="h-3.5 w-3.5 mr-1" /> Change Network
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent>
               {Object.entries(netInterfaces).length === 0 ? (
                 <p className="text-sm text-paws-text-dim">No interfaces configured.</p>
               ) : (
-                <div className="space-y-2">
-                  {Object.entries(netInterfaces).map(([k, v]) => (
-                    <div key={k} className="flex items-center justify-between py-2 border-b border-paws-border-subtle last:border-0">
-                      <span className="text-sm font-medium text-paws-accent">{k}</span>
-                      <span className="text-sm text-paws-text font-mono">{String(v)}</span>
-                    </div>
-                  ))}
+                <div className="space-y-3">
+                  {Object.entries(netInterfaces).map(([k, v]) => {
+                    const parts = String(v).split(',');
+                    const bridge = parts.find((p) => p.startsWith('bridge='))?.split('=')[1] || '';
+                    const macPart = parts.find((p) => /^([0-9A-Fa-f]{2}:){5}/.test(p) || p.startsWith('hwaddr='));
+                    const mac = macPart ? macPart.replace('hwaddr=', '') : '';
+                    const matchingIface = Object.entries(ipAddresses).find(([, ips]) => ips.length > 0);
+                    const ifaceIps = k === 'net0' && matchingIface ? matchingIface[1] : (ipAddresses[`eth${k.replace('net', '')}`] || []);
+                    return (
+                      <div key={k} className="rounded-lg border border-paws-border-subtle p-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-paws-accent">{k}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-paws-text-dim font-mono">{bridge}</span>
+                            {k !== 'net0' && resourceType === 'qemu' && (
+                              <button
+                                className="text-xs text-red-400 hover:text-red-300"
+                                onClick={() => setConfirmDialog({
+                                  title: 'Remove NIC',
+                                  message: `Remove interface ${k}? The VM may need to be stopped first.`,
+                                  variant: 'danger',
+                                  confirmLabel: 'Remove',
+                                  onConfirm: async () => {
+                                    try {
+                                      await api.delete(`/api/compute/vms/${id}/network/nics/${k}`);
+                                      toast(`Interface ${k} removed`, 'success');
+                                      refreshNetwork();
+                                    } catch (e: any) {
+                                      toast(e.response?.data?.detail || 'Failed to remove NIC', 'error');
+                                    }
+                                    setConfirmDialog(null);
+                                  },
+                                })}
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {mac && <p className="text-xs text-paws-text-dim font-mono">{mac}</p>}
+                        {ifaceIps.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {ifaceIps.map((ip) => (
+                              <span key={ip} className="inline-block rounded bg-paws-primary/10 px-1.5 py-0.5 text-xs font-mono text-paws-primary">
+                                {ip}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>
@@ -1409,8 +1571,8 @@ export default function InstanceDetail() {
                 <Button variant="outline" onClick={() => setShowResize(true)}>
                   <Maximize className="h-4 w-4 mr-1" /> Resize
                 </Button>
-                <Button variant="outline" onClick={() => setShowCloudInit(true)}>
-                  <Cloud className="h-4 w-4 mr-1" /> Cloud-Init
+                <Button variant="outline" onClick={() => { setShowConfig(true); loadConfig(); }}>
+                  <Cloud className="h-4 w-4 mr-1" /> Instance Config
                 </Button>
                 <Button variant="outline" onClick={async () => {
                   if (!id || !inst) return;
@@ -1498,34 +1660,76 @@ export default function InstanceDetail() {
         </div>
       </Modal>
 
-      {/* Cloud-Init Modal */}
-      <Modal open={showCloudInit} onClose={() => setShowCloudInit(false)} title="Cloud-Init Configuration" size="lg">
-        <div className="space-y-4">
-          <Input label="Hostname" value={cloudInitForm.hostname}
-            onChange={(e) => setCloudInitForm({ ...cloudInitForm, hostname: e.target.value })} />
-          <div>
-            <label className="block text-sm font-medium text-paws-text mb-1">SSH Keys</label>
-            <textarea
-              className="w-full h-20 bg-paws-bg border border-paws-border rounded-md px-3 py-2 text-sm text-paws-text font-mono resize-y"
-              value={cloudInitForm.ssh_keys}
-              onChange={(e) => setCloudInitForm({ ...cloudInitForm, ssh_keys: e.target.value })}
-              placeholder="ssh-ed25519 AAAA..."
-            />
+      {/* Instance Configuration Modal */}
+      <Modal open={showConfig} onClose={() => setShowConfig(false)} title="Instance Configuration" size="lg">
+        {configLoading ? (
+          <p className="text-sm text-paws-text-dim py-4">Loading configuration...</p>
+        ) : (
+          <div className="space-y-4">
+            {/* IP Address (read-only) */}
+            {(configAllocatedIp || configIpAddress) && (
+              <div className="flex items-center gap-3 p-3 rounded-md bg-paws-surface border border-paws-border-subtle">
+                <Network className="h-4 w-4 text-paws-primary" />
+                <div>
+                  <p className="text-xs text-paws-text-dim">IP Address</p>
+                  <p className="text-sm font-mono text-paws-text">{configAllocatedIp || configIpAddress}</p>
+                </div>
+                <p className="text-xs text-paws-text-dim ml-auto">Change IP from VPCs page</p>
+              </div>
+            )}
+            <Input label="Hostname" value={configForm.hostname}
+              onChange={(e) => setConfigForm({ ...configForm, hostname: e.target.value })} />
+            <div className="grid grid-cols-2 gap-4">
+              <Input label="Username" value={configForm.username} placeholder="paws"
+                onChange={(e) => setConfigForm({ ...configForm, username: e.target.value })} />
+              <div>
+                <Input label={configPasswordSet ? 'Password (already set)' : 'Password'} type="password"
+                  value={configForm.password} placeholder={configPasswordSet ? '(unchanged)' : 'Set password'}
+                  onChange={(e) => setConfigForm({ ...configForm, password: e.target.value })} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <Input label="DNS Server" value={configForm.dns_server} placeholder="1.1.1.1"
+                onChange={(e) => setConfigForm({ ...configForm, dns_server: e.target.value })} />
+              <Input label="DNS Domain" value={configForm.dns_domain} placeholder="example.local"
+                onChange={(e) => setConfigForm({ ...configForm, dns_domain: e.target.value })} />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-paws-text mb-1">SSH Keys</label>
+              {userSshKeys.length > 0 ? (
+                <div className="space-y-1.5">
+                  {userSshKeys.map((k) => (
+                    <label key={k.id} className="flex items-center gap-2 text-sm text-paws-text cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={configForm.ssh_key_ids.includes(k.id)}
+                        onChange={(e) => {
+                          const ids = e.target.checked
+                            ? [...configForm.ssh_key_ids, k.id]
+                            : configForm.ssh_key_ids.filter((x) => x !== k.id);
+                          setConfigForm({ ...configForm, ssh_key_ids: ids });
+                        }}
+                        className="rounded border-paws-border"
+                      />
+                      {k.name}
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-paws-text-dim">No SSH keys added. <a href="/ssh-keys" className="text-paws-primary hover:underline">Add SSH keys</a> to manage them here.</p>
+              )}
+            </div>
+            <p className="text-xs text-paws-text-dim">
+              {inst?.resource_type === 'lxc'
+                ? 'LXC containers support hostname, password, DNS, and SSH keys.'
+                : 'VM changes are applied via cloud-init. A reboot may be required for changes to take effect.'}
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={() => setShowConfig(false)}>Cancel</Button>
+              <Button onClick={handleSaveConfig}>Save</Button>
+            </div>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-paws-text mb-1">User Data (cloud-config)</label>
-            <textarea
-              className="w-full h-32 bg-paws-bg border border-paws-border rounded-md px-3 py-2 text-sm text-paws-text font-mono resize-y"
-              value={cloudInitForm.user_data}
-              onChange={(e) => setCloudInitForm({ ...cloudInitForm, user_data: e.target.value })}
-              placeholder="#cloud-config&#10;packages:&#10;  - nginx"
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => setShowCloudInit(false)}>Cancel</Button>
-            <Button onClick={handleCloudInit}>Save</Button>
-          </div>
-        </div>
+        )}
       </Modal>
 
       {/* Attach Security Group Modal */}
@@ -1642,6 +1846,39 @@ export default function InstanceDetail() {
           <p className="text-xs text-paws-text-dim">Note: VM should be stopped before changing network.</p>
           <Button onClick={handleNetworkUpdate} variant="primary" className="w-full" disabled={!netForm.vpc_id}>
             Update Network
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Add NIC Modal */}
+      <Modal open={showAddNic} onClose={() => setShowAddNic(false)} title="Add Network Interface">
+        <div className="space-y-3">
+          {vpcs.length > 0 ? (
+            <>
+              <Select label="Network (private only)" value={addNicVpc}
+                onChange={(e) => setAddNicVpc(e.target.value)}
+                options={[
+                  { value: '', label: '- Select a private network -' },
+                  ...vpcs.filter((v) => !v.network_mode || v.network_mode === 'private').map((v) => ({
+                    value: v.id,
+                    label: `${v.name} (${v.cidr || ''}) ${v.vnet ? `- vnet: ${v.vnet}` : ''}`,
+                  })),
+                ]} />
+              <p className="text-xs text-paws-text-dim">Secondary NICs can only be added to private networks. Maximum 2 NICs per instance.</p>
+            </>
+          ) : (
+            <p className="text-sm text-paws-text-dim">No VPCs available.</p>
+          )}
+          <p className="text-xs text-paws-text-dim">The VM should be stopped before adding a NIC.</p>
+          <Button variant="primary" className="w-full" disabled={!addNicVpc}
+            onClick={async () => {
+              try {
+                await api.post(`/api/compute/vms/${id}/network/nics`, { vpc_id: addNicVpc });
+                setShowAddNic(false);
+                refreshNetwork();
+              } catch { /* ignore */ }
+            }}>
+            Add NIC
           </Button>
         </div>
       </Modal>

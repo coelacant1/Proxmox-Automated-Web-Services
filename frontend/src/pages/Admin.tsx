@@ -10,9 +10,9 @@ import { StatusBadge } from '@/components/ui/StatusBadge';
 import { DataTable } from '@/components/ui/DataTable';
 import type { Column } from '@/components/ui/DataTable';
 import { MetricCard } from '@/components/ui/MetricCard';
-import { Textarea, Modal, Select, useToast, Tabs } from '@/components/ui';
+import { Textarea, Modal, Select, useToast, Tabs, ConfirmDialog } from '@/components/ui';
 import { QuotaBar } from '@/components/ui/QuotaBar';
-import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, Search, Eye } from 'lucide-react';
+import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, Search, Eye, Network } from 'lucide-react';
 import {
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart, Bar, BarChart,
@@ -74,6 +74,8 @@ interface TierData {
   id: string; name: string; description: string | null;
   capabilities: string[]; is_default: boolean; created_at: string | null;
   idle_shutdown_days: number | null; idle_destroy_days: number | null; account_inactive_days: number | null;
+  max_subnet_prefix?: number | null;
+  bandwidth_limit_mbps?: number;
 }
 interface SystemRuleData {
   id: string; category: string; title: string; description: string;
@@ -93,7 +95,7 @@ interface TemplateRequestData {
 const ADMIN_SECTIONS = [
   {
     label: 'Dashboard',
-    tabs: ['Overview', 'Analytics', 'Instances', 'Volumes', 'VPCs', 'Security Groups', 'Object Storage', 'Backups', 'DNS Records', 'Alarms', 'SSH Keys', 'Endpoints'] as const,
+    tabs: ['Overview', 'Analytics', 'Instances', 'Volumes', 'Networks', 'Firewalls', 'Object Storage', 'Backups', 'SSH Keys', 'Endpoints'] as const,
   },
   {
     label: 'Users & Groups',
@@ -105,7 +107,7 @@ const ADMIN_SECTIONS = [
   },
   {
     label: 'Infrastructure',
-    tabs: ['Storage', 'Cluster'] as const,
+    tabs: ['Storage', 'Cluster', 'SDN'] as const,
   },
 ] as const;
 
@@ -189,12 +191,10 @@ export default function Admin() {
       {activeTab === 'Analytics' && <AnalyticsTab />}
       {activeTab === 'Instances' && <AdminResourcesTab category="instances" />}
       {activeTab === 'Volumes' && <AdminResourcesTab category="volumes" />}
-      {activeTab === 'VPCs' && <AdminResourcesTab category="vpcs" />}
-      {activeTab === 'Security Groups' && <AdminResourcesTab category="security_groups" />}
+      {activeTab === 'Networks' && <AdminResourcesTab category="vpcs" />}
+      {activeTab === 'Firewalls' && <AdminResourcesTab category="security_groups" />}
       {activeTab === 'Object Storage' && <AdminResourcesTab category="storage_buckets" />}
       {activeTab === 'Backups' && <AdminResourcesTab category="backups" />}
-      {activeTab === 'DNS Records' && <AdminResourcesTab category="dns_records" />}
-      {activeTab === 'Alarms' && <AdminResourcesTab category="alarms" />}
       {activeTab === 'SSH Keys' && <AdminResourcesTab category="ssh_keys" />}
       {activeTab === 'Endpoints' && <AdminResourcesTab category="endpoints" />}
       {activeTab === 'Users' && <UsersTab />}
@@ -209,6 +209,7 @@ export default function Admin() {
       {activeTab === 'Audit Log' && <AuditLogTab />}
       {activeTab === 'API Keys' && <ApiKeysTab onSwitchTab={handleTabClick} />}
       {activeTab === 'Cluster' && <ClusterTab />}
+      {activeTab === 'SDN' && <SDNTab />}
     </div>
   );
 }
@@ -515,9 +516,8 @@ function AdminResourcesTab({ category }: { category: string }) {
     // All other resource types — impersonate and go to the list page
     const categoryRouteMap: Record<string, string> = {
       volumes: '/volumes',
-      vpcs: '/vpcs',
-      security_groups: '/security-groups',
-      dns_records: '/dns',
+      vpcs: '/networks',
+      security_groups: '/firewalls',
       alarms: '/alarms',
       ssh_keys: '/ssh-keys',
       endpoints: '/endpoints',
@@ -871,7 +871,7 @@ function UsersTab() {
                 <p className="text-2xl font-bold text-paws-text">{s.volumes.count} <span className="text-xs text-paws-text-muted">({s.volumes.total_size_gib} GiB)</span></p>
               </CardContent></Card>
               <Card><CardContent>
-                <p className="text-xs text-paws-text-muted">VPCs</p>
+                <p className="text-xs text-paws-text-muted">Networks</p>
                 <p className="text-2xl font-bold text-paws-text">{s.vpcs}</p>
               </CardContent></Card>
               <Card><CardContent>
@@ -2202,6 +2202,7 @@ function SettingsTab() {
   const SETTING_GROUPS: Record<string, string[]> = {
     'Resource Quotas': ['default_max_vms', 'default_max_containers', 'default_max_vcpus', 'default_max_ram_mb', 'default_max_disk_gb', 'default_max_networks', 'default_max_volumes', 'default_max_volume_size_gb', 'default_max_security_groups', 'default_max_sg_rules', 'default_max_backups', 'default_max_backup_size_gb', 'default_max_snapshots'],
     'Cluster Settings': ['cpu_overcommit_ratio', 'ram_overcommit_ratio', 'placement_strategy', 'vmid_range_start', 'vmid_range_end'],
+    'SDN / Networking': ['sdn.default_max_subnet_prefix', 'sdn.lan_ranges', 'sdn.upstream_ips'],
     'Authentication': ['registration_mode', 'session_timeout_minutes'],
     'Resource Lifecycle': ['idle_shutdown_days', 'idle_destroy_days'],
     'Account Lifecycle': ['account_inactive_days'],
@@ -2361,14 +2362,14 @@ function TiersTab() {
   const [tiers, setTiers] = useState<TierData[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<TierData | null>(null);
-  const [form, setForm] = useState({ name: '', description: '', capabilities: [] as string[], is_default: false, idle_shutdown_days: '' as string, idle_destroy_days: '' as string, account_inactive_days: '' as string });
+  const [form, setForm] = useState({ name: '', description: '', capabilities: [] as string[], is_default: false, idle_shutdown_days: '' as string, idle_destroy_days: '' as string, account_inactive_days: '' as string, max_subnet_prefix: '' as string, bandwidth_limit_mbps: '100' as string });
   const toast = useToast();
 
   const fetch = () => { api.get('/api/admin/tiers/').then(r => setTiers(r.data)).catch(() => {}); };
   useEffect(() => { fetch(); }, []);
 
-  const openCreate = () => { setEditing(null); setForm({ name: '', description: '', capabilities: [], is_default: false, idle_shutdown_days: '', idle_destroy_days: '', account_inactive_days: '' }); setShowModal(true); };
-  const openEdit = (t: TierData) => { setEditing(t); setForm({ name: t.name, description: t.description || '', capabilities: [...t.capabilities], is_default: t.is_default, idle_shutdown_days: t.idle_shutdown_days != null ? String(t.idle_shutdown_days) : '', idle_destroy_days: t.idle_destroy_days != null ? String(t.idle_destroy_days) : '', account_inactive_days: t.account_inactive_days != null ? String(t.account_inactive_days) : '' }); setShowModal(true); };
+  const openCreate = () => { setEditing(null); setForm({ name: '', description: '', capabilities: [], is_default: false, idle_shutdown_days: '', idle_destroy_days: '', account_inactive_days: '', max_subnet_prefix: '', bandwidth_limit_mbps: '100' }); setShowModal(true); };
+  const openEdit = (t: TierData) => { setEditing(t); setForm({ name: t.name, description: t.description || '', capabilities: [...t.capabilities], is_default: t.is_default, idle_shutdown_days: t.idle_shutdown_days != null ? String(t.idle_shutdown_days) : '', idle_destroy_days: t.idle_destroy_days != null ? String(t.idle_destroy_days) : '', account_inactive_days: t.account_inactive_days != null ? String(t.account_inactive_days) : '', max_subnet_prefix: t.max_subnet_prefix != null ? String(t.max_subnet_prefix) : '', bandwidth_limit_mbps: t.bandwidth_limit_mbps != null ? String(t.bandwidth_limit_mbps) : '100' }); setShowModal(true); };
 
   const toggleCap = (cap: string) => {
     setForm(f => ({ ...f, capabilities: f.capabilities.includes(cap) ? f.capabilities.filter(c => c !== cap) : [...f.capabilities, cap] }));
@@ -2380,6 +2381,8 @@ function TiersTab() {
       idle_shutdown_days: form.idle_shutdown_days !== '' ? Number(form.idle_shutdown_days) : null,
       idle_destroy_days: form.idle_destroy_days !== '' ? Number(form.idle_destroy_days) : null,
       account_inactive_days: form.account_inactive_days !== '' ? Number(form.account_inactive_days) : null,
+      max_subnet_prefix: form.max_subnet_prefix !== '' ? Number(form.max_subnet_prefix) : null,
+      bandwidth_limit_mbps: form.bandwidth_limit_mbps !== '' ? Number(form.bandwidth_limit_mbps) : 100,
     };
     try {
       if (editing) {
@@ -2436,6 +2439,12 @@ function TiersTab() {
                     {t.account_inactive_days != null && <p>Account timeout: {t.account_inactive_days === 0 ? 'exempt' : `${t.account_inactive_days}d`}</p>}
                   </div>
                 )}
+                {(t.max_subnet_prefix != null || t.bandwidth_limit_mbps != null) && (
+                  <div className="mt-2 text-xs text-paws-text-muted space-y-0.5">
+                    {t.bandwidth_limit_mbps != null && <p>Bandwidth: {t.bandwidth_limit_mbps} MB/s</p>}
+                    {t.max_subnet_prefix != null && <p>Max subnet: /{t.max_subnet_prefix} ({Math.pow(2, 32 - t.max_subnet_prefix) - 2} hosts)</p>}
+                  </div>
+                )}
               </CardContent>
             </Card>
           ))}
@@ -2474,6 +2483,20 @@ function TiersTab() {
               <div>
                 <label className="text-xs text-paws-text-dim">Account Timeout (days)</label>
                 <Input type="number" min={0} placeholder="default" value={form.account_inactive_days} onChange={e => setForm(f => ({ ...f, account_inactive_days: e.target.value }))} />
+              </div>
+            </div>
+          </div>
+          <div>
+            <span className="text-sm text-paws-text-muted">Network Limits</span>
+            <div className="grid grid-cols-2 gap-2 mt-1">
+              <div>
+                <label className="text-xs text-paws-text-dim">Max Subnet Prefix</label>
+                <Input type="number" min={16} max={28} placeholder="system default" value={form.max_subnet_prefix} onChange={e => setForm(f => ({ ...f, max_subnet_prefix: e.target.value }))} />
+                <p className="text-xs text-paws-text-dim mt-0.5">Lower = larger subnet (e.g., /24 = 254 hosts, /16 = 65534 hosts)</p>
+              </div>
+              <div>
+                <label className="text-xs text-paws-text-dim">Bandwidth (MB/s)</label>
+                <Input type="number" min={1} placeholder="100" value={form.bandwidth_limit_mbps} onChange={e => setForm(f => ({ ...f, bandwidth_limit_mbps: e.target.value }))} />
               </div>
             </div>
           </div>
@@ -2674,6 +2697,208 @@ function RulesTab() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+// --- SDN Tab -------------------------------------------------------------
+
+interface SDNOverview {
+  zone: { name: string; type: string; status: string };
+  vnet_count: number;
+  vpc_count: number;
+  vni_range: { min: number; max: number };
+  vni_total: number;
+  vni_used: number;
+}
+
+interface SDNNetwork {
+  id: string;
+  name: string;
+  proxmox_vnet: string | null;
+  vxlan_tag: number | null;
+  status: string;
+  cidr: string;
+  owner_username: string;
+  owner_email: string;
+  subnet_count: number;
+  created_at: string | null;
+}
+
+function SDNTab() {
+  const [overview, setOverview] = useState<SDNOverview | null>(null);
+  const [networks, setNetworks] = useState<SDNNetwork[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [deleteTarget, setDeleteTarget] = useState<SDNNetwork | null>(null);
+  const toast = useToast();
+
+  const fetchData = () => {
+    setLoading(true);
+    Promise.all([
+      api.get('/api/admin/sdn/overview').then(r => setOverview(r.data)).catch(() => {}),
+      api.get('/api/admin/sdn/networks').then(r => setNetworks(r.data)).catch(() => {}),
+    ]).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, []);
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      const r = await api.delete(`/api/admin/sdn/networks/${deleteTarget.id}`);
+      toast.toast(r.data.detail || 'VPC deleted', 'success');
+      if (r.data.proxmox_warning) {
+        toast.toast(`Proxmox warning: ${r.data.proxmox_warning}`, 'warning');
+      }
+      setDeleteTarget(null);
+      fetchData();
+    } catch (e: any) {
+      const _d = e.response?.data?.detail;
+      toast.toast(typeof _d === 'string' ? _d : 'Delete failed', 'error');
+    }
+  };
+
+  if (loading && !overview) return <p className="text-paws-text-muted">Loading...</p>;
+
+  const vniPct = overview ? Math.round((overview.vni_used / overview.vni_total) * 100) : 0;
+
+  return (
+    <div className="space-y-6">
+      {/* Overview Metrics */}
+      {overview && (
+        <div className="flex gap-4 mb-6 flex-wrap">
+          <MetricCard
+            label="EVPN Zone"
+            value={overview.zone.name}
+            className="flex-1 min-w-[180px]"
+          />
+          <MetricCard
+            label="Zone Type"
+            value={overview.zone.type.toUpperCase()}
+            className="flex-1 min-w-[180px]"
+          />
+          <MetricCard
+            label="Zone Status"
+            value={overview.zone.status === 'active' ? 'Active' : overview.zone.status}
+            variant={overview.zone.status === 'active' ? 'success' : 'danger'}
+            className="flex-1 min-w-[180px]"
+          />
+          <MetricCard
+            label="Proxmox VNets"
+            value={String(overview.vnet_count)}
+            className="flex-1 min-w-[180px]"
+          />
+        </div>
+      )}
+
+      {/* VNI Usage Card */}
+      {overview && (
+        <Card>
+          <CardContent>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Network className="w-5 h-5 text-paws-accent" />
+                <h3 className="text-paws-text font-semibold">VNI Allocation</h3>
+              </div>
+              <span className="text-sm text-paws-text-muted">
+                {overview.vni_used} / {overview.vni_total.toLocaleString()} used
+              </span>
+            </div>
+            <div className="w-full bg-paws-border rounded-full h-2.5">
+              <div
+                className="bg-paws-accent h-2.5 rounded-full transition-all"
+                style={{ width: `${Math.max(vniPct, 1)}%` }}
+              />
+            </div>
+            <div className="flex justify-between mt-2 text-xs text-paws-text-muted">
+              <span>Range: {overview.vni_range.min} - {overview.vni_range.max}</span>
+              <span>{vniPct}% allocated</span>
+            </div>
+            <div className="flex gap-6 mt-3 text-sm">
+              <div>
+                <span className="text-paws-text-muted">Total Networks: </span>
+                <span className="text-paws-text font-medium">{overview.vpc_count}</span>
+              </div>
+              <div>
+                <span className="text-paws-text-muted">Proxmox VNets: </span>
+                <span className="text-paws-text font-medium">{overview.vnet_count}</span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Networks Table */}
+      <div className="flex items-center justify-between">
+        <h3 className="text-paws-text text-lg font-semibold flex items-center gap-2">
+          <Globe className="w-5 h-5" /> User Networks
+        </h3>
+        <Button variant="ghost" size="sm" onClick={fetchData} title="Refresh">
+          <RefreshCw className="w-4 h-4" />
+        </Button>
+      </div>
+
+      {networks.length === 0 ? (
+        <p className="text-paws-text-muted text-sm">No user networks found.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left">
+            <thead>
+              <tr className="border-b border-paws-border text-paws-text-muted">
+                <th className="py-2 px-3 font-medium">Name</th>
+                <th className="py-2 px-3 font-medium">VNet ID</th>
+                <th className="py-2 px-3 font-medium">VNI Tag</th>
+                <th className="py-2 px-3 font-medium">Owner</th>
+                <th className="py-2 px-3 font-medium">CIDR</th>
+                <th className="py-2 px-3 font-medium">Subnets</th>
+                <th className="py-2 px-3 font-medium">Status</th>
+                <th className="py-2 px-3 font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {networks.map((n) => (
+                <tr key={n.id} className="border-b border-paws-border/50 hover:bg-paws-card/50">
+                  <td className="py-2 px-3 text-paws-text font-medium">{n.name}</td>
+                  <td className="py-2 px-3 text-paws-text font-mono text-xs">{n.proxmox_vnet || '-'}</td>
+                  <td className="py-2 px-3 text-paws-text font-mono">{n.vxlan_tag ?? '-'}</td>
+                  <td className="py-2 px-3">
+                    <span className="text-paws-accent font-medium" title={n.owner_email}>
+                      {n.owner_username}
+                    </span>
+                  </td>
+                  <td className="py-2 px-3 text-paws-text-muted font-mono text-xs">{n.cidr}</td>
+                  <td className="py-2 px-3 text-paws-text">{n.subnet_count}</td>
+                  <td className="py-2 px-3">
+                    <StatusBadge status={n.status} />
+                  </td>
+                  <td className="py-2 px-3">
+                    <button
+                      onClick={() => setDeleteTarget(n)}
+                      className="p-1 text-paws-text-muted hover:text-red-400"
+                      title="Force delete"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="text-xs text-paws-text-muted">
+        Showing {networks.length} network{networks.length !== 1 ? 's' : ''}.
+      </p>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Force Delete VPC"
+        message={deleteTarget ? `This will permanently delete VPC "${deleteTarget.name}" (VNet: ${deleteTarget.proxmox_vnet || 'N/A'}) and all associated subnets and IP reservations. This action cannot be undone.` : ''}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

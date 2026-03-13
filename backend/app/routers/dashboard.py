@@ -53,6 +53,12 @@ async def user_dashboard_summary(
             total_ram_mb += specs.get("memory_mb", 0)
             total_disk_gb += specs.get("disk_gb", 0)
 
+    # VPC (network) count
+    vpc_result = await db.execute(
+        select(func.count(VPC.id)).where(VPC.owner_id == user.id)
+    )
+    vpc_count = vpc_result.scalar() or 0
+
     # Snapshot count
     snapshot_count = 0
     try:
@@ -92,7 +98,7 @@ async def user_dashboard_summary(
         "resources": {
             "vms": counts.get("vm", 0),
             "containers": counts.get("lxc", 0),
-            "networks": counts.get("network", 0),
+            "networks": vpc_count,
             "storage_buckets": counts.get("storage", 0),
             "vcpus_used": total_vcpus,
             "ram_mb_used": total_ram_mb,
@@ -108,6 +114,9 @@ async def user_dashboard_summary(
             "max_snapshots": quota.max_snapshots if quota else 10,
             "max_backups": quota.max_backups if quota else 20,
             "max_backup_size_gb": quota.max_backup_size_gb if quota else 100,
+            "max_networks": quota.max_networks if quota else 3,
+            "max_subnets_per_network": quota.max_subnets_per_network if quota else 5,
+            "max_elastic_ips": quota.max_elastic_ips if quota else 5,
         },
         "status_breakdown": status_counts,
         "recent_activity": recent_activity,

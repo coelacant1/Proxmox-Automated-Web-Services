@@ -12,7 +12,8 @@ from app.core.database import get_db
 from app.core.deps import require_admin
 from app.core.pagination import PaginatedParams, PaginatedResponse
 from app.core.security import create_access_token
-from app.models.models import AuditLog, Backup, Resource, StorageBucket, User, UserQuota, VMIDPool, Volume, VPC
+from app.models.models import AuditLog, Backup, IPReservation, Resource, StorageBucket, Subnet, User, UserQuota, VMIDPool, Volume, VPC
+from app.services.sdn_service import sdn_service, VXLAN_TAG_MIN, VXLAN_TAG_MAX
 from app.schemas.schemas import QuotaRead, ResourceRead, UserRead
 from app.services.proxmox_client import proxmox_client
 
@@ -862,3 +863,128 @@ async def delete_user(
     from app.services.user_cleanup import purge_user
     summary = await purge_user(db, uid)
     return {"detail": "User and all resources purged", "cleanup": summary}
+
+
+# ---------------------------------------------------------------------------
+# SDN Admin Endpoints
+# ---------------------------------------------------------------------------
+
+sdn_router = APIRouter(prefix="/api/admin/sdn", tags=["admin-sdn"])
+
+
+@sdn_router.get("/overview")
+async def sdn_overview(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Return SDN overview: zone info, VNet count, VPC count, VNI usage."""
+    zone = sdn_service.get_paws_zone()
+    zone_info = {
+        "name": zone.get("zone", "paws") if zone else "paws",
+        "type": zone.get("type", "evpn") if zone else "evpn",
+        "status": "active" if zone else "missing",
+    }
+
+    vnets = sdn_service.get_vnets()
+
+    total_vpcs_result = await db.execute(select(func.count(VPC.id)))
+    total_vpcs = total_vpcs_result.scalar() or 0
+
+    used_vnis_result = await db.execute(
+        select(func.count(VPC.id)).where(VPC.vxlan_tag.isnot(None))
+    )
+    used_vnis = used_vnis_result.scalar() or 0
+
+    return {
+        "zone": zone_info,
+        "vnet_count": len(vnets),
+        "vpc_count": total_vpcs,
+        "vni_range": {"min": VXLAN_TAG_MIN, "max": VXLAN_TAG_MAX},
+        "vni_total": VXLAN_TAG_MAX - VXLAN_TAG_MIN + 1,
+        "vni_used": used_vnis,
+    }
+
+
+@sdn_router.get("/networks")
+async def sdn_networks(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """List all user VPCs with owner info and subnet counts."""
+    subnet_count_sq = (
+        select(Subnet.vpc_id, func.count(Subnet.id).label("subnet_count"))
+        .group_by(Subnet.vpc_id)
+        .subquery()
+    )
+
+    stmt = (
+        select(VPC, User.username, User.email, subnet_count_sq.c.subnet_count)
+        .join(User, VPC.owner_id == User.id)
+        .outerjoin(subnet_count_sq, VPC.id == subnet_count_sq.c.vpc_id)
+        .order_by(VPC.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    networks = []
+    for vpc, username, email, subnet_count in rows:
+        networks.append({
+            "id": str(vpc.id),
+            "name": vpc.name,
+            "proxmox_vnet": vpc.proxmox_vnet,
+            "vxlan_tag": vpc.vxlan_tag,
+            "status": vpc.status,
+            "cidr": vpc.cidr,
+            "owner_username": username,
+            "owner_email": email,
+            "subnet_count": subnet_count or 0,
+            "created_at": vpc.created_at.isoformat() if vpc.created_at else None,
+        })
+
+    return networks
+
+
+@sdn_router.delete("/networks/{vpc_id}")
+async def sdn_force_delete_network(
+    vpc_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Force-delete a user VPC: remove Proxmox VNet then clean up DB."""
+    uid = uuid.UUID(vpc_id)
+    result = await db.execute(select(VPC).where(VPC.id == uid))
+    vpc = result.scalar_one_or_none()
+    if not vpc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found"
+        )
+
+    # Attempt Proxmox cleanup; do not let failures block DB cleanup
+    proxmox_error = None
+    if vpc.proxmox_vnet:
+        try:
+            sdn_service.delete_vnet(vpc.proxmox_vnet)
+        except Exception as exc:
+            proxmox_error = str(exc)
+
+    # DB cleanup: IP reservations, subnets, then VPC
+    subnet_result = await db.execute(select(Subnet).where(Subnet.vpc_id == uid))
+    subnets = subnet_result.scalars().all()
+    for subnet in subnets:
+        await db.execute(
+            select(IPReservation).where(IPReservation.subnet_id == subnet.id)
+        )
+        ip_del = await db.execute(
+            select(IPReservation).where(IPReservation.subnet_id == subnet.id)
+        )
+        for ip in ip_del.scalars().all():
+            await db.delete(ip)
+        await db.delete(subnet)
+
+    await db.delete(vpc)
+    await db.commit()
+
+    resp: dict = {"detail": "VPC deleted", "vpc_id": vpc_id}
+    if proxmox_error:
+        resp["proxmox_warning"] = proxmox_error
+    return resp

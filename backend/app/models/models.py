@@ -69,6 +69,8 @@ class UserTier(Base):
     idle_shutdown_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     idle_destroy_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     account_inactive_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bandwidth_limit_mbps: Mapped[int] = mapped_column(Integer, default=100)  # per-instance NIC rate in MB/s
+    max_subnet_prefix: Mapped[int | None] = mapped_column(Integer, nullable=True)  # null = use system default
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
@@ -122,6 +124,9 @@ class UserQuota(Base):
     max_backup_size_gb: Mapped[int] = mapped_column(Integer, default=100)
     max_buckets: Mapped[int] = mapped_column(Integer, default=5)
     max_storage_gb: Mapped[int] = mapped_column(Integer, default=50)  # total S3 storage
+    max_networks: Mapped[int] = mapped_column(Integer, default=3)  # max VNets per user
+    max_subnets_per_network: Mapped[int] = mapped_column(Integer, default=5)
+    max_elastic_ips: Mapped[int] = mapped_column(Integer, default=5)
 
     user: Mapped["User"] = relationship(back_populates="quota")
 
@@ -187,6 +192,8 @@ class Resource(Base):
     specs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON blob for flexible metadata
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of tag strings
     termination_protected: Mapped[bool] = mapped_column(Boolean, default=False)
+    network_mode: Mapped[str] = mapped_column(String(20), default="private")  # published, private, isolated
+    bandwidth_limit_mbps: Mapped[int | None] = mapped_column(Integer, nullable=True)  # null = use tier default
     last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -348,6 +355,9 @@ class SecurityGroup(Base):
     rules: Mapped[list["SecurityGroupRule"]] = relationship(
         back_populates="security_group", cascade="all, delete-orphan"
     )
+    resource_associations: Mapped[list["ResourceSecurityGroup"]] = relationship(
+        cascade="all, delete-orphan"
+    )
     owner: Mapped["User"] = relationship()
 
 
@@ -376,9 +386,9 @@ class ResourceSecurityGroup(Base):
     __tablename__ = "resource_security_groups"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=False, index=True)
+    resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id", ondelete="CASCADE"), nullable=False, index=True)
     security_group_id: Mapped[uuid.UUID] = mapped_column(
-        GUID(), ForeignKey("security_groups.id"), nullable=False, index=True
+        GUID(), ForeignKey("security_groups.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
     __table_args__ = (UniqueConstraint("resource_id", "security_group_id", name="uq_resource_sg"),)
@@ -411,7 +421,7 @@ class Volume(Base):
 
 
 class VPC(Base):
-    """Virtual Private Cloud - isolated network for user resources."""
+    """Virtual Private Cloud - isolated network backed by a Proxmox EVPN VNet."""
 
     __tablename__ = "vpcs"
 
@@ -424,7 +434,8 @@ class VPC(Base):
     proxmox_vnet: Mapped[str | None] = mapped_column(String(50), nullable=True)
     gateway: Mapped[str | None] = mapped_column(String(20), nullable=True)
     dhcp_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    status: Mapped[str] = mapped_column(String(20), default="active")  # active, deleting
+    network_mode: Mapped[str] = mapped_column(String(20), default="private")  # published, private, isolated
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active, creating, deleting, error
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     project_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("projects.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -439,7 +450,7 @@ class VPC(Base):
 
 
 class Subnet(Base):
-    """Subnet within a VPC."""
+    """Subnet within a VPC, backed by a Proxmox SDN subnet."""
 
     __tablename__ = "subnets"
 
@@ -449,9 +460,53 @@ class Subnet(Base):
     cidr: Mapped[str] = mapped_column(String(20), nullable=False)  # e.g. "10.100.1.0/24"
     gateway: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    snat_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    dhcp_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    dhcp_start: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    dhcp_end: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    dns_server: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    proxmox_subnet_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active, creating, deleting, error
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     vpc: Mapped["VPC"] = relationship(back_populates="subnets")
+    ip_reservations: Mapped[list["IPReservation"]] = relationship(
+        back_populates="subnet", cascade="all, delete-orphan"
+    )
+
+
+class IPReservation(Base):
+    """Persistent IP address reservation within a subnet."""
+
+    __tablename__ = "ip_reservations"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    subnet_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("subnets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ip_address: Mapped[str] = mapped_column(String(20), nullable=False)
+    resource_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=True)
+    label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    is_gateway: Mapped[bool] = mapped_column(Boolean, default=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("subnet_id", "ip_address", name="uq_subnet_ip"),)
+
+    subnet: Mapped["Subnet"] = relationship(back_populates="ip_reservations")
+
+
+class VPCPeering(Base):
+    """Peering connection between two user-owned VPCs."""
+
+    __tablename__ = "vpc_peerings"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    network_a_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("vpcs.id"), nullable=False)
+    network_b_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("vpcs.id"), nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active, pending, deleted
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class StorageBucket(Base):

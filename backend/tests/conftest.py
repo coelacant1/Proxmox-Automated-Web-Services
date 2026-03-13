@@ -215,16 +215,46 @@ class MockProxmoxClient:
         return [{"time": 1700000000, "cpu": 0.15, "mem": 512000000, "netin": 1024, "netout": 2048}]
 
     def get_sdn_zones(self) -> list[dict[str, Any]]:
-        return [{"zone": "vxlan1", "type": "vxlan", "peers": "10.0.0.1,10.0.0.2"}]
+        return [{"zone": "paws", "type": "evpn"}]
 
     def get_sdn_vnets(self) -> list[dict[str, Any]]:
-        return [{"vnet": "vnet1", "zone": "vxlan1", "alias": "test-net"}]
+        return [{"vnet": "testvn1", "zone": "paws", "alias": "test-net"}]
+
+    def get_sdn_vnet(self, vnet: str) -> dict[str, Any]:
+        return {"vnet": vnet, "zone": "paws"}
+
+    def get_sdn_subnets(self, vnet: str) -> list[dict[str, Any]]:
+        return []
 
     def create_sdn_vnet(self, vnet: str, zone: str, **kw: Any) -> None:
         pass
 
+    def create_sdn_subnet(self, vnet: str, subnet: str, gateway: str, **kw: Any) -> None:
+        pass
+
     def delete_sdn_vnet(self, vnet: str) -> None:
         pass
+
+    def delete_sdn_subnet(self, vnet: str, subnet_id: str) -> None:
+        pass
+
+    def apply_sdn(self) -> None:
+        pass
+
+    def get_firewall_rules(self, node: str, vmid: int, vmtype: str = "qemu") -> list[dict[str, Any]]:
+        return []
+
+    def create_firewall_rule(self, node: str, vmid: int, vmtype: str = "qemu", **kw: Any) -> None:
+        pass
+
+    def delete_firewall_rule(self, node: str, vmid: int, vmtype: str = "qemu", pos: int = 0) -> None:
+        pass
+
+    def set_firewall_options(self, node: str, vmid: int, vmtype: str = "qemu", **kw: Any) -> None:
+        pass
+
+    def clear_firewall_rules_by_comment(self, node: str, vmid: int, vmtype: str = "qemu", comment_prefix: str = "") -> int:
+        return 0
 
     def get_vnc_ticket(self, node: str, vmid: int, vmtype: str = "qemu") -> dict[str, Any]:
         return {"ticket": "PVEVNC:abc123", "port": 5900}

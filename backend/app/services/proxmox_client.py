@@ -220,6 +220,10 @@ class ProxmoxClient:
     def update_vm_config(self, node: str, vmid: int, **kwargs: Any) -> None:
         self.api.nodes(node).qemu(vmid).config.put(**kwargs)
 
+    def regenerate_cloudinit(self, node: str, vmid: int) -> None:
+        """Regenerate the cloud-init ISO so pending config changes take effect on next boot."""
+        self.api.nodes(node).qemu(vmid).cloudinit.put()
+
     def resize_vm(self, node: str, vmid: int, cores: int, memory_mb: int) -> None:
         self.api.nodes(node).qemu(vmid).config.put(cores=cores, memory=memory_mb)
 
@@ -417,11 +421,153 @@ class ProxmoxClient:
     def get_sdn_vnets(self) -> list[dict[str, Any]]:
         return self.api.cluster.sdn.vnets.get()
 
+    def get_sdn_vnet(self, vnet: str) -> dict[str, Any]:
+        return self.api.cluster.sdn.vnets(vnet).get()
+
     def create_sdn_vnet(self, vnet: str, zone: str, **kwargs: Any) -> None:
         self.api.cluster.sdn.vnets.post(vnet=vnet, zone=zone, **kwargs)
 
     def delete_sdn_vnet(self, vnet: str) -> None:
         self.api.cluster.sdn.vnets(vnet).delete()
+
+    def get_sdn_subnets(self, vnet: str) -> list[dict[str, Any]]:
+        return self.api.cluster.sdn.vnets(vnet).subnets.get()
+
+    def create_sdn_subnet(
+        self, vnet: str, subnet: str, gateway: str, snat: bool = True, **kwargs: Any
+    ) -> None:
+        self.api.cluster.sdn.vnets(vnet).subnets.post(
+            subnet=subnet, gateway=gateway,
+            snat=1 if snat else 0, type="subnet", **kwargs
+        )
+
+    def delete_sdn_subnet(self, vnet: str, subnet_id: str) -> None:
+        self.api.cluster.sdn.vnets(vnet).subnets(subnet_id).delete()
+
+    def apply_sdn(self) -> None:
+        self.api.cluster.sdn.put()
+
+    # --- Firewall (VM/Container level) ---
+
+    def get_vm_firewall_options(self, node: str, vmid: int) -> dict[str, Any]:
+        return self.api.nodes(node).qemu(vmid).firewall.options.get()
+
+    def set_vm_firewall_options(self, node: str, vmid: int, **kwargs: Any) -> None:
+        self.api.nodes(node).qemu(vmid).firewall.options.put(**kwargs)
+
+    def get_vm_firewall_rules(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        return self.api.nodes(node).qemu(vmid).firewall.rules.get()
+
+    def create_vm_firewall_rule(
+        self, node: str, vmid: int, **kwargs: Any
+    ) -> None:
+        self.api.nodes(node).qemu(vmid).firewall.rules.post(**kwargs)
+
+    def update_vm_firewall_rule(
+        self, node: str, vmid: int, pos: int, **kwargs: Any
+    ) -> None:
+        self.api.nodes(node).qemu(vmid).firewall.rules(pos).put(**kwargs)
+
+    def delete_vm_firewall_rule(self, node: str, vmid: int, pos: int) -> None:
+        self.api.nodes(node).qemu(vmid).firewall.rules(pos).delete()
+
+    def get_container_firewall_options(self, node: str, vmid: int) -> dict[str, Any]:
+        return self.api.nodes(node).lxc(vmid).firewall.options.get()
+
+    def set_container_firewall_options(
+        self, node: str, vmid: int, **kwargs: Any
+    ) -> None:
+        self.api.nodes(node).lxc(vmid).firewall.options.put(**kwargs)
+
+    def get_container_firewall_rules(
+        self, node: str, vmid: int
+    ) -> list[dict[str, Any]]:
+        return self.api.nodes(node).lxc(vmid).firewall.rules.get()
+
+    def create_container_firewall_rule(
+        self, node: str, vmid: int, **kwargs: Any
+    ) -> None:
+        self.api.nodes(node).lxc(vmid).firewall.rules.post(**kwargs)
+
+    def update_container_firewall_rule(
+        self, node: str, vmid: int, pos: int, **kwargs: Any
+    ) -> None:
+        self.api.nodes(node).lxc(vmid).firewall.rules(pos).put(**kwargs)
+
+    def delete_container_firewall_rule(
+        self, node: str, vmid: int, pos: int
+    ) -> None:
+        self.api.nodes(node).lxc(vmid).firewall.rules(pos).delete()
+
+    def get_firewall_rules(
+        self, node: str, vmid: int, vmtype: str = "qemu"
+    ) -> list[dict[str, Any]]:
+        if vmtype == "lxc":
+            return self.get_container_firewall_rules(node, vmid)
+        return self.get_vm_firewall_rules(node, vmid)
+
+    def create_firewall_rule(
+        self, node: str, vmid: int, vmtype: str = "qemu", **kwargs: Any
+    ) -> None:
+        if vmtype == "lxc":
+            self.create_container_firewall_rule(node, vmid, **kwargs)
+        else:
+            self.create_vm_firewall_rule(node, vmid, **kwargs)
+
+    def delete_firewall_rule(
+        self, node: str, vmid: int, pos: int, vmtype: str = "qemu"
+    ) -> None:
+        if vmtype == "lxc":
+            self.delete_container_firewall_rule(node, vmid, pos)
+        else:
+            self.delete_vm_firewall_rule(node, vmid, pos)
+
+    def set_firewall_options(
+        self, node: str, vmid: int, vmtype: str = "qemu", **kwargs: Any
+    ) -> None:
+        if vmtype == "lxc":
+            self.set_container_firewall_options(node, vmid, **kwargs)
+        else:
+            self.set_vm_firewall_options(node, vmid, **kwargs)
+
+    def clear_firewall_rules_by_comment(
+        self, node: str, vmid: int, vmtype: str, comment_prefix: str
+    ) -> int:
+        """Delete all firewall rules whose comment starts with the given prefix.
+        Returns the number of rules deleted."""
+        rules = self.get_firewall_rules(node, vmid, vmtype)
+        positions_to_delete = sorted(
+            [r["pos"] for r in rules if r.get("comment", "").startswith(comment_prefix)],
+            reverse=True,
+        )
+        for pos in positions_to_delete:
+            self.delete_firewall_rule(node, vmid, pos, vmtype)
+        return len(positions_to_delete)
+
+    # --- Guest Agent ---
+
+    def get_agent_network_interfaces(
+        self, node: str, vmid: int
+    ) -> list[dict[str, Any]]:
+        """Get network interfaces reported by the QEMU guest agent."""
+        try:
+            result = self.api.nodes(node).qemu(vmid).agent("network-get-interfaces").get()
+            return result.get("result", [])
+        except Exception:
+            return []
+
+    def agent_fsfreeze(self, node: str, vmid: int, freeze: bool = True) -> None:
+        """Freeze or thaw guest filesystems via the guest agent."""
+        cmd = "fsfreeze-freeze" if freeze else "fsfreeze-thaw"
+        self.api.nodes(node).qemu(vmid).agent(cmd).post()
+
+    def is_agent_running(self, node: str, vmid: int) -> bool:
+        """Check if the QEMU guest agent is responding."""
+        try:
+            self.api.nodes(node).qemu(vmid).agent.get(command="ping")
+            return True
+        except Exception:
+            return False
 
     # --- Console ---
 

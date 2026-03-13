@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.2.3 - 2026-03-13
+
+### Added
+
+- **SDN Networking** - EVPN/VNet-based isolated networking with real Proxmox SDN integration; VPC creation now provisions Proxmox VNets with auto-allocated VXLAN tags; subnet creation provisions SDN subnets with SNAT; FirewallProfileService generates per-instance firewall rules based on network mode; static IP auto-allocation via cloud-init (VMs) and LXC net config with DB-backed IP reservations
+- **Network Modes** - Per-VPC network modes (Published/Private/Isolated) replacing per-instance mode; Published mode blocks RFC1918/bogon traffic while whitelisting admin-configured upstream proxy IPs (`sdn.upstream_ips`); VPC mode changes bulk re-apply firewall rules to all attached instances
+- **Multi-NIC Support** - Up to 2 NICs per instance (primary + one secondary); secondary NIC must target a private-mode VPC; isolated networks block secondary NICs; auto-allocated static IP with cloud-init `ipconfig1` for VMs
+- **Subnet Mask Limits** - Admin-configurable maximum subnet size via `sdn.default_max_subnet_prefix` system setting (default /24); per-tier override via `max_subnet_prefix` field allowing up to /16 for higher tiers
+- **Structured Instance Configuration** - Replaced raw cloud-init editing with structured config modal (hostname, username, password, DNS server, DNS domain, SSH keys); SSH keys resolved from saved SSH Keys page via checkbox selection; separate GET/PUT config endpoints for both VMs and LXC containers
+- **IP Address Management** - VPC instances display allocated IPs (from DB) and live IPs (from guest agent/LXC config) as separate badges; inline IP editing within subnet range with validation; IP reservations persisted in database via `IPReservation` model
+- **Network Safety Enforcement** - VMs cannot start on `vmbr0` without `link_down=1`; running instances are automatically stopped, reconfigured, and restarted on network changes with user notification
+- **Cloud-Init Regeneration** - Proxmox cloud-init ISO automatically rebuilt after any config or NIC change via `regenerate_cloudinit()` calls
+- **SDN Admin Tab** - Infrastructure section with SDN overview, network list, and force-delete in Admin panel
+- **Network Quotas** - `max_networks`, `max_subnets_per_network`, and `max_elastic_ips` quota fields with dashboard display and quota request support
+- **Over-Quota Warning** - Quotas page now displays warning banner listing exceeded quotas (VMs, Containers, vCPUs, RAM, Disk, Networks, Snapshots, Backups, Backup Storage)
+- **VPC Peering Model** - Database model for future VPC-to-VPC peering support
+
+### Changed
+
+- VPCs renamed to **Networks** throughout the UI (sidebar, page titles, admin tabs)
+- Security Groups renamed to **Firewalls** throughout the UI
+- Removed DNS Records, IP Addresses, Monitoring, and Alarms pages (functionality covered by Networks, Endpoints, Dashboard, and Quotas pages)
+- CreateInstance wizard "Cloud-Init" step renamed to "Configuration" with structured fields instead of raw text
+- InstanceDetail cloud-init modal replaced with structured Instance Configuration modal
+- Network mode is now a property of the VPC/network, not individual instances; instance-level endpoints delegate to VPC mode change
+- SDN subnets use static IP allocation instead of DHCP (Proxmox DHCP non-functional on EVPN/VXLAN zones)
+- Instance deletion now cascades cleanup across all 11 child FK tables via unified `_cleanup_resource_children()` helper
+- Config, network, and cleanup code consolidated into 5 unified helpers (`_resolve_ssh_keys`, `_apply_instance_config`, `_build_net0`, `_apply_nic`, `_cleanup_resource_children`) eliminating code duplication across create/update/delete paths
+- Clone-then-migrate flow now waits for migration task completion before applying configuration
+- Console endpoints (VNC/terminal) resolve actual VM node via `find_vm_node()` before requesting tickets
+- Dashboard alarm banner and alarm-related code removed (covered by quota warnings)
+
+### Fixed
+
+- SSH keys silently dropped during VM/container creation (`ssh_key_ids` accepted but never resolved from database)
+- Cloud-init settings not applied during template clone (exception swallowed by bare `except: pass`)
+- Cloud-init ISO not regenerated after config or NIC changes (Proxmox requires explicit rebuild)
+- VNC/terminal console failing for migrated VMs due to stale `proxmox_node` in database
+- VM deletion failing with FK violation on `ip_reservations` table
+- Network change on running VM returning 400 hotplug error (now uses stop/apply/restart flow)
+- Volume creation VM selector showing "VMID undefined" (`proxmox_vmid` vs `vmid` field mismatch)
+- Security group deletion failing with FK violation on `resource_security_groups` (added `ON DELETE CASCADE`)
+- EVPN zone reference mismatch between code (`pawsevpn`) and actual Proxmox zone (`paws`)
+- Clone-to-migrate race condition where config was applied while VM was still migrating (locked)
+- Missing error toasts on VM delete, VM actions, VPC create, and VPC delete failures
+
 ## 0.2.2 - 2026-03-11
 
 ### Added

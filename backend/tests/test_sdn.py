@@ -28,10 +28,10 @@ def test_allocate_vxlan_tag_skips_used(monkeypatch):
 
 def test_get_paws_zone_found(monkeypatch):
     sdn = SDNService()
-    monkeypatch.setattr(sdn, "get_zones", lambda: [{"zone": "pawszone", "type": "vxlan"}])
+    monkeypatch.setattr(sdn, "get_zones", lambda: [{"zone": "paws", "type": "evpn"}])
     zone = sdn.get_paws_zone()
     assert zone is not None
-    assert zone["zone"] == "pawszone"
+    assert zone["zone"] == "paws"
 
 
 def test_get_paws_zone_not_found(monkeypatch):

@@ -54,7 +54,7 @@ export default function Volumes() {
       const list = (res.data || []).map((vm: any) => ({
         id: vm.id,
         display_name: vm.display_name || vm.name,
-        proxmox_vmid: vm.proxmox_vmid,
+        proxmox_vmid: vm.proxmox_vmid ?? vm.vmid,
         status: vm.status,
       }));
       setVms(list);

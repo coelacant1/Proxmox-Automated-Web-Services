@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Monitor, Box, Network, HardDrive, Bell, AlertTriangle, Clock } from 'lucide-react';
+import { Monitor, Box, Network, HardDrive, AlertTriangle, Clock } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { MetricCard, QuotaBar, Card, CardHeader, CardTitle, CardContent, Badge, Button } from '@/components/ui';
@@ -24,6 +24,7 @@ interface DashboardData {
     max_vms: number; max_containers: number; max_vcpus: number;
     max_ram_mb: number; max_disk_gb: number; max_snapshots: number;
     max_backups: number; max_backup_size_gb: number;
+    max_networks: number; max_subnets_per_network: number; max_elastic_ips: number;
   };
   status_breakdown: Record<string, number>;
   recent_activity: Array<{ action: string; resource_type: string; created_at: string }>;
@@ -37,14 +38,6 @@ interface ClusterStatus {
   quorate: boolean;
 }
 
-interface AlarmSummary {
-  id: string;
-  name: string;
-  state: string;
-  severity: string;
-  resource_id?: string;
-}
-
 function clusterVariant(cluster: ClusterStatus): 'success' | 'warning' | 'danger' {
   if (!cluster.api_reachable) return 'danger';
   return cluster.nodes_online === cluster.node_count ? 'success' : 'warning';
@@ -56,21 +49,14 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [health, setHealth] = useState<{ status: string } | null>(null);
   const [cluster, setCluster] = useState<ClusterStatus | null>(null);
-  const [alarms, setAlarms] = useState<AlarmSummary[]>([]);
   const [backupQuota, setBackupQuota] = useState<BackupQuota | null>(null);
 
   useEffect(() => {
     api.get('/health').then((res) => setHealth(res.data)).catch(() => {});
     api.get('/api/dashboard/summary').then((res) => setData(res.data)).catch(() => {});
     api.get('/api/cluster/status').then((res) => setCluster(res.data)).catch(() => {});
-    api.get('/api/monitoring/alarms').then((res) => {
-      const all = res.data?.alarms || res.data || [];
-      setAlarms(all.filter((a: AlarmSummary) => a.state === 'ALARM'));
-    }).catch(() => {});
     api.get('/api/backups/quota-summary').then((res) => setBackupQuota(res.data)).catch(() => {});
   }, []);
-
-  const alarmCount = alarms.length;
 
   return (
     <div className="space-y-6">
@@ -113,41 +99,7 @@ export default function Dashboard() {
               : 'Cluster: Unreachable'}
           </Badge>
         )}
-        {/* Alarm indicator */}
-        {alarmCount > 0 && (
-          <div onClick={() => navigate('/alarms')} className="cursor-pointer">
-            <Badge variant="danger">
-              <AlertTriangle className="h-3 w-3 mr-1" />
-              {alarmCount} active alarm{alarmCount !== 1 ? 's' : ''}
-            </Badge>
-          </div>
-        )}
       </div>
-
-      {/* Active Alarms Banner */}
-      {alarmCount > 0 && (
-        <Card className="border-paws-danger/30">
-          <CardContent className="py-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-full bg-paws-danger/10">
-                  <Bell className="h-5 w-5 text-paws-danger" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-paws-text">{alarmCount} Active Alarm{alarmCount !== 1 ? 's' : ''}</p>
-                  <p className="text-xs text-paws-text-dim">
-                    {alarms.slice(0, 3).map((a) => a.name).join(', ')}
-                    {alarms.length > 3 ? ` and ${alarms.length - 3} more` : ''}
-                  </p>
-                </div>
-              </div>
-              <Button variant="outline" size="sm" onClick={() => navigate('/alarms')}>
-                View Alarms
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* Account Lifecycle Countdown */}
       {user?.lifecycle_policy && user.lifecycle_policy.account_inactive_days > 0 && (() => {
@@ -193,6 +145,7 @@ export default function Dashboard() {
             if (data.resources.vcpus_used > data.quota.max_vcpus) overItems.push('vCPUs');
             if (data.resources.ram_mb_used > data.quota.max_ram_mb) overItems.push('RAM');
             if (data.resources.disk_gb_used > data.quota.max_disk_gb) overItems.push('Disk');
+            if (data.resources.networks > data.quota.max_networks) overItems.push('Networks');
             if (data.resources.snapshots > data.quota.max_snapshots) overItems.push('Snapshots');
             if (backupQuota && backupQuota.proxmox_backup_count > data.quota.max_backups) overItems.push('Backups');
             if (backupQuota && backupQuota.total_backup_size > data.quota.max_backup_size_gb * 1024 * 1024 * 1024) overItems.push('Backup Storage');
@@ -236,7 +189,7 @@ export default function Dashboard() {
             />
             <MetricCard
               label="Networks"
-              value={data.resources.networks}
+              value={`${data.resources.networks} / ${data.quota.max_networks}`}
               icon={Network}
               variant="default"
             />
@@ -262,6 +215,7 @@ export default function Dashboard() {
               <QuotaBar label="vCPUs" used={data.resources.vcpus_used} limit={data.quota.max_vcpus} />
               <QuotaBar label="RAM" used={data.resources.ram_mb_used} limit={data.quota.max_ram_mb} unit=" MB" />
               <QuotaBar label="Disk" used={data.resources.disk_gb_used} limit={data.quota.max_disk_gb} unit=" GB" />
+              <QuotaBar label="Networks" used={data.resources.networks} limit={data.quota.max_networks} />
               <QuotaBar label="Snapshots" used={backupQuota?.snapshot_count ?? data.resources.snapshots} limit={data.quota.max_snapshots} />
               <QuotaBar label="Backups" used={backupQuota?.proxmox_backup_count ?? 0} limit={data.quota.max_backups} />
               <QuotaBar label="Backup Storage" used={backupQuota ? Math.round(backupQuota.total_backup_size / (1024 * 1024 * 1024)) : 0} limit={data.quota.max_backup_size_gb} unit=" GB" />

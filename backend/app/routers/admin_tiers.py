@@ -36,6 +36,7 @@ class TierCreate(BaseModel):
     idle_shutdown_days: int | None = None
     idle_destroy_days: int | None = None
     account_inactive_days: int | None = None
+    max_subnet_prefix: int | None = None
 
 
 class TierUpdate(BaseModel):
@@ -46,6 +47,7 @@ class TierUpdate(BaseModel):
     idle_shutdown_days: int | None = Field(None)
     idle_destroy_days: int | None = Field(None)
     account_inactive_days: int | None = Field(None)
+    max_subnet_prefix: int | None = Field(None)
 
 
 def _tier_dict(t: UserTier) -> dict:
@@ -58,6 +60,8 @@ def _tier_dict(t: UserTier) -> dict:
         "idle_shutdown_days": t.idle_shutdown_days,
         "idle_destroy_days": t.idle_destroy_days,
         "account_inactive_days": t.account_inactive_days,
+        "max_subnet_prefix": t.max_subnet_prefix,
+        "bandwidth_limit_mbps": t.bandwidth_limit_mbps,
         "created_at": t.created_at.isoformat() if t.created_at else None,
     }
 
@@ -101,6 +105,7 @@ async def create_tier(
         idle_shutdown_days=body.idle_shutdown_days,
         idle_destroy_days=body.idle_destroy_days,
         account_inactive_days=body.account_inactive_days,
+        max_subnet_prefix=body.max_subnet_prefix,
     )
     db.add(tier)
     await db.commit()
@@ -139,6 +144,8 @@ async def update_tier(
         tier.idle_destroy_days = body.idle_destroy_days if body.idle_destroy_days >= 0 else None
     if body.account_inactive_days is not None:
         tier.account_inactive_days = body.account_inactive_days if body.account_inactive_days >= 0 else None
+    if body.max_subnet_prefix is not None:
+        tier.max_subnet_prefix = body.max_subnet_prefix if body.max_subnet_prefix > 0 else None
 
     await db.commit()
     await db.refresh(tier)
@@ -274,6 +281,8 @@ async def list_available_tiers(
             "idle_shutdown_days": t.idle_shutdown_days,
             "idle_destroy_days": t.idle_destroy_days,
             "account_inactive_days": t.account_inactive_days,
+            "max_subnet_prefix": t.max_subnet_prefix,
+            "bandwidth_limit_mbps": t.bandwidth_limit_mbps,
         }
         for t in result.scalars().all()
     ]
@@ -291,6 +300,8 @@ async def get_my_tier(user: User = Depends(get_current_active_user)):
             "idle_shutdown_days": user.tier.idle_shutdown_days,
             "idle_destroy_days": user.tier.idle_destroy_days,
             "account_inactive_days": user.tier.account_inactive_days,
+            "max_subnet_prefix": user.tier.max_subnet_prefix,
+            "bandwidth_limit_mbps": user.tier.bandwidth_limit_mbps,
         }
     return None
 

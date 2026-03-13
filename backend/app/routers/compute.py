@@ -9,15 +9,17 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.core.lifecycle import get_action_transition, validate_instance_specs
-from app.models.models import Resource, SystemSetting, User, UserQuota, VMIDPool, Volume
+from app.models.models import Resource, SSHKeyPair, Subnet, SystemSetting, User, UserQuota, VPC, VMIDPool, Volume
 from app.services.audit_service import log_action
+from app.services.firewall_profile import FirewallProfileService
 from app.services.node_service import get_next_vmid, select_node
 from app.services.proxmox_client import proxmox_client
 from app.services.pbs_client import pbs_client
@@ -44,22 +46,23 @@ class VMCreateRequest(BaseModel):
     security_group_ids: list[str] | None = None
     placement_strategy: str | None = None
     termination_protected: bool = False
-    # Cloud-init configuration
-    user_data: str | None = None  # base64-encoded cloud-init userdata
+    # Instance configuration
     hostname: str | None = None
-    ci_user: str | None = None  # cloud-init username
-    ci_password: str | None = None  # cloud-init password (hashed)
-    ssh_keys: list[str] | None = None  # public keys injected via cloud-init
-    nameservers: list[str] | None = None
-    searchdomains: list[str] | None = None
-    ip_config: str | None = None  # e.g. "ip=dhcp" or "ip=10.0.0.2/24,gw=10.0.0.1"
-    vpc_id: str | None = None  # attach to VPC
+    ci_user: str | None = None
+    ci_password: str | None = None
+    dns_server: str | None = None
+    dns_domain: str | None = None
+    ssh_keys: list[str] | None = None  # direct public keys (fallback, prefer ssh_key_ids)
+    nameservers: list[str] | None = None  # legacy
+    searchdomains: list[str] | None = None  # legacy
+    vpc_id: str | None = None
+    network_mode: str = "private"
 
 
 class ContainerCreateRequest(BaseModel):
     name: str
-    template: str | None = None  # ostemplate path (e.g. local:vztmpl/debian-12.tar.zst)
-    template_vmid: int | None = None  # clone from CT template VMID
+    template: str | None = None
+    template_vmid: int | None = None
     cores: int = 1
     memory_mb: int = 1024
     disk_gb: int = 16
@@ -67,6 +70,12 @@ class ContainerCreateRequest(BaseModel):
     ssh_key_ids: list[str] | None = None
     security_group_ids: list[str] | None = None
     termination_protected: bool = False
+    hostname: str | None = None
+    ci_password: str | None = None
+    dns_server: str | None = None
+    dns_domain: str | None = None
+    vpc_id: str | None = None
+    network_mode: str = "private"
 
 
 class VMActionRequest(BaseModel):
@@ -89,6 +98,160 @@ class InstanceResizeRequest(BaseModel):
 
 
 # --- VM Endpoints ---
+
+
+# --- Unified config helpers ---
+# All instance configuration (cloud-init for VMs, container config for LXC)
+# MUST go through these helpers. Do NOT call proxmox_client.update_vm_config
+# or set_container_config with config params (ciuser, sshkeys, nameserver, etc.)
+# directly from endpoint code. This ensures a single code path for config
+# application, making it testable and consistent across create and update flows.
+
+
+async def _resolve_ssh_keys(
+    db: AsyncSession, user_id: uuid.UUID, ssh_key_ids: list[str] | None,
+) -> list[str]:
+    """Resolve SSH key IDs to actual public key strings from the database."""
+    if not ssh_key_ids:
+        return []
+    result = await db.execute(
+        select(SSHKeyPair).where(
+            SSHKeyPair.id.in_([uuid.UUID(kid) for kid in ssh_key_ids]),
+            SSHKeyPair.owner_id == user_id,
+        )
+    )
+    return [k.public_key for k in result.scalars().all()]
+
+
+def _apply_instance_config(
+    node: str,
+    vmid: int,
+    resource_type: str,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    hostname: str | None = None,
+    dns_server: str | None = None,
+    dns_domain: str | None = None,
+    ssh_public_keys: list[str] | None = None,
+) -> None:
+    """Apply instance configuration to Proxmox (cloud-init for VMs, config for LXC).
+
+    This is the SINGLE code path for all config application. Both create_vm,
+    create_container, and update_instance_config call this function.
+
+    Args:
+        node: Proxmox node name
+        vmid: VM/container ID
+        resource_type: "qemu", "vm", or "lxc"
+        username: Cloud-init user (VM) - ignored for LXC
+        password: Cloud-init password (VM) or container root password (LXC)
+        hostname: VM name / container hostname
+        dns_server: DNS nameserver(s)
+        dns_domain: DNS search domain
+        ssh_public_keys: List of raw public key strings (already resolved from IDs)
+    """
+    import urllib.parse
+
+    is_lxc = resource_type == "lxc"
+
+    if is_lxc:
+        params: dict[str, str] = {}
+        if hostname is not None:
+            params["hostname"] = hostname
+        if dns_server is not None:
+            params["nameserver"] = dns_server
+        if dns_domain is not None:
+            params["searchdomain"] = dns_domain
+        if ssh_public_keys is not None:
+            params["ssh-public-keys"] = "\n".join(ssh_public_keys) + "\n" if ssh_public_keys else ""
+        if params:
+            proxmox_client.set_container_config(node, vmid, **params)
+        # LXC password must be set in a separate API call
+        if password is not None:
+            proxmox_client.set_container_config(node, vmid, password=password)
+    else:
+        params = {}
+        if username is not None:
+            params["ciuser"] = username
+        if password is not None:
+            params["cipassword"] = password
+        if hostname is not None:
+            params["name"] = hostname
+        if dns_server is not None:
+            params["nameserver"] = dns_server
+        if dns_domain is not None:
+            params["searchdomain"] = dns_domain
+        if ssh_public_keys is not None:
+            params["sshkeys"] = urllib.parse.quote(
+                "\n".join(ssh_public_keys) + "\n", safe=""
+            ) if ssh_public_keys else ""
+        if params:
+            proxmox_client.update_vm_config(node, vmid, **params)
+            proxmox_client.regenerate_cloudinit(node, vmid)
+
+
+def _build_net0(
+    resource_type: str,
+    bridge: str,
+    *,
+    ip: str | None = None,
+    prefix_len: int | None = None,
+    gateway: str | None = None,
+    firewall: int = 1,
+    rate: float = 0,
+    link_down: bool = False,
+    model: str = "virtio",
+) -> str:
+    """Build a net0 config string for Proxmox. SINGLE source of truth for NIC config format.
+
+    All net0/NIC config building MUST go through this function to avoid
+    format inconsistencies between create, update, and IP change paths.
+    """
+    if resource_type == "lxc":
+        parts = [f"name=eth0,bridge={bridge}"]
+        if ip and prefix_len and gateway:
+            parts.append(f"ip={ip}/{prefix_len},gw={gateway}")
+        parts.append(f"firewall={firewall}")
+    else:
+        parts = [f"{model},bridge={bridge}"]
+        parts.append(f"firewall={firewall}")
+    if link_down:
+        parts.append("link_down=1")
+    if rate > 0:
+        parts.append(f"rate={rate}")
+    return ",".join(parts)
+
+
+def _apply_nic(
+    node: str,
+    vmid: int,
+    resource_type: str,
+    net0_val: str,
+    *,
+    ip: str | None = None,
+    prefix_len: int | None = None,
+    gateway: str | None = None,
+    dns_server: str | None = None,
+) -> None:
+    """Apply a NIC config to Proxmox. For VMs, also sets cloud-init ipconfig0.
+
+    All NIC application MUST go through this function so that VM ipconfig0
+    and LXC net0 IP embedding stay consistent.
+    """
+    if resource_type == "lxc":
+        proxmox_client.set_container_config(node, vmid, net0=net0_val)
+    else:
+        proxmox_client.update_vm_config(node, vmid, net0=net0_val, agent="1")
+        # VMs use cloud-init ipconfig0 for static IP (LXC embeds IP in net0)
+        if ip and prefix_len and gateway:
+            ci_ip_params: dict[str, str] = {
+                "ipconfig0": f"ip={ip}/{prefix_len},gw={gateway}",
+            }
+            if dns_server:
+                ci_ip_params["nameserver"] = dns_server
+            proxmox_client.update_vm_config(node, vmid, **ci_ip_params)
+        proxmox_client.regenerate_cloudinit(node, vmid)
 
 
 def _apply_paws_metadata(
@@ -249,56 +412,71 @@ async def create_vm(
     except Exception:
         pass  # Best-effort pool assignment
 
-    # Migrate to target node if template was on a different node
+    # Wait for clone to complete, then migrate if needed
+    try:
+        proxmox_client.wait_for_task(clone_node, upid, timeout=120)
+    except Exception as wait_err:
+        logger.warning("Clone task wait failed for VMID %s: %s", new_vmid, wait_err)
+
     if needs_migration:
         try:
-            # Wait for clone to finish before migrating
-            proxmox_client.wait_for_task(clone_node, upid, timeout=120)
             if is_lxc_template:
-                proxmox_client.migrate_container(clone_node, new_vmid, target=node, online=False)
+                mig_upid = proxmox_client.migrate_container(clone_node, new_vmid, target=node, online=False)
             else:
-                proxmox_client.migrate_vm(clone_node, new_vmid, target=node, online=False)
+                mig_upid = proxmox_client.migrate_vm(clone_node, new_vmid, target=node, online=False)
+            # Wait for migration to finish before applying config
+            proxmox_client.wait_for_task(clone_node, mig_upid, timeout=300)
             resource.proxmox_node = node
             await db.commit()
-        except Exception:
-            pass  # Best-effort migration; resource still usable on source node
-    else:
-        # Wait for clone to finish before reconfiguring
-        try:
-            proxmox_client.wait_for_task(clone_node, upid, timeout=120)
-        except Exception:
-            pass
+        except Exception as mig_err:
+            logger.warning("Migration of VMID %s to %s failed: %s", new_vmid, node, mig_err)
+            # VM stays on clone_node; update resource to reflect reality
+            actual_node = proxmox_client.find_vm_node(new_vmid) or clone_node
+            if resource.proxmox_node != actual_node:
+                resource.proxmox_node = actual_node
+                await db.commit()
 
-    # Reconfigure specs after clone
+    # Resolve SSH keys and apply instance configuration
+    resolved_ssh_keys = await _resolve_ssh_keys(db, user.id, body.ssh_key_ids)
+    if body.ssh_keys:
+        resolved_ssh_keys.extend(body.ssh_keys)
+
+    rtype = "lxc" if is_lxc_template else "qemu"
     try:
+        # Resize specs (cores/memory) — separate from config
         if is_lxc_template:
             proxmox_client.set_container_config(
                 resource.proxmox_node, new_vmid,
                 cores=body.cores, memory=body.memory_mb,
             )
         else:
-            ci_config: dict[str, str] = {}
-            if body.hostname:
-                ci_config["ciuser"] = body.ci_user or "paws"
-                ci_config["searchdomain"] = ",".join(body.searchdomains) if body.searchdomains else ""
-                ci_config["nameserver"] = " ".join(body.nameservers) if body.nameservers else ""
-            if body.hostname:
-                ci_config["name"] = body.hostname
-            if body.ci_password:
-                ci_config["cipassword"] = body.ci_password
-            if body.ssh_keys:
-                ci_config["sshkeys"] = "\n".join(body.ssh_keys)
-            if body.ip_config:
-                ci_config["ipconfig0"] = body.ip_config
-            else:
-                ci_config["ipconfig0"] = "ip=dhcp"
-
-            proxmox_client.update_vm_config(resource.proxmox_node, new_vmid, cores=body.cores, memory=body.memory_mb, **ci_config)
-    except Exception:
-        pass  # Config update is best-effort; clone already succeeded
+            proxmox_client.update_vm_config(
+                resource.proxmox_node, new_vmid,
+                cores=body.cores, memory=body.memory_mb,
+            )
+        # Apply instance config via unified helper
+        _apply_instance_config(
+            resource.proxmox_node, new_vmid, rtype,
+            username=body.ci_user or ("paws" if not is_lxc_template else None),
+            password=body.ci_password,
+            hostname=body.hostname,
+            dns_server=body.dns_server or (
+                " ".join(body.nameservers) if body.nameservers else None
+            ),
+            dns_domain=body.dns_domain or (
+                ",".join(body.searchdomains) if body.searchdomains else None
+            ),
+            ssh_public_keys=resolved_ssh_keys if resolved_ssh_keys else None,
+        )
+    except Exception as cfg_err:
+        logger.error("Failed to apply instance config for VMID %s: %s", new_vmid, cfg_err, exc_info=True)
 
     # Stamp PAWS ownership tags and notes on the Proxmox resource
     _apply_paws_metadata(resource.proxmox_node, new_vmid, resource_type, user, resource)
+
+    # Apply VPC networking (NIC bridge, bandwidth, firewall mode)
+    await _resolve_vpc_networking(db, user, resource, body.vpc_id, body.network_mode)
+    await db.commit()
 
     await log_action(db, user.id, f"{resource_type}_create", resource_type, resource.id, {"vmid": new_vmid, "node": resource.proxmox_node})
     return {"id": str(resource.id), "vmid": new_vmid, "node": resource.proxmox_node, "status": "provisioning", "task": upid, "type": resource_type}
@@ -450,7 +628,8 @@ async def vm_action(
         await log_action(db, user.id, f"{rtype}_{body.action}", rtype, resource.id)
         return {"status": "ok", "task": upid}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        code = 403 if "Network safety" in str(e) else 400
+        raise HTTPException(status_code=code, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -545,12 +724,19 @@ async def vm_console(
     """
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
+
+    # Resolve actual node — VM may have migrated since DB record was written
+    actual_node = proxmox_client.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
+    if actual_node != resource.proxmox_node:
+        resource.proxmox_node = actual_node
+        await db.commit()
+
     try:
         if console_type == "terminal":
-            ticket_data = proxmox_client.get_terminal_proxy(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
+            ticket_data = proxmox_client.get_terminal_proxy(actual_node, resource.proxmox_vmid, vmtype=vmtype)
         else:
-            ticket_data = proxmox_client.get_vnc_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
-        ticket_data["node"] = resource.proxmox_node
+            ticket_data = proxmox_client.get_vnc_ticket(actual_node, resource.proxmox_vmid, vmtype=vmtype)
+        ticket_data["node"] = actual_node
         ticket_data["vmid"] = resource.proxmox_vmid
         ticket_data["vmtype"] = vmtype
         return ticket_data
@@ -597,10 +783,17 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
         await websocket.close(code=4003, reason="Unauthorized")
         return
 
-    # Look up the resource
+    # Look up the resource and resolve actual node
     try:
         async for db in get_db():
             resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
+            # Resolve actual node — VM may have migrated
+            actual_node = proxmox_client.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
+            if actual_node != resource.proxmox_node:
+                print(f"[CONSOLE] Node corrected: DB={resource.proxmox_node} -> actual={actual_node}", flush=True)
+                resource.proxmox_node = actual_node
+                db.add(resource)
+                await db.commit()
             break
     except Exception as e:
         print(f"[CONSOLE] Resource lookup failed: {e}", flush=True)
@@ -634,22 +827,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
     pve_host = settings.proxmox_host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
     pve_port = settings.proxmox_port
     vmid = resource.proxmox_vmid
-
-    # Extract the actual node from the UPID (termproxy may start on a
-    # different node than the DB record if the VM/CT has migrated)
-    upid = ticket_data.get("upid", "")
-    upid_parts = upid.split(":")
-    node = upid_parts[1] if len(upid_parts) > 1 and upid_parts[1] else resource.proxmox_node
-    if node != resource.proxmox_node:
-        print(f"[CONSOLE] Node mismatch: DB={resource.proxmox_node}, UPID={node}. Using UPID node.", flush=True)
-        try:
-            async for db in get_db():
-                resource.proxmox_node = node
-                db.add(resource)
-                await db.commit()
-                break
-        except Exception:
-            pass
+    node = resource.proxmox_node  # Already resolved to actual node above
 
     from urllib.parse import quote
     encoded_ticket = quote(ticket, safe="")
@@ -910,6 +1088,36 @@ async def vm_network(
             if key.startswith("net") and key[3:].isdigit():
                 nets[key] = val
         specs = json.loads(resource.specs) if resource.specs else {}
+
+        # Try to get IP addresses from guest agent (VMs) or LXC net config
+        ip_addresses: dict[str, list[str]] = {}
+        if resource.resource_type == "qemu":
+            try:
+                ifaces = proxmox_client.get_agent_network_interfaces(
+                    resource.proxmox_node, resource.proxmox_vmid
+                )
+                for iface in ifaces:
+                    name = iface.get("name", "")
+                    ips = [
+                        a["ip-address"]
+                        for a in iface.get("ip-addresses", [])
+                        if a.get("ip-address-type") in ("ipv4", "ipv6")
+                        and not a.get("ip-address", "").startswith("fe80:")
+                    ]
+                    if ips:
+                        ip_addresses[name] = ips
+            except Exception:
+                pass
+        elif resource.resource_type == "lxc":
+            for key, val in nets.items():
+                if isinstance(val, str):
+                    iface_ips = []
+                    for part in val.split(","):
+                        if part.startswith("ip=") and part != "ip=dhcp":
+                            iface_ips.append(part[3:].split("/")[0])
+                    if iface_ips:
+                        ip_addresses[key] = iface_ips
+
         # Fetch user's VPCs
         from app.models.models import VPC
         vpc_result = await db.execute(
@@ -920,7 +1128,13 @@ async def vm_network(
             {"id": str(v.id), "name": v.name, "vnet": v.proxmox_vnet, "vxlan_tag": v.vxlan_tag, "cidr": v.cidr}
             for v in vpcs
         ]
-        return {"interfaces": nets, "vpc_id": specs.get("vpc_id"), "vpcs": vpc_list}
+        return {
+            "interfaces": nets,
+            "ip_addresses": ip_addresses,
+            "vpc_id": specs.get("vpc_id"),
+            "vpcs": vpc_list,
+            "resource_type": resource.resource_type,
+        }
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -939,11 +1153,12 @@ async def update_vm_network(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    """Update a VM's network interface to use a specific user VPC."""
+    """Update a VM's network interface to use a specific user VPC with static IP."""
+    import ipaddress as _ipaddr
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
     # Validate the VPC belongs to this user
-    from app.models.models import VPC
+    from app.models.models import IPReservation, VPC
     import uuid as _uuid
     try:
         vpc_uuid = _uuid.UUID(body.vpc_id)
@@ -958,26 +1173,446 @@ async def update_vm_network(
     if not vpc.proxmox_vnet:
         raise HTTPException(status_code=400, detail="VPC has no Proxmox vnet configured")
 
-    # Build the net value using the VPC's vnet as the bridge
-    net_val = f"{body.model},bridge={vpc.proxmox_vnet},firewall={body.firewall}"
-    if vpc.vxlan_tag is not None:
-        net_val += f",tag={vpc.vxlan_tag}"
+    # Release any old IP reservations for this resource
+    await db.execute(
+        delete(IPReservation).where(IPReservation.resource_id == resource.id)
+    )
+
+    # Auto-allocate static IP from first active subnet
+    subnet_result = await db.execute(
+        select(Subnet).where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
+        .options(selectinload(Subnet.ip_reservations))
+        .limit(1)
+    )
+    subnet = subnet_result.scalar_one_or_none()
+
+    ip_str = None
+    prefix_len = None
+    gateway = None
+    if subnet:
+        try:
+            network = _ipaddr.ip_network(subnet.cidr, strict=False)
+            prefix_len = network.prefixlen
+            gateway = subnet.gateway or str(list(network.hosts())[0])
+            used_ips = {r.ip_address for r in subnet.ip_reservations}
+            for host in list(network.hosts())[1:]:
+                if str(host) not in used_ips:
+                    ip_str = str(host)
+                    break
+            if ip_str:
+                db.add(IPReservation(
+                    subnet_id=subnet.id, ip_address=ip_str, resource_id=resource.id,
+                    label=resource.display_name, is_gateway=False, owner_id=user.id,
+                ))
+        except Exception:
+            logger.warning("Failed to allocate IP for network change on %s", resource_id, exc_info=True)
+
+    # Build and apply the NIC via unified helpers
+    vmtype = resource.resource_type if resource.resource_type == "lxc" else "qemu"
     try:
-        if resource.resource_type == "lxc":
-            proxmox_client.set_container_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net_val})
+        net0_val = _build_net0(
+            vmtype, vpc.proxmox_vnet,
+            ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+            firewall=body.firewall, model=body.model,
+        )
+        dns = (subnet.dns_server or "1.1.1.1") if subnet else "1.1.1.1"
+
+        # Check if running — NIC bridge changes require stop/start for VMs
+        was_running = False
+        if vmtype != "lxc":
+            try:
+                st = proxmox_client.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
+                was_running = st.get("status") == "running"
+                if was_running:
+                    upid = proxmox_client.stop_vm(resource.proxmox_node, resource.proxmox_vmid)
+                    proxmox_client.wait_for_task(resource.proxmox_node, upid, timeout=60)
+            except Exception:
+                pass
         else:
-            proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net_val})
-        # Update the vpc_id in resource specs
+            try:
+                st = proxmox_client.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
+                was_running = st.get("status") == "running"
+                if was_running:
+                    upid = proxmox_client.stop_container(resource.proxmox_node, resource.proxmox_vmid)
+                    proxmox_client.wait_for_task(resource.proxmox_node, upid, timeout=60)
+            except Exception:
+                pass
+
+        # For net0, use _apply_nic; for other NICs, apply directly
+        if body.net_id == "net0":
+            _apply_nic(
+                resource.proxmox_node, resource.proxmox_vmid, vmtype, net0_val,
+                ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+                dns_server=dns,
+            )
+        else:
+            if vmtype == "lxc":
+                proxmox_client.set_container_config(
+                    resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val}
+                )
+            else:
+                proxmox_client.update_vm_config(
+                    resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val}
+                )
+
         specs = json.loads(resource.specs) if resource.specs else {}
         specs["vpc_id"] = str(vpc.id)
+        if ip_str:
+            specs["ip_address"] = ip_str
         resource.specs = json.dumps(specs)
         await db.commit()
-        return {"status": "ok", "vpc": {"id": str(vpc.id), "name": vpc.name, "vnet": vpc.proxmox_vnet}}
+
+        # Restart if it was running before the NIC change
+        if was_running:
+            try:
+                if vmtype == "lxc":
+                    proxmox_client.start_container(resource.proxmox_node, resource.proxmox_vmid)
+                else:
+                    proxmox_client.start_vm(resource.proxmox_node, resource.proxmox_vmid)
+            except Exception:
+                pass
+
+        return {
+            "status": "ok",
+            "vpc": {"id": str(vpc.id), "name": vpc.name, "vnet": vpc.proxmox_vnet},
+            "ip_address": ip_str,
+            "restarted": was_running,
+            "message": "Instance was restarted to apply the network change." if was_running else "Network updated.",
+        }
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@router.get("/backup-storages")
+class NICAddRequest(BaseModel):
+    vpc_id: str
+    model: str = "virtio"
+    firewall: int = 1
+
+
+@router.post("/vms/{resource_id}/network/nics")
+async def add_nic(
+    resource_id: str,
+    body: NICAddRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Add a secondary network interface to a VM (VMs only, max 2 NICs).
+
+    The target network must be private. The primary NIC's network cannot be
+    isolated (isolated networks do not allow secondary NICs).
+    """
+    import ipaddress as _ipaddr
+    import uuid as _uuid
+    from app.models.models import IPReservation, VPC
+
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
+    if resource.resource_type != "qemu":
+        raise HTTPException(status_code=400, detail="Additional NICs are only supported for VMs")
+
+    # Check max 2 NICs
+    config = proxmox_client.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
+    existing = [k for k in config if k.startswith("net") and k[3:].isdigit()]
+    if len(existing) >= 2:
+        raise HTTPException(status_code=400, detail="Maximum 2 NICs per instance")
+
+    # Check primary VPC mode — isolated instances cannot have secondary NICs
+    specs = json.loads(resource.specs) if resource.specs else {}
+    primary_vpc_id = specs.get("vpc_id")
+    if primary_vpc_id:
+        primary_vpc_row = await db.execute(
+            select(VPC).where(VPC.id == _uuid.UUID(primary_vpc_id))
+        )
+        primary_vpc = primary_vpc_row.scalar_one_or_none()
+        if primary_vpc and primary_vpc.network_mode == "isolated":
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot add secondary NIC to an instance on an isolated network",
+            )
+
+    # Target VPC must be private
+    vpc = (await db.execute(
+        select(VPC).where(VPC.id == _uuid.UUID(body.vpc_id), VPC.owner_id == user.id)
+    )).scalar_one_or_none()
+    if not vpc or not vpc.proxmox_vnet:
+        raise HTTPException(status_code=404, detail="Network not found or has no VNet")
+    if vpc.network_mode != "private":
+        raise HTTPException(
+            status_code=400,
+            detail="Secondary NICs can only be attached to private networks",
+        )
+
+    next_idx = max((int(k[3:]) for k in existing), default=-1) + 1
+    net_id = f"net{next_idx}"
+
+    # Auto-allocate static IP from the target VPC's subnet
+    subnet_result = await db.execute(
+        select(Subnet).where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
+        .options(selectinload(Subnet.ip_reservations))
+        .limit(1)
+    )
+    subnet = subnet_result.scalar_one_or_none()
+
+    ip_str = None
+    prefix_len = None
+    gateway = None
+    if subnet:
+        try:
+            network = _ipaddr.ip_network(subnet.cidr, strict=False)
+            prefix_len = network.prefixlen
+            gateway = subnet.gateway or str(list(network.hosts())[0])
+            used_ips = {r.ip_address for r in subnet.ip_reservations}
+            for host in list(network.hosts())[1:]:
+                if str(host) not in used_ips:
+                    ip_str = str(host)
+                    break
+            if not ip_str:
+                raise HTTPException(status_code=409, detail="No available IPs in the target network subnet")
+        except HTTPException:
+            raise
+        except Exception:
+            logger.warning("Failed to allocate IP for secondary NIC", exc_info=True)
+
+    net_val = _build_net0(
+        "qemu", vpc.proxmox_vnet,
+        ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+        firewall=body.firewall, model=body.model,
+    )
+
+    try:
+        proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
+
+        # Set cloud-init ipconfig for secondary NIC
+        if ip_str and prefix_len:
+            ipconfig_key = f"ipconfig{next_idx}"
+            ipconfig_val = f"ip={ip_str}/{prefix_len}"
+            if gateway:
+                ipconfig_val += f",gw={gateway}"
+            proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{ipconfig_key: ipconfig_val})
+            proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
+
+        # Create IP reservation
+        if ip_str and subnet:
+            db.add(IPReservation(
+                subnet_id=subnet.id, ip_address=ip_str, resource_id=resource.id,
+                label=f"{resource.display_name}-{net_id}", is_gateway=False, owner_id=user.id,
+            ))
+
+        # Track secondary VPC in specs
+        secondary_vpc_ids = specs.get("secondary_vpc_ids", [])
+        secondary_vpc_ids.append(str(vpc.id))
+        specs["secondary_vpc_ids"] = secondary_vpc_ids
+        resource.specs = json.dumps(specs)
+        await db.commit()
+
+        return {
+            "status": "ok", "net_id": net_id, "value": net_val,
+            "ip_address": ip_str, "vpc_id": str(vpc.id),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.delete("/vms/{resource_id}/network/nics/{net_id}")
+async def remove_nic(
+    resource_id: str,
+    net_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Remove a secondary network interface from a VM (cannot remove net0)."""
+    from app.models.models import IPReservation
+
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
+    if resource.resource_type != "qemu":
+        raise HTTPException(status_code=400, detail="NIC removal only supported for VMs")
+    if net_id == "net0":
+        raise HTTPException(status_code=400, detail="Cannot remove primary interface net0")
+    if not (net_id.startswith("net") and net_id[3:].isdigit()):
+        raise HTTPException(status_code=400, detail="Invalid NIC id")
+
+    net_idx = int(net_id[3:])
+
+    try:
+        # Remove NIC config
+        proxmox_client.update_vm_config(
+            resource.proxmox_node, resource.proxmox_vmid, delete=net_id
+        )
+
+        # Remove cloud-init ipconfig for this NIC
+        ipconfig_key = f"ipconfig{net_idx}"
+        try:
+            proxmox_client.update_vm_config(
+                resource.proxmox_node, resource.proxmox_vmid, delete=ipconfig_key
+            )
+            proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
+        except Exception:
+            logger.debug("No ipconfig%d to remove", net_idx)
+
+        # Release IP reservations for this NIC
+        label_pattern = f"{resource.display_name}-{net_id}"
+        ip_rows = await db.execute(
+            select(IPReservation).where(
+                IPReservation.resource_id == resource.id,
+                IPReservation.label == label_pattern,
+            )
+        )
+        for ip_res in ip_rows.scalars().all():
+            await db.delete(ip_res)
+
+        # Remove secondary VPC from specs
+        specs = json.loads(resource.specs) if resource.specs else {}
+        secondary_vpc_ids = specs.get("secondary_vpc_ids", [])
+        if secondary_vpc_ids:
+            specs["secondary_vpc_ids"] = secondary_vpc_ids[:-1]  # remove last added
+            resource.specs = json.dumps(specs)
+
+        await db.commit()
+        return {"status": "ok", "removed": net_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+# --- Cloud-Init / Instance Configuration ---
+
+
+class InstanceConfigRequest(BaseModel):
+    """Structured cloud-init (VM) / LXC config fields."""
+    username: str | None = None
+    password: str | None = None
+    ssh_key_ids: list[str] | None = None
+    dns_domain: str | None = None
+    dns_server: str | None = None
+    hostname: str | None = None
+
+
+@router.get("/vms/{resource_id}/config")
+async def get_instance_config(
+    resource_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Get the current cloud-init (VM) or LXC configuration for an instance."""
+    resource = await _get_user_resource(db, user.id, resource_id, "vm")
+    node = resource.proxmox_node
+    vmid = resource.proxmox_vmid
+
+    result: dict = {
+        "resource_type": resource.resource_type,
+        "username": None,
+        "password_set": False,
+        "ssh_key_ids": [],
+        "dns_domain": None,
+        "dns_server": None,
+        "hostname": None,
+        "ip_address": None,
+    }
+
+    # Load user's saved SSH keys for matching
+    user_keys_result = await db.execute(
+        select(SSHKeyPair).where(SSHKeyPair.owner_id == user.id)
+    )
+    user_keys = {k.public_key.strip(): str(k.id) for k in user_keys_result.scalars().all()}
+
+    try:
+        if resource.resource_type == "qemu":
+            config = proxmox_client.get_vm_config(node, vmid)
+            result["username"] = config.get("ciuser")
+            result["password_set"] = bool(config.get("cipassword"))
+            raw_keys = config.get("sshkeys", "")
+            if raw_keys:
+                import urllib.parse
+                decoded = urllib.parse.unquote(raw_keys)
+                installed_keys = [k.strip() for k in decoded.strip().split("\n") if k.strip()]
+                matched_ids = [user_keys[k] for k in installed_keys if k in user_keys]
+                result["ssh_key_ids"] = matched_ids
+            result["dns_domain"] = config.get("searchdomain") or None
+            result["dns_server"] = config.get("nameserver") or None
+            result["hostname"] = config.get("name") or None
+            ipconfig0 = config.get("ipconfig0", "")
+            if ipconfig0 and "ip=" in ipconfig0:
+                for part in ipconfig0.split(","):
+                    if part.startswith("ip="):
+                        result["ip_address"] = part[3:]
+        elif resource.resource_type == "lxc":
+            config = proxmox_client.get_container_config(node, vmid)
+            result["hostname"] = config.get("hostname") or None
+            result["dns_domain"] = config.get("searchdomain") or None
+            result["dns_server"] = config.get("nameserver") or None
+            raw_keys = config.get("ssh-public-keys", "")
+            if raw_keys:
+                installed_keys = [k.strip() for k in raw_keys.strip().split("\n") if k.strip()]
+                matched_ids = [user_keys[k] for k in installed_keys if k in user_keys]
+                result["ssh_key_ids"] = matched_ids
+            net0 = config.get("net0", "")
+            if isinstance(net0, str):
+                for part in net0.split(","):
+                    if part.startswith("ip=") and part != "ip=dhcp":
+                        result["ip_address"] = part[3:]
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to read config: {e}")
+
+    # Get allocated IP from database
+    from app.models.models import IPReservation
+    ip_res = await db.execute(
+        select(IPReservation).where(IPReservation.resource_id == resource.id)
+    )
+    reservations = ip_res.scalars().all()
+    if reservations:
+        result["allocated_ip"] = reservations[0].ip_address
+    else:
+        result["allocated_ip"] = None
+
+    return result
+
+
+@router.put("/vms/{resource_id}/config")
+async def update_instance_config(
+    resource_id: str,
+    body: InstanceConfigRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Update cloud-init (VM) or LXC configuration for an instance.
+
+    All fields are optional. Only provided fields are updated.
+    IP address changes should go through the VPC IP change endpoint.
+    """
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
+    node = resource.proxmox_node
+    vmid = resource.proxmox_vmid
+
+    # Resolve SSH key IDs to actual public keys
+    resolved_keys: list[str] | None = None
+    if body.ssh_key_ids is not None:
+        resolved_keys = await _resolve_ssh_keys(db, user.id, body.ssh_key_ids) if body.ssh_key_ids else []
+
+    try:
+        _apply_instance_config(
+            node, vmid, resource.resource_type,
+            username=body.username,
+            password=body.password,
+            hostname=body.hostname,
+            dns_server=body.dns_server,
+            dns_domain=body.dns_domain,
+            ssh_public_keys=resolved_keys,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to update config: {e}")
+
+    changed = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "password" in changed:
+        changed["password"] = "***"
+    await log_action(db, user.id, "config_update", resource_id=str(resource.id),
+                     details=f"Config updated: {', '.join(changed.keys())}")
+    await db.commit()
+    return {"status": "ok", "updated_fields": list(changed.keys())}
+
+
+
 async def list_backup_storages(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
@@ -1352,7 +1987,7 @@ async def create_container(
                 cores=body.cores,
                 memory=body.memory_mb,
                 rootfs=f"{body.storage}:{body.disk_gb}",
-                net0="name=eth0,bridge=vmbr0,ip=dhcp",
+                net0=_build_net0("lxc", "vmbr0", link_down=True),
                 start=0,
             )
             clone_node = node
@@ -1398,18 +2033,33 @@ async def create_container(
             except Exception:
                 pass
 
-        # Reconfigure specs after clone (cores, memory, disk)
+        # Resolve SSH keys and apply instance configuration
+        ct_ssh_keys = await _resolve_ssh_keys(db, user.id, body.ssh_key_ids)
+
+        # Reconfigure specs and config after clone
         if body.template_vmid:
             try:
                 proxmox_client.set_container_config(
                     resource.proxmox_node, new_vmid,
                     cores=body.cores, memory=body.memory_mb,
                 )
-            except Exception:
-                pass  # Config update is best-effort
+                _apply_instance_config(
+                    resource.proxmox_node, new_vmid, "lxc",
+                    password=body.ci_password,
+                    hostname=body.hostname,
+                    dns_server=body.dns_server,
+                    dns_domain=body.dns_domain,
+                    ssh_public_keys=ct_ssh_keys if ct_ssh_keys else None,
+                )
+            except Exception as cfg_err:
+                logger.error("Failed to apply container config for VMID %s: %s", new_vmid, cfg_err, exc_info=True)
 
         # Stamp PAWS ownership tags and notes on the Proxmox container
         _apply_paws_metadata(resource.proxmox_node, new_vmid, "lxc", user, resource)
+
+        # Apply VPC networking (NIC bridge, bandwidth, firewall mode)
+        await _resolve_vpc_networking(db, user, resource, body.vpc_id, body.network_mode)
+        await db.commit()
 
         return {"id": str(resource.id), "vmid": new_vmid, "node": resource.proxmox_node, "status": "provisioning", "task": upid}
     except Exception as e:
@@ -1505,6 +2155,13 @@ async def container_action(
     if body.action not in actions:
         raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
 
+    # Enforce network safety before start
+    if body.action == "start":
+        try:
+            _enforce_network_safety(resource)
+        except ValueError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+
     try:
         upid = actions[body.action](node, vmid)
         await log_action(db, user.id, f"container_{body.action}", "lxc", resource.id)
@@ -1535,6 +2192,8 @@ async def delete_container(
     vmid_entry = result.scalar_one_or_none()
     if vmid_entry:
         await db.delete(vmid_entry)
+    # Clean up all child records referencing this resource
+    await _cleanup_resource_children(db, resource.id)
     # Delete the resource record entirely
     await db.delete(resource)
     await db.commit()
@@ -1677,6 +2336,29 @@ async def _get_user_resource(
     return resource
 
 
+async def _cleanup_resource_children(db: AsyncSession, resource_id: uuid.UUID) -> None:
+    """Delete all child records that reference a resource via FK before resource deletion.
+
+    This is the SINGLE cleanup function for resource deletion. Both _terminate_vm
+    and delete_container MUST call this to avoid FK integrity errors.
+    Any new model with FK to resources.id must be added here.
+    """
+    from app.models.models import (
+        Alarm, Backup, BackupPlan, CustomMetric, GroupResourceShare,
+        HealthCheck, IPReservation, LifecyclePolicy, ServiceEndpoint,
+        Tag, TemplateRequest,
+    )
+    # Non-nullable FK tables — rows MUST be deleted or they block resource deletion
+    for model in (
+        Backup, BackupPlan, ServiceEndpoint, Alarm, HealthCheck,
+        LifecyclePolicy, Tag, TemplateRequest,
+    ):
+        await db.execute(delete(model).where(model.resource_id == resource_id))
+    # Nullable FK tables — delete to avoid orphans (could also SET NULL)
+    for model in (IPReservation, CustomMetric, GroupResourceShare):
+        await db.execute(delete(model).where(model.resource_id == resource_id))
+
+
 async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dict:
     """Terminate (destroy) a VM or LXC - force stop if running then delete from Proxmox and DB."""
 
@@ -1767,6 +2449,8 @@ async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dic
     vmid_entry = result.scalar_one_or_none()
     if vmid_entry:
         await db.delete(vmid_entry)
+    # Clean up all child records referencing this resource
+    await _cleanup_resource_children(db, resource.id)
     # Delete the resource record entirely
     await db.delete(resource)
     await db.commit()
@@ -1800,10 +2484,138 @@ def _get_live_status(resource: Resource) -> dict:
         raise
 
 
+async def _resolve_vpc_networking(
+    db: AsyncSession, user: User, resource: Resource,
+    vpc_id: str | None, network_mode: str = "private",
+) -> None:
+    """Resolve VPC and apply NIC bridge, bandwidth, and firewall rules post-creation.
+
+    If vpc_id is provided, sets the NIC bridge to the VPC's VNet, auto-allocates
+    a static IP from the subnet, and applies network mode firewall rules.
+    The network_mode parameter is ignored — mode is derived from the VPC.
+    If no vpc_id, sets NIC to vmbr0 with link_down=1 (disconnected).
+    """
+    import ipaddress as _ipaddr
+    import uuid as _uuid
+    from app.models.models import IPReservation, UserTier
+
+    node = resource.proxmox_node
+    vmid = resource.proxmox_vmid
+    vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
+
+    # Resolve VPC
+    vpc = None
+    if vpc_id:
+        result = await db.execute(
+            select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id, VPC.status == "active")
+        )
+        vpc = result.scalar_one_or_none()
+
+    if not vpc or not vpc.proxmox_vnet:
+        # No VPC — set NIC to vmbr0 disconnected
+        try:
+            net0_val = _build_net0(vmtype, "vmbr0", link_down=True)
+            if vmtype == "lxc":
+                proxmox_client.set_container_config(node, vmid, net0=net0_val)
+            else:
+                proxmox_client.update_vm_config(node, vmid, net0=net0_val)
+        except Exception:
+            logger.warning("Failed to set disconnected NIC for %s/%s", node, vmid, exc_info=True)
+        return
+
+    # Derive network mode from VPC
+    effective_mode = vpc.network_mode or "private"
+
+    # Get first subnet for IP allocation
+    subnet_result = await db.execute(
+        select(Subnet).where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
+        .options(selectinload(Subnet.ip_reservations))
+        .limit(1)
+    )
+    subnet = subnet_result.scalar_one_or_none()
+
+    # Get bandwidth limit from tier
+    tier_result = await db.execute(
+        select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user.id)
+    )
+    tier = tier_result.scalar_one_or_none()
+    bw = FirewallProfileService.get_effective_bandwidth(
+        tier.bandwidth_limit_mbps if tier else None, None
+    )
+
+    # Auto-allocate a static IP from the subnet (DHCP not supported on EVPN/VXLAN)
+    ip_str = None
+    prefix_len = None
+    gateway = None
+    if subnet:
+        try:
+            network = _ipaddr.ip_network(subnet.cidr, strict=False)
+            prefix_len = network.prefixlen
+            gateway = subnet.gateway or str(list(network.hosts())[0])
+            used_ips = {r.ip_address for r in subnet.ip_reservations}
+            for host in list(network.hosts())[1:]:
+                if str(host) not in used_ips:
+                    ip_str = str(host)
+                    break
+            if ip_str:
+                db.add(IPReservation(
+                    subnet_id=subnet.id, ip_address=ip_str, resource_id=resource.id,
+                    label=resource.display_name, is_gateway=False, owner_id=user.id,
+                ))
+        except Exception:
+            logger.warning("Failed to allocate IP for %s/%s", node, vmid, exc_info=True)
+
+    # Build and apply NIC config via unified helpers
+    bridge = vpc.proxmox_vnet
+    try:
+        net0_val = _build_net0(
+            vmtype, bridge,
+            ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+            rate=bw,
+        )
+        dns = (subnet.dns_server or "1.1.1.1") if subnet else "1.1.1.1"
+        _apply_nic(
+            node, vmid, vmtype, net0_val,
+            ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+            dns_server=dns,
+        )
+    except Exception:
+        logger.warning("Failed to set NIC bridge for %s/%s", node, vmid, exc_info=True)
+        return
+
+    # Store vpc_id and subnet info on resource
+    specs = json.loads(resource.specs) if resource.specs else {}
+    specs["vpc_id"] = str(vpc.id)
+    if ip_str:
+        specs["ip_address"] = ip_str
+    if subnet:
+        specs["subnet_cidr"] = subnet.cidr
+    resource.specs = json.dumps(specs)
+    resource.network_mode = effective_mode
+
+    # Apply firewall mode rules
+    if subnet:
+        try:
+            lan_ranges = await FirewallProfileService.get_lan_ranges_async(db)
+            upstream_ips = await FirewallProfileService.get_upstream_ips_async(db)
+            FirewallProfileService.enable_firewall(node, vmid, vmtype)
+            FirewallProfileService.apply_network_mode(
+                node, vmid, vmtype, effective_mode, subnet.cidr,
+                lan_ranges=lan_ranges, upstream_ips=upstream_ips,
+            )
+        except Exception:
+            logger.warning("Failed to apply firewall mode for %s/%s", node, vmid, exc_info=True)
+
+
 def _do_action(resource: Resource, action: str, **kwargs) -> str:
     """Execute a lifecycle action on a VM or LXC, returning the UPID."""
     node, vmid = resource.proxmox_node, resource.proxmox_vmid
     is_lxc = resource.resource_type == "lxc"
+
+    # Enforce network safety before start/reboot
+    if action in ("start", "reboot"):
+        _enforce_network_safety(resource)
+
     actions_vm = {
         "start": proxmox_client.start_vm,
         "stop": proxmox_client.stop_vm,
@@ -1822,3 +2634,43 @@ def _do_action(resource: Resource, action: str, **kwargs) -> str:
     if not fn:
         raise ValueError(f"Action '{action}' not supported for {resource.resource_type}")
     return fn(node, vmid)
+
+
+def _enforce_network_safety(resource: Resource) -> None:
+    """Block start/reboot if net0 is on vmbr0 without link_down (disconnected).
+
+    Instances MUST either be on their own SDN VNet bridge or have their NIC
+    disconnected (link_down=1) to prevent direct access to the host network.
+    """
+    node, vmid = resource.proxmox_node, resource.proxmox_vmid
+    is_lxc = resource.resource_type == "lxc"
+    try:
+        if is_lxc:
+            config = proxmox_client.get_container_config(node, vmid)
+        else:
+            config = proxmox_client.get_vm_config(node, vmid)
+        net0 = str(config.get("net0", ""))
+        if not net0:
+            return
+        # Parse net0 key=value pairs
+        parts = {}
+        for segment in net0.split(","):
+            if "=" in segment:
+                k, v = segment.split("=", 1)
+                parts[k.strip()] = v.strip()
+        bridge = parts.get("bridge", "")
+        link_down = parts.get("link_down", "0")
+        # Allow if not on vmbr0 (already on SDN VNet)
+        if bridge != "vmbr0":
+            return
+        # On vmbr0 — only allow if disconnected
+        if link_down == "1":
+            return
+        raise ValueError(
+            "Network safety: this instance is connected to vmbr0 without a VPC. "
+            "Assign a VPC network before starting, or the NIC must be disconnected."
+        )
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.warning("Network safety check failed for %s/%s: %s", node, vmid, e)

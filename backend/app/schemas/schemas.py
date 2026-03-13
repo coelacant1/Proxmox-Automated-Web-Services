@@ -42,6 +42,9 @@ class QuotaRead(BaseModel):
     max_snapshots: int
     max_backups: int = 20
     max_backup_size_gb: int = 100
+    max_networks: int = 3
+    max_subnets_per_network: int = 5
+    max_elastic_ips: int = 5
 
     model_config = {"from_attributes": True}
 
@@ -398,9 +401,14 @@ class VolumeRead(BaseModel):
 
 class SubnetCreate(BaseModel):
     name: str
-    cidr: str
+    cidr: str | None = None  # auto-allocate if None
     gateway: str | None = None
     is_public: bool = False
+    snat_enabled: bool = True
+    dhcp_enabled: bool = True
+    dhcp_start: str | None = None
+    dhcp_end: str | None = None
+    dns_server: str | None = None
 
 
 class SubnetRead(BaseModel):
@@ -409,6 +417,25 @@ class SubnetRead(BaseModel):
     cidr: str
     gateway: str | None
     is_public: bool
+    snat_enabled: bool
+    dhcp_enabled: bool
+    dhcp_start: str | None = None
+    dhcp_end: str | None = None
+    dns_server: str | None = None
+    proxmox_subnet_id: str | None = None
+    status: str = "active"
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class IPReservationRead(BaseModel):
+    id: uuid.UUID
+    subnet_id: uuid.UUID
+    ip_address: str
+    resource_id: uuid.UUID | None = None
+    label: str | None = None
+    is_gateway: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -416,9 +443,10 @@ class SubnetRead(BaseModel):
 
 class VPCCreate(BaseModel):
     name: str
-    cidr: str = "10.100.0.0/16"
+    cidr: str | None = None  # auto-allocate if None
     gateway: str | None = None
     dhcp_enabled: bool = True
+    network_mode: str = "private"  # published, private, isolated
 
 
 class VPCRead(BaseModel):
@@ -430,9 +458,24 @@ class VPCRead(BaseModel):
     proxmox_vnet: str | None
     gateway: str | None
     dhcp_enabled: bool
+    network_mode: str = "private"
     status: str
     is_default: bool
     subnets: list[SubnetRead] = []
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class NetworkModeRead(BaseModel):
+    network_mode: str
+    bandwidth_limit_mbps: int | None = None
+    effective_bandwidth_mbps: int
+
+
+class NetworkModeUpdate(BaseModel):
+    network_mode: str
+
+
+class BandwidthUpdate(BaseModel):
+    bandwidth_limit_mbps: int | None = None  # null = use tier default

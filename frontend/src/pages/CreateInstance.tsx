@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, Check, Server } from 'lucide-react';
 import api from '../api/client';
 import {
-  Button, Card, CardContent, Input, Select, Textarea,
+  Button, Card, CardContent, Input, Select,
   Badge,
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
@@ -29,7 +29,7 @@ interface InstanceType {
   description: string | null;
 }
 
-const STEPS = ['Template', 'Size', 'Network', 'Cloud-Init', 'Review'];
+const STEPS = ['Template', 'Size', 'Network', 'Configuration', 'Review'];
 
 export default function CreateInstance() {
   const navigate = useNavigate();
@@ -56,10 +56,13 @@ export default function CreateInstance() {
     disk_gb: 32,
     storage: 'local-lvm',
     vpc_id: '',
+    network_mode: 'private',
     hostname: '',
     ssh_key_ids: [] as string[],
-    user_data: '',
-    ip_config: 'ip=dhcp',
+    ci_user: '',
+    ci_password: '',
+    dns_server: '',
+    dns_domain: '',
   });
 
   useEffect(() => {
@@ -139,10 +142,13 @@ export default function CreateInstance() {
         disk_gb: form.disk_gb,
         storage: form.storage,
         vpc_id: form.vpc_id || undefined,
+        network_mode: form.network_mode,
         hostname: form.hostname || undefined,
         ssh_key_ids: form.ssh_key_ids.length > 0 ? form.ssh_key_ids : undefined,
-        user_data: form.user_data || undefined,
-        ip_config: form.ip_config || undefined,
+        ci_user: form.ci_user || undefined,
+        ci_password: form.ci_password || undefined,
+        dns_server: form.dns_server || undefined,
+        dns_domain: form.dns_domain || undefined,
         instance_type: form.instance_type || undefined,
       };
       await api.post('/api/compute/vms', payload);
@@ -283,19 +289,42 @@ export default function CreateInstance() {
             value={form.vpc_id}
             onChange={(e) => setForm({ ...form, vpc_id: e.target.value })}
           />
-          <Input label="IP Configuration" value={form.ip_config} placeholder="ip=dhcp"
-            onChange={(e) => setForm({ ...form, ip_config: e.target.value })} />
+          <Select
+            label="Network Mode"
+            options={[
+              { value: 'private', label: 'Private — Full LAN + Internet access' },
+              { value: 'published', label: 'Published — Internet only, LAN blocked (for public services)' },
+              { value: 'isolated', label: 'Isolated — Own subnet only (airgapped)' },
+            ]}
+            value={form.network_mode}
+            onChange={(e) => setForm({ ...form, network_mode: e.target.value })}
+          />
+          {form.vpc_id && (
+            <p className="text-xs text-paws-text-dim">IP address will be automatically allocated from the VPC subnet.</p>
+          )}
         </div>
       )}
 
-      {/* Step 3: Cloud-Init */}
+      {/* Step 3: Configuration */}
       {step === 3 && (
         <div className="space-y-4">
           <Input label="Instance Name" value={form.name} placeholder="my-instance"
             onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <Input label="Hostname" value={form.hostname} placeholder="Optional hostname"
             onChange={(e) => setForm({ ...form, hostname: e.target.value })} />
-          {sshKeys.length > 0 && (
+          <div className="grid grid-cols-2 gap-4">
+            <Input label="Username" value={form.ci_user} placeholder="paws (default)"
+              onChange={(e) => setForm({ ...form, ci_user: e.target.value })} />
+            <Input label="Password" type="password" value={form.ci_password} placeholder="Optional"
+              onChange={(e) => setForm({ ...form, ci_password: e.target.value })} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <Input label="DNS Server" value={form.dns_server} placeholder="1.1.1.1 (default)"
+              onChange={(e) => setForm({ ...form, dns_server: e.target.value })} />
+            <Input label="DNS Domain" value={form.dns_domain} placeholder="Optional"
+              onChange={(e) => setForm({ ...form, dns_domain: e.target.value })} />
+          </div>
+          {sshKeys.length > 0 ? (
             <div>
               <label className="block text-sm font-medium text-paws-text-muted mb-1.5">SSH Keys</label>
               <div className="space-y-1">
@@ -315,9 +344,9 @@ export default function CreateInstance() {
                 ))}
               </div>
             </div>
+          ) : (
+            <p className="text-xs text-paws-text-dim">No SSH keys added. <a href="/ssh-keys" className="text-paws-primary hover:underline">Add SSH keys</a> to inject them into instances.</p>
           )}
-          <Textarea label="User Data (cloud-init)" value={form.user_data} placeholder="#cloud-config"
-            onChange={(e) => setForm({ ...form, user_data: e.target.value })} rows={6} />
         </div>
       )}
 
@@ -330,7 +359,11 @@ export default function CreateInstance() {
             <ReviewRow label="Size" value={`${form.cores} vCPU · ${form.memory_mb} MB RAM · ${form.disk_gb} GB Disk`} />
             <ReviewRow label="Storage" value={form.storage} />
             <ReviewRow label="VPC" value={vpcs.find((v) => v.id === form.vpc_id)?.name || 'None'} />
+            <ReviewRow label="Network Mode" value={form.network_mode.charAt(0).toUpperCase() + form.network_mode.slice(1)} />
             <ReviewRow label="Hostname" value={form.hostname || '-'} />
+            <ReviewRow label="Username" value={form.ci_user || 'paws (default)'} />
+            <ReviewRow label="Password" value={form.ci_password ? '***' : 'Not set'} />
+            <ReviewRow label="DNS" value={form.dns_server || '1.1.1.1 (default)'} />
             <ReviewRow label="SSH Keys" value={form.ssh_key_ids.length > 0 ? `${form.ssh_key_ids.length} selected` : 'None'} />
           </CardContent>
         </Card>

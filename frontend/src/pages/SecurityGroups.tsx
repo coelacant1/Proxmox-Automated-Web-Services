@@ -147,7 +147,7 @@ export default function SecurityGroups() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-paws-text">Security Groups</h1>
+        <h1 className="text-2xl font-bold text-paws-text">Firewalls</h1>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4 mr-1" /> Create Group
         </Button>
@@ -304,7 +304,7 @@ export default function SecurityGroups() {
       </div>
 
       {/* Create Group Modal */}
-      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Create Security Group">
+      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Create Firewall Rule Group">
         <div className="space-y-4">
           <Input label="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />

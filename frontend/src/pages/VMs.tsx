@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 
 interface VM {
@@ -31,6 +32,7 @@ const statusDotColor = (s: string) => {
 export default function VMs() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { toast } = useToast();
   const [vms, setVms] = useState<VM[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -41,14 +43,24 @@ export default function VMs() {
   useEffect(fetchVMs, []);
 
   const doAction = async (id: string, action: string) => {
-    await api.post(`/api/compute/vms/${id}/action`, { action });
-    setTimeout(fetchVMs, 2000);
+    try {
+      await api.post(`/api/compute/vms/${id}/action`, { action });
+      setTimeout(fetchVMs, 2000);
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast(typeof d === 'string' ? d : `${action} failed`, 'error');
+    }
   };
 
   const deleteVM = async (id: string) => {
     if (!confirm('Are you sure you want to destroy this VM?')) return;
-    await api.delete(`/api/compute/vms/${id}`);
-    fetchVMs();
+    try {
+      await api.delete(`/api/compute/vms/${id}`);
+      fetchVMs();
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast(typeof d === 'string' ? d : 'Failed to destroy instance', 'error');
+    }
   };
 
   const keepAlive = async (id: string) => {

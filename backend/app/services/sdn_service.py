@@ -1,6 +1,6 @@
 """SDN (Software-Defined Networking) service for Proxmox VPC networking.
 
-Manages VXLAN zones, VNets, and subnet configurations to provide
+Manages EVPN zones, VNets, and subnet configurations to provide
 per-user/per-VPC isolated networking via Proxmox SDN.
 """
 
@@ -11,12 +11,12 @@ from app.services.proxmox_client import proxmox_client
 
 logger = logging.getLogger(__name__)
 
-# VXLAN tag range for tenant isolation (10000-16777215)
-VXLAN_TAG_MIN = 10000
-VXLAN_TAG_MAX = 16777215
+# VXLAN tag range for tenant isolation
+VXLAN_TAG_MIN = 10001
+VXLAN_TAG_MAX = 99999
 
 # Naming conventions
-ZONE_PREFIX = "paws"
+EVPN_ZONE = "paws"
 VNET_PREFIX = "pv"
 
 
@@ -40,37 +40,26 @@ class SDNService:
             return []
 
     def get_paws_zone(self) -> dict[str, Any] | None:
-        """Get the PAWS VXLAN zone, if it exists."""
+        """Get the PAWS EVPN zone, if it exists."""
         zones = self.get_zones()
         for z in zones:
-            if z.get("zone") == f"{ZONE_PREFIX}zone":
+            if z.get("zone") == EVPN_ZONE:
                 return z
         return None
 
-    def ensure_zone(self) -> str:
-        """Ensure the PAWS VXLAN zone exists. Returns zone name."""
-        zone_name = f"{ZONE_PREFIX}zone"
-        existing = self.get_paws_zone()
-        if existing:
-            logger.info("PAWS SDN zone already exists: %s", zone_name)
-            return zone_name
-
+    def get_vnet_status(self, vnet_name: str) -> dict[str, Any] | None:
+        """Get a specific VNet's details from Proxmox."""
         try:
-            proxmox_client.api.cluster.sdn.zones.post(
-                zone=zone_name,
-                type="vxlan",
-                peers="",  # auto-discover peers
-            )
-            self._apply_sdn()
-            logger.info("Created PAWS SDN zone: %s", zone_name)
+            return proxmox_client.get_sdn_vnet(vnet_name)
         except Exception as e:
-            logger.error("Failed to create SDN zone: %s", e)
-            raise RuntimeError(f"Failed to create SDN zone: {e}") from e
-        return zone_name
+            logger.error("Failed to get VNet %s: %s", vnet_name, e)
+            return None
 
-    def create_vnet(self, vnet_name: str, vxlan_tag: int, zone: str | None = None, alias: str = "") -> str:
-        """Create a VNet in the PAWS zone with a VXLAN tag."""
-        zone = zone or f"{ZONE_PREFIX}zone"
+    def create_vnet(
+        self, vnet_name: str, vxlan_tag: int, zone: str | None = None, alias: str = ""
+    ) -> str:
+        """Create a VNet in the PAWS EVPN zone with a VXLAN tag."""
+        zone = zone or EVPN_ZONE
         try:
             proxmox_client.create_sdn_vnet(vnet_name, zone, tag=vxlan_tag, alias=alias)
             self._apply_sdn()
@@ -81,8 +70,16 @@ class SDNService:
             raise RuntimeError(f"Failed to create VNet: {e}") from e
 
     def delete_vnet(self, vnet_name: str) -> None:
-        """Delete a VNet."""
+        """Delete a VNet and all its subnets."""
         try:
+            subnets = self.get_subnets(vnet_name)
+            for s in subnets:
+                subnet_id = s.get("subnet") or s.get("cidr")
+                if subnet_id:
+                    try:
+                        self.delete_subnet(vnet_name, subnet_id)
+                    except Exception as sub_e:
+                        logger.warning("Failed to delete subnet %s: %s", subnet_id, sub_e)
             proxmox_client.delete_sdn_vnet(vnet_name)
             self._apply_sdn()
             logger.info("Deleted VNet %s", vnet_name)
@@ -90,14 +87,73 @@ class SDNService:
             logger.error("Failed to delete VNet %s: %s", vnet_name, e)
             raise RuntimeError(f"Failed to delete VNet: {e}") from e
 
-    def allocate_vxlan_tag(self) -> int:
-        """Allocate the next available VXLAN tag by checking existing VNets."""
+    def get_subnets(self, vnet_name: str) -> list[dict[str, Any]]:
+        """List subnets on a VNet."""
+        try:
+            return proxmox_client.get_sdn_subnets(vnet_name)
+        except Exception as e:
+            logger.error("Failed to get subnets for VNet %s: %s", vnet_name, e)
+            return []
+
+    def create_subnet(
+        self,
+        vnet_name: str,
+        cidr: str,
+        gateway: str,
+        snat: bool = True,
+        dns_server: str | None = None,
+    ) -> None:
+        """Create a Proxmox SDN subnet on a VNet.
+
+        DHCP is not supported on EVPN/VXLAN zones -- IPs are assigned
+        statically via cloud-init (VMs) or LXC net config.
+
+        Args:
+            vnet_name: The VNet to create the subnet on
+            cidr: Subnet CIDR (e.g. "10.100.1.0/24")
+            gateway: Gateway IP (e.g. "10.100.1.1")
+            snat: Enable SNAT for internet access
+            dns_server: DNS server IP for static config
+        """
+        try:
+            proxmox_client.create_sdn_subnet(
+                vnet_name, cidr, gateway, snat=snat,
+            )
+            self._apply_sdn()
+            logger.info("Created subnet %s on VNet %s (snat=%s)", cidr, vnet_name, snat)
+        except Exception as e:
+            logger.error("Failed to create subnet %s on %s: %s", cidr, vnet_name, e)
+            raise RuntimeError(f"Failed to create subnet: {e}") from e
+
+    def delete_subnet(self, vnet_name: str, subnet_id: str) -> None:
+        """Delete a Proxmox SDN subnet.
+
+        Args:
+            vnet_name: The VNet the subnet belongs to
+            subnet_id: The subnet identifier (CIDR format, e.g. "10.100.1.0-24")
+        """
+        try:
+            proxmox_client.delete_sdn_subnet(vnet_name, subnet_id)
+            self._apply_sdn()
+            logger.info("Deleted subnet %s from VNet %s", subnet_id, vnet_name)
+        except Exception as e:
+            logger.error("Failed to delete subnet %s from %s: %s", subnet_id, vnet_name, e)
+            raise RuntimeError(f"Failed to delete subnet: {e}") from e
+
+    def allocate_vxlan_tag(self, used_db_tags: set[int] | None = None) -> int:
+        """Allocate the next available VXLAN tag.
+
+        Checks both Proxmox VNets and optionally the DB to avoid collisions.
+        """
         vnets = self.get_vnets()
-        used_tags = set()
+        used_tags: set[int] = set()
         for v in vnets:
             tag = v.get("tag")
             if tag is not None:
                 used_tags.add(int(tag))
+
+        if used_db_tags:
+            used_tags.update(used_db_tags)
 
         for tag in range(VXLAN_TAG_MIN, VXLAN_TAG_MAX):
             if tag not in used_tags:
@@ -112,7 +168,7 @@ class SDNService:
     def _apply_sdn(self) -> None:
         """Apply pending SDN changes on the cluster."""
         try:
-            proxmox_client.api.cluster.sdn.put()
+            proxmox_client.apply_sdn()
         except Exception as e:
             logger.warning("Failed to apply SDN config (may need manual apply): %s", e)
 
