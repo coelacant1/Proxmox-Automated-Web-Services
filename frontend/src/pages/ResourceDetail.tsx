@@ -7,7 +7,7 @@ import {
 import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
-  StatusBadge, Badge, Tabs, TagPills, ConfirmDialog,
+  StatusBadge, Badge, Tabs, ConfirmDialog,
 } from '@/components/ui';
 
 interface ResourceDetail {
@@ -35,7 +35,6 @@ export default function ResourceDetail() {
   const navigate = useNavigate();
   const [resource, setResource] = useState<ResourceDetail | null>(null);
   const [tasks, setTasks] = useState<TaskLog[]>([]);
-  const [tags, setTags] = useState<Array<{ key: string; value: string }>>([]);
   const [tab, setTab] = useState('overview');
   const [showDestroy, setShowDestroy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -58,7 +57,6 @@ export default function ResourceDetail() {
       }).catch(() => setLoading(false));
     });
     api.get(`/api/logs/tasks/${id}`).then((r) => setTasks(r?.data?.tasks || [])).catch(() => {});
-    api.get(`/api/tags/?resource_id=${id}`).then((r) => setTags(r?.data || [])).catch(() => {});
   };
 
    useEffect(fetchData, [id]);
@@ -87,7 +85,6 @@ export default function ResourceDetail() {
     { id: 'overview', label: 'Overview' },
     { id: 'monitoring', label: 'Monitoring', icon: <Activity className="h-3.5 w-3.5" /> },
     { id: 'activity', label: 'Activity', count: tasks.length },
-    { id: 'tags', label: 'Tags', count: tags.length },
   ];
 
   return (
@@ -207,20 +204,6 @@ export default function ResourceDetail() {
                   </div>
                 ))}
               </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Tags Tab */}
-      {tab === 'tags' && (
-        <Card>
-          <CardHeader><CardTitle>Tags</CardTitle></CardHeader>
-          <CardContent>
-            {tags.length > 0 ? (
-              <TagPills tags={Object.fromEntries(tags.map((t) => [t.key, t.value]))} />
-            ) : (
-              <p className="text-sm text-paws-text-dim">No tags assigned.</p>
             )}
           </CardContent>
         </Card>

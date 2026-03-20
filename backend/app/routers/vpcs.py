@@ -14,7 +14,10 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.deps import get_current_active_user
-from app.models.models import VPC, IPReservation, Resource, Subnet, SystemSetting, User, UserQuota, UserTier
+from app.models.models import (
+    VPC, IPReservation, Resource, ResourceSecurityGroup, SecurityGroup,
+    SecurityGroupRule, Subnet, SystemSetting, User, UserQuota, UserTier,
+)
 from app.services.proxmox_client import proxmox_client
 from app.schemas.schemas import SubnetCreate, SubnetRead, VPCCreate, VPCRead
 from app.services.audit_service import log_action
@@ -28,6 +31,92 @@ router = APIRouter(prefix="/api/vpcs", tags=["vpcs"])
 
 
 # ---------------------------------------------------------------------------
+# Helper: auto-create a managed security group for published networks
+# ---------------------------------------------------------------------------
+
+_BOGON_RANGES = [
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+    "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+    "224.0.0.0/4", "240.0.0.0/4",
+]
+
+
+async def _ensure_published_sg(
+    db: AsyncSession,
+    owner_id: _uuid.UUID,
+    vpc_name: str,
+    vpc_cidr: str,
+) -> SecurityGroup:
+    """Create a managed security group with bogon-blocking rules for a published network.
+
+    Rules generated:
+      1. ALLOW ingress/egress from own subnet (vpc_cidr)
+      2. ALLOW ingress/egress from each upstream proxy IP (sdn.upstream_ips)
+      3. DROP ingress/egress for every bogon/RFC1918 range
+      4. ALLOW all remaining traffic (internet)
+    """
+    sg_name = f"Published: {vpc_name}"
+
+    # Load upstream IPs from system settings
+    from app.services.firewall_profile import FirewallProfileService
+    upstream_ips = await FirewallProfileService.get_upstream_ips_async(db)
+
+    sg = SecurityGroup(
+        owner_id=owner_id,
+        name=sg_name,
+        description=f"Auto-managed firewall for published network '{vpc_name}'. Blocks bogon/RFC1918 traffic except own subnet and upstream proxies.",
+    )
+    db.add(sg)
+    await db.flush()
+
+    rules: list[SecurityGroupRule] = []
+
+    # 1. Allow own subnet
+    for direction in ("ingress", "egress"):
+        rules.append(SecurityGroupRule(
+            security_group_id=sg.id, direction=direction, protocol="tcp",
+            port_from=None, port_to=None, cidr=vpc_cidr,
+            description=f"Allow {direction} from own subnet",
+        ))
+        rules.append(SecurityGroupRule(
+            security_group_id=sg.id, direction=direction, protocol="udp",
+            port_from=None, port_to=None, cidr=vpc_cidr,
+            description=f"Allow {direction} from own subnet",
+        ))
+        rules.append(SecurityGroupRule(
+            security_group_id=sg.id, direction=direction, protocol="icmp",
+            port_from=None, port_to=None, cidr=vpc_cidr,
+            description=f"Allow {direction} from own subnet",
+        ))
+
+    # 2. Allow upstream proxy IPs
+    for ip in upstream_ips:
+        for direction in ("ingress", "egress"):
+            rules.append(SecurityGroupRule(
+                security_group_id=sg.id, direction=direction, protocol="tcp",
+                port_from=None, port_to=None, cidr=ip if "/" in ip else f"{ip}/32",
+                description=f"Allow upstream proxy {ip}",
+            ))
+
+    # 3. Block bogon ranges
+    for bogon in _BOGON_RANGES:
+        for direction in ("ingress", "egress"):
+            rules.append(SecurityGroupRule(
+                security_group_id=sg.id, direction=direction, protocol="tcp",
+                port_from=None, port_to=None, cidr=bogon,
+                description=f"Block bogon {bogon}",
+            ))
+            rules.append(SecurityGroupRule(
+                security_group_id=sg.id, direction=direction, protocol="udp",
+                port_from=None, port_to=None, cidr=bogon,
+                description=f"Block bogon {bogon}",
+            ))
+
+    for r in rules:
+        db.add(r)
+
+    return sg
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -133,6 +222,11 @@ async def create_vpc(
     except Exception:
         logger.exception("Failed to create Proxmox VNet for VPC %s", vpc.id)
         vpc.status = "error"
+
+    # Auto-create managed security group for published networks
+    if body.network_mode == "published":
+        sg = await _ensure_published_sg(db, user.id, body.name, cidr)
+        vpc.security_group_id = sg.id
 
     await db.commit()
 
@@ -279,6 +373,14 @@ async def update_vpc_mode(
     # Update VPC mode
     vpc.network_mode = body.network_mode
 
+    # Manage security group for published mode
+    if body.network_mode == "published" and not vpc.security_group_id:
+        sg = await _ensure_published_sg(db, user.id, vpc.name, vpc.cidr)
+        vpc.security_group_id = sg.id
+    elif body.network_mode != "published" and vpc.security_group_id:
+        # Unlink (but keep the SG so rules are preserved if user switches back)
+        vpc.security_group_id = None
+
     # Load settings for firewall rules
     lan_ranges = await FirewallProfileService.get_lan_ranges_async(db)
     upstream_ips = await FirewallProfileService.get_upstream_ips_async(db)
@@ -306,6 +408,22 @@ async def update_vpc_mode(
                 body.network_mode, r.proxmox_node, r.proxmox_vmid, exc,
             )
             errors.append(str(r.display_name))
+
+        # Auto-attach/detach managed SG to instances
+        if body.network_mode == "published" and vpc.security_group_id:
+            existing_link = await db.execute(
+                select(ResourceSecurityGroup).where(
+                    ResourceSecurityGroup.resource_id == r.id,
+                    ResourceSecurityGroup.security_group_id == vpc.security_group_id,
+                )
+            )
+            if not existing_link.scalar_one_or_none():
+                db.add(ResourceSecurityGroup(
+                    resource_id=r.id, security_group_id=vpc.security_group_id,
+                ))
+        elif body.network_mode != "published" and vpc.security_group_id is None:
+            # Detach any previously auto-linked published SGs from prior mode
+            pass  # SG was unlinked from VPC, but ResourceSecurityGroup persists for safety
 
     await db.commit()
 

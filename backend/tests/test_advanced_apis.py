@@ -1,4 +1,4 @@
-"""Tests for admin features, search, billing quota, endpoint validation,
+"""Tests for admin features, search, endpoint validation,
 metrics keys, VPC instances, webhook delivery, and health detail."""
 
 import pytest
@@ -99,47 +99,6 @@ async def test_validate_subdomain_invalid_format(auth_client):
     r = await auth_client.get("/api/endpoints/validate-subdomain/INVALID_FORMAT!")
     assert r.status_code == 200
     assert r.json()["valid"] is False
-
-
-# --- Billing Quota Status ------------------------------------------------
-
-
-@pytest.mark.anyio
-async def test_billing_quota_status(auth_client):
-    r = await auth_client.get("/api/billing/quota-status")
-    assert r.status_code == 200
-    data = r.json()
-    assert "monthly_credits" in data
-    assert "usage_percent" in data
-    assert "remaining" in data
-
-
-# --- Admin Tag Policies --------------------------------------------------
-
-
-@pytest.mark.anyio
-async def test_create_tag_policy(admin_client):
-    r = await admin_client.post(
-        "/api/admin/users/tag-policies",
-        json={"key": "env", "required": True, "allowed_values": ["prod", "dev", "staging"]},
-    )
-    assert r.status_code == 201
-    assert r.json()["required"] is True
-
-
-@pytest.mark.anyio
-async def test_list_tag_policies(admin_client):
-    await admin_client.post("/api/admin/users/tag-policies", json={"key": "team"})
-    r = await admin_client.get("/api/admin/users/tag-policies")
-    assert r.status_code == 200
-    assert len(r.json()) >= 1
-
-
-@pytest.mark.anyio
-async def test_delete_tag_policy(admin_client):
-    await admin_client.post("/api/admin/users/tag-policies", json={"key": "delete-me"})
-    r = await admin_client.delete("/api/admin/users/tag-policies/delete-me")
-    assert r.status_code == 200
 
 
 # --- Admin Node Affinity -------------------------------------------------

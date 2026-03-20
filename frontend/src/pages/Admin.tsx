@@ -12,7 +12,7 @@ import type { Column } from '@/components/ui/DataTable';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { Textarea, Modal, Select, useToast, Tabs, ConfirmDialog } from '@/components/ui';
 import { QuotaBar } from '@/components/ui/QuotaBar';
-import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, Search, Eye, Network } from 'lucide-react';
+import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, ChevronDown, ChevronRight, Search, Eye, Network } from 'lucide-react';
 import {
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart, Bar, BarChart,
@@ -156,7 +156,7 @@ export default function Admin() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-paws-text">Administration</h1>
 
-      {/* Primary nav — category sections */}
+      {/* Primary nav - category sections */}
       <div className="flex gap-1 border-b border-paws-border pb-2">
         {ADMIN_SECTIONS.map((section) => (
           <Button
@@ -170,7 +170,7 @@ export default function Admin() {
         ))}
       </div>
 
-      {/* Secondary nav — sub-tabs within the selected section */}
+      {/* Secondary nav - sub-tabs within the selected section */}
       {currentSection.tabs.length > 1 && (
         <div className="flex gap-1">
           {currentSection.tabs.map((tab) => (
@@ -479,7 +479,7 @@ function AdminResourcesTab({ category }: { category: string }) {
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   const openItem = async (row: any) => {
-    // Resources with dedicated detail pages — navigate directly
+    // Resources with dedicated detail pages - navigate directly
     if (category === 'instances') {
       const route = row.resource_type === 'lxc' ? 'containers' : 'vms';
       // Impersonate the owner so the detail page can load their resource
@@ -513,7 +513,7 @@ function AdminResourcesTab({ category }: { category: string }) {
       return;
     }
 
-    // All other resource types — impersonate and go to the list page
+    // All other resource types - impersonate and go to the list page
     const categoryRouteMap: Record<string, string> = {
       volumes: '/volumes',
       vpcs: '/networks',
@@ -1737,7 +1737,7 @@ function QuotaRequestsTab() {
             <Card key={qr.id}>
               <CardContent>
                 <div className="flex justify-between mb-2">
-                  <span className="text-paws-text"><strong>{qr.request_type}</strong>: {qr.current_value} → {qr.requested_value}</span>
+                  <span className="text-paws-text"><strong>{qr.request_type}</strong>: {qr.current_value} -> {qr.requested_value}</span>
                   <StatusBadge status={qr.status} />
                 </div>
                 <p className="text-sm text-paws-text-muted">{qr.reason}</p>
@@ -2200,7 +2200,7 @@ function SettingsTab() {
   };
 
   const SETTING_GROUPS: Record<string, string[]> = {
-    'Resource Quotas': ['default_max_vms', 'default_max_containers', 'default_max_vcpus', 'default_max_ram_mb', 'default_max_disk_gb', 'default_max_networks', 'default_max_volumes', 'default_max_volume_size_gb', 'default_max_security_groups', 'default_max_sg_rules', 'default_max_backups', 'default_max_backup_size_gb', 'default_max_snapshots'],
+    'Resource Quotas': ['default_max_vms', 'default_max_containers', 'default_max_vcpus', 'default_max_ram_mb', 'default_max_disk_gb', 'default_max_networks', 'default_max_volumes', 'default_max_volume_size_gb', 'default_max_security_groups', 'default_max_sg_rules', 'default_max_backups', 'default_max_backup_size_gb', 'default_max_snapshots', 'default_max_buckets', 'default_max_storage_gb'],
     'Cluster Settings': ['cpu_overcommit_ratio', 'ram_overcommit_ratio', 'placement_strategy', 'vmid_range_start', 'vmid_range_end'],
     'SDN / Networking': ['sdn.default_max_subnet_prefix', 'sdn.lan_ranges', 'sdn.upstream_ips'],
     'Authentication': ['registration_mode', 'session_timeout_minutes'],
@@ -2217,6 +2217,9 @@ function SettingsTab() {
   });
 
   const groupOrder = [...Object.keys(SETTING_GROUPS), 'Other'];
+
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const toggleGroup = (group: string) => setExpandedGroups(prev => ({ ...prev, [group]: !prev[group] }));
 
   const toast = useToast();
   const [syncing, setSyncing] = useState(false);
@@ -2237,9 +2240,17 @@ function SettingsTab() {
     <div className="flex flex-col gap-6">
       {groupOrder.filter(g => (grouped[g] ?? []).length > 0).map(group => (
         <div key={group}>
-          <h3 className="text-sm font-semibold text-paws-text-dim uppercase tracking-wider mb-2">{group}</h3>
-          <div className="flex flex-col gap-2">
-            {(grouped[group] ?? []).map(s => (
+          <button
+            onClick={() => toggleGroup(group)}
+            className="flex items-center gap-2 w-full text-left mb-2 hover:opacity-80 transition-opacity"
+          >
+            {expandedGroups[group] ? <ChevronDown className="w-4 h-4 text-paws-text-dim" /> : <ChevronRight className="w-4 h-4 text-paws-text-dim" />}
+            <h3 className="text-sm font-semibold text-paws-text-dim uppercase tracking-wider">{group}</h3>
+            <span className="text-xs text-paws-text-muted">({(grouped[group] ?? []).length})</span>
+          </button>
+          {expandedGroups[group] && (
+            <div className="flex flex-col gap-2">
+              {(grouped[group] ?? []).map(s => (
               <Card key={s.key}>
                 <CardContent className="flex gap-4 items-center">
                   <div className="flex-1">
@@ -2262,7 +2273,8 @@ function SettingsTab() {
                 </CardContent>
               </Card>
             ))}
-          </div>
+            </div>
+          )}
         </div>
       ))}
       <div>
@@ -3252,7 +3264,7 @@ function ClusterTab() {
       <Modal
         open={detailLoading || selectedTask !== null}
         onClose={() => { setSelectedTask(null); setDetailLoading(false); }}
-        title={selectedTask ? `${selectedTask.type_label} — ${selectedTask.node}` : 'Loading Task...'}
+        title={selectedTask ? `${selectedTask.type_label} - ${selectedTask.node}` : 'Loading Task...'}
         size="xl"
       >
         {detailLoading ? (

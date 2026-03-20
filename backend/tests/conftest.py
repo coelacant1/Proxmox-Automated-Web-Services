@@ -2,7 +2,7 @@
 
 Provides:
 - In-memory SQLite database with all tables auto-created per test
-- Dependency overrides so API tests never hit real Postgres/Proxmox/MinIO/Redis
+- Dependency overrides so API tests never hit real Postgres/Proxmox/S3/Redis
 - Mock Proxmox client and storage service
 - Authenticated test client helpers
 """
@@ -276,12 +276,12 @@ class MockProxmoxClient:
 
 
 class MockStorageService:
-    """Fake MinIO storage service."""
+    """Fake S3 storage service."""
 
     async def create_bucket(self, bucket_name: str) -> dict[str, Any]:
         return {"bucket": bucket_name, "status": "created"}
 
-    async def delete_bucket(self, bucket_name: str) -> dict[str, Any]:
+    async def delete_bucket(self, bucket_name: str, force: bool = False) -> dict[str, Any]:
         return {"bucket": bucket_name, "status": "deleted"}
 
     async def list_buckets(self) -> list[dict[str, Any]]:
@@ -302,8 +302,8 @@ class MockStorageService:
     async def delete_object(self, bucket_name: str, key: str) -> dict[str, Any]:
         return {"key": key, "status": "deleted"}
 
-    def generate_presigned_url(self, bucket_name: str, key: str, expires_in: int = 3600, method: str = "GET") -> str:
-        return f"http://minio:9000/{bucket_name}/{key}?signature=mock&expires={expires_in}"
+    async def generate_presigned_url(self, bucket_name: str, key: str, expires_in: int = 3600, method: str = "GET") -> str:
+        return f"http://s3-mock/{bucket_name}/{key}?signature=mock&expires={expires_in}"
 
 
 mock_proxmox = MockProxmoxClient()
@@ -391,7 +391,7 @@ def make_token(user: User) -> str:
 
 @pytest.fixture
 async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncClient, None]:
-    """AsyncClient wired to the FastAPI app with mocked DB, Proxmox, MinIO, Redis."""
+    """AsyncClient wired to the FastAPI app with mocked DB, Proxmox, S3, Redis."""
     import app.services.proxmox_client as pxm_mod
     import app.services.rate_limiter as rl_mod
     import app.services.storage_service as stg_mod

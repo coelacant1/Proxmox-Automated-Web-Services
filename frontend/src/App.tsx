@@ -13,7 +13,6 @@ import BackupsEnhanced from './pages/BackupsEnhanced';
 import BucketDetail from './pages/BucketDetail';
 import BugReports from './pages/BugReports';
 import Containers from './pages/Containers';
-import CostDashboard from './pages/CostDashboard';
 import Groups from './pages/Groups';
 import SystemRules from './pages/SystemRules';
 import CreateInstance from './pages/CreateInstance';
@@ -24,7 +23,6 @@ import FileBrowser from './pages/FileBrowser';
 import ImportExport from './pages/ImportExport';
 import InstanceDetail from './pages/InstanceDetail';
 import Login from './pages/Login';
-import MFASettings from './pages/MFASettings';
 import Networking from './pages/Networking';
 import OAuthCallback from './pages/OAuthCallback';
 import QuotaRequests from './pages/QuotaRequests';
@@ -34,7 +32,6 @@ import SecurityGroups from './pages/SecurityGroups';
 import SSHKeys from './pages/SSHKeys';
 import StatusPage from './pages/StatusPage';
 import Storage from './pages/Storage';
-import Tags from './pages/Tags';
 import Templates from './pages/Templates';
 import Tiers from './pages/Tiers';
 import VMs from './pages/VMs';
@@ -75,10 +72,7 @@ function App() {
             <Route path="backups" element={<BackupsEnhanced />} />
             <Route path="backups/:backupId" element={<BackupDetail />} />
             <Route path="backups/settings" element={<BackupSettingsPage />} />
-            <Route path="costs" element={<CostDashboard />} />
-            <Route path="tags" element={<Tags />} />
             <Route path="quota-requests" element={<QuotaRequests />} />
-            <Route path="mfa" element={<MFASettings />} />
             <Route path="status" element={<StatusPage />} />
             <Route path="api-docs" element={<APIDocs />} />
             <Route path="import-export" element={<ImportExport />} />

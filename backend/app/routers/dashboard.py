@@ -94,12 +94,25 @@ async def user_dashboard_summary(
     )
     status_counts = {row[0]: row[1] for row in status_result.all()}
 
+    # S3 storage size and bucket count
+    storage_size_result = await db.execute(
+        select(func.coalesce(func.sum(StorageBucket.size_bytes), 0)).where(
+            StorageBucket.owner_id == user.id
+        )
+    )
+    storage_size_bytes = storage_size_result.scalar() or 0
+    bucket_count_result = await db.execute(
+        select(func.count(StorageBucket.id)).where(StorageBucket.owner_id == user.id)
+    )
+    bucket_count = bucket_count_result.scalar() or 0
+
     return {
         "resources": {
             "vms": counts.get("vm", 0),
             "containers": counts.get("lxc", 0),
             "networks": vpc_count,
-            "storage_buckets": counts.get("storage", 0),
+            "storage_buckets": bucket_count,
+            "storage_size_gb": round(storage_size_bytes / 1_073_741_824, 3),
             "vcpus_used": total_vcpus,
             "ram_mb_used": total_ram_mb,
             "disk_gb_used": total_disk_gb,
@@ -117,6 +130,8 @@ async def user_dashboard_summary(
             "max_networks": quota.max_networks if quota else 3,
             "max_subnets_per_network": quota.max_subnets_per_network if quota else 5,
             "max_elastic_ips": quota.max_elastic_ips if quota else 5,
+            "max_buckets": quota.max_buckets if quota else 5,
+            "max_storage_gb": quota.max_storage_gb if quota else 50,
         },
         "status_breakdown": status_counts,
         "recent_activity": recent_activity,

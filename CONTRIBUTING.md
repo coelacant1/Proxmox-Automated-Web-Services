@@ -14,7 +14,7 @@ git checkout -b feature/your-change
 cp .env.example .env   # fill in your values
 
 # 3. Start services
-docker compose up -d db redis minio
+docker compose up -d db redis
 
 # 4. Backend
 cd backend

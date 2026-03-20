@@ -23,7 +23,7 @@ from app.routers import (
     api_keys,
     auth,
     backups,
-    billing,
+
     bug_reports,
     cluster,
     compute,
@@ -38,7 +38,7 @@ from app.routers import (
     instance_types,
     lifecycle_policies,
     logs,
-    mfa,
+
     migration,
     monitoring,
     networking,
@@ -54,7 +54,7 @@ from app.routers import (
     storage,
     storage_pools,
     system_rules,
-    tags,
+
     template_requests,
     templates,
     volumes,
@@ -260,7 +260,7 @@ app = FastAPI(
         "## Features\n"
         "- **Compute** - Create and manage VMs and LXC containers from templates\n"
         "- **Networking** - SDN virtual networks, firewall rules\n"
-        "- **Storage** - S3-compatible object storage via MinIO\n"
+        "- **Storage** - S3-compatible object storage via Ceph RadosGW\n"
         "- **Backups** - Snapshot creation, rollback, and scheduling\n"
         "- **Auth** - JWT + OAuth2/OIDC (Authentik), API keys, RBAC\n"
         "- **Quotas** - Per-user resource limits enforced at the API layer\n\n"
@@ -280,7 +280,7 @@ app = FastAPI(
         {"name": "proxmox", "description": "Proxmox cluster status and node inventory"},
         {"name": "compute", "description": "VM and container provisioning, lifecycle, snapshots"},
         {"name": "networking", "description": "SDN zones, VNets, and firewall rules"},
-        {"name": "storage", "description": "S3-compatible object storage (MinIO) - buckets and objects"},
+        {"name": "storage", "description": "S3-compatible object storage (Ceph RadosGW) - buckets and objects"},
         {"name": "backups", "description": "Snapshot and backup management for VMs/containers"},
         {"name": "dashboard", "description": "Dashboard summaries, usage stats, and admin overview"},
         {"name": "notifications", "description": "Real-time WebSocket notifications"},
@@ -302,11 +302,9 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-app.include_router(billing.router)
 app.include_router(health_checks.router)
 app.include_router(events.router)
 app.include_router(lifecycle_policies.router)
-app.include_router(tags.router)
 app.include_router(placement.router)
 app.include_router(logs.router)
 app.include_router(search.router)
@@ -336,7 +334,6 @@ app.include_router(admin_settings.router)
 app.include_router(admin_quota_requests.router)
 app.include_router(admin_audit.router)
 app.include_router(projects.router)
-app.include_router(mfa.router)
 app.include_router(instance_types.router)
 app.include_router(ssh_keys.router)
 app.include_router(security_groups.router)

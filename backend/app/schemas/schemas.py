@@ -17,7 +17,7 @@ class UserCreate(UserBase):
 class LoginRequest(BaseModel):
     username: str
     password: str
-    mfa_code: str | None = None
+
 
 
 class UserRead(BaseModel):
@@ -244,31 +244,6 @@ class ProjectMemberRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# --- MFA ---
-
-
-class MFASetupResponse(BaseModel):
-    secret: str
-    provisioning_uri: str
-    qr_code_base64: str
-    backup_codes: list[str]
-
-
-class MFAVerifyRequest(BaseModel):
-    code: str
-
-
-class MFAStatusResponse(BaseModel):
-    is_enabled: bool
-    has_totp: bool
-
-
-class MFALoginRequest(BaseModel):
-    username: str
-    password: str
-    mfa_code: str
-
-
 # --- Instance Types ---
 
 
@@ -459,6 +434,7 @@ class VPCRead(BaseModel):
     gateway: str | None
     dhcp_enabled: bool
     network_mode: str = "private"
+    security_group_id: uuid.UUID | None = None
     status: str
     is_default: bool
     subnets: list[SubnetRead] = []

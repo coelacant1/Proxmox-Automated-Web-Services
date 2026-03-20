@@ -57,12 +57,10 @@ export default function FileBrowser() {
   const [bucket, setBucket] = useState<BucketInfo | null>(null);
   const [prefix, setPrefix] = useState('');
   const [loading, setLoading] = useState(true);
-  const [showUpload, setShowUpload] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [shareKey, setShareKey] = useState('');
   const [shareUrl, setShareUrl] = useState('');
   const [copied, setCopied] = useState(false);
-  const [uploadForm, setUploadForm] = useState({ key: '', content: '' });
 
   // Bulk selection
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -71,6 +69,8 @@ export default function FileBrowser() {
   // Drag & drop
   const [dragging, setDragging] = useState(false);
   const dropRef = useRef<HTMLDivElement>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Upload progress
   const [uploads, setUploads] = useState<UploadProgress[]>([]);
@@ -106,13 +106,39 @@ export default function FileBrowser() {
     setPrefix(parts.length ? parts.join('/') + '/' : '');
   };
 
-  const handleUpload = async () => {
-    if (!bucketName) return;
-    const fullKey = prefix + uploadForm.key;
-    await api.put(`/api/storage/buckets/${bucketName}/objects/${fullKey}`, { content: uploadForm.content });
-    setShowUpload(false);
-    setUploadForm({ key: '', content: '' });
-    fetchObjects();
+  const uploadFiles = async (files: File[]) => {
+    if (!bucketName || files.length === 0) return;
+
+    const newUploads: UploadProgress[] = files.map((f) => ({ name: f.name, progress: 0, status: 'uploading' as const }));
+    setUploads((prev) => [...prev, ...newUploads]);
+
+    for (const file of files) {
+      const key = prefix + file.name;
+      try {
+        setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, progress: 30 } : u));
+        await api.put(
+          `/api/storage/buckets/${bucketName}/objects/${key}`,
+          file,
+          {
+            headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          },
+        );
+        setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, progress: 100, status: 'done' } : u));
+      } catch {
+        setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, status: 'error' } : u));
+      }
+    }
+    setTimeout(() => {
+      setUploads([]);
+      fetchObjects();
+      fetchBucket();
+    }, 1500);
+  };
+
+  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    uploadFiles(files);
+    e.target.value = '';
   };
 
   // Drag & drop handlers
@@ -139,33 +165,9 @@ export default function FileBrowser() {
     e.preventDefault();
     e.stopPropagation();
     setDragging(false);
-    if (!bucketName) return;
 
     const files = Array.from(e.dataTransfer.files);
-    if (files.length === 0) return;
-
-    const newUploads: UploadProgress[] = files.map((f) => ({ name: f.name, progress: 0, status: 'uploading' as const }));
-    setUploads((prev) => [...prev, ...newUploads]);
-
-    for (const file of files) {
-      const key = prefix + file.name;
-      try {
-        const reader = new FileReader();
-        const content = await new Promise<string>((resolve) => {
-          reader.onload = () => resolve(reader.result as string);
-          reader.readAsText(file);
-        });
-        setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, progress: 50 } : u));
-        await api.put(`/api/storage/buckets/${bucketName}/objects/${key}`, { content });
-        setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, progress: 100, status: 'done' } : u));
-      } catch {
-        setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, status: 'error' } : u));
-      }
-    }
-    setTimeout(() => {
-      setUploads([]);
-      fetchObjects();
-    }, 1500);
+    uploadFiles(files);
   }, [bucketName, prefix]);
 
   const handleDelete = async (key: string) => {
@@ -309,7 +311,7 @@ export default function FileBrowser() {
                   <CheckSquare className="h-4 w-4 mr-1" /> Select
                 </Button>
               )}
-              <Button size="sm" onClick={() => setShowUpload(true)}>
+              <Button size="sm" onClick={() => fileInputRef.current?.click()}>
                 <Upload className="h-4 w-4 mr-1" /> Upload
               </Button>
               <Button variant="outline" size="sm" onClick={fetchObjects}>
@@ -362,7 +364,7 @@ export default function FileBrowser() {
                 icon={FileText}
                 title="Empty"
                 description={prefix ? 'This folder is empty.' : 'Upload files or drag & drop to get started.'}
-                action={{ label: 'Upload File', onClick: () => setShowUpload(true) }}
+                action={{ label: 'Upload File', onClick: () => fileInputRef.current?.click() }}
               />
             </div>
           ) : (
@@ -422,27 +424,14 @@ export default function FileBrowser() {
         </CardContent>
       </Card>
 
-      {/* Upload Modal */}
-      <Modal open={showUpload} onClose={() => setShowUpload(false)} title="Upload Object">
-        <div className="space-y-4">
-          <Input label="Object Key" placeholder="filename.txt" value={uploadForm.key}
-            onChange={(e) => setUploadForm({ ...uploadForm, key: e.target.value })} />
-          <div>
-            <label className="block text-sm font-medium text-paws-text mb-1">Content</label>
-            <textarea
-              className="w-full h-32 bg-paws-bg border border-paws-border rounded-md px-3 py-2 text-sm text-paws-text font-mono resize-y"
-              value={uploadForm.content}
-              onChange={(e) => setUploadForm({ ...uploadForm, content: e.target.value })}
-              placeholder="File content..."
-            />
-          </div>
-          <p className="text-xs text-paws-text-dim">Or drag & drop files directly onto the file browser.</p>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => setShowUpload(false)}>Cancel</Button>
-            <Button onClick={handleUpload} disabled={!uploadForm.key}>Upload</Button>
-          </div>
-        </div>
-      </Modal>
+      {/* Hidden file input for native file picker */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileInput}
+      />
 
       {/* Share Link Modal */}
       <Modal open={showShare} onClose={() => { setShowShare(false); setCopied(false); }} title="Share Link" size="lg">

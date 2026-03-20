@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import require_admin
 from app.core.pagination import PaginatedParams, PaginatedResponse
-from app.models.models import AuditLog, User, UserMFA
+from app.models.models import AuditLog, User
 from app.schemas.schemas import AuditLogRead
 
 router = APIRouter(prefix="/api/admin/audit-logs", tags=["admin"])
@@ -73,18 +73,6 @@ async def security_dashboard(
         select(func.count()).where(User.locked_until.isnot(None), User.locked_until > now)
     )
 
-    # MFA adoption stats
-    total_local = await db.execute(
-        select(func.count()).where(User.auth_provider == "local", User.is_active.is_(True))
-    )
-    mfa_enabled = await db.execute(
-        select(func.count()).select_from(UserMFA).where(UserMFA.is_enabled.is_(True))
-    )
-
-    total_local_count = total_local.scalar() or 0
-    mfa_enabled_count = mfa_enabled.scalar() or 0
-    mfa_rate = round(mfa_enabled_count / total_local_count * 100, 1) if total_local_count > 0 else 0
-
     # Recent security events (last 10)
     recent_security = await db.execute(
         select(AuditLog)
@@ -97,11 +85,6 @@ async def security_dashboard(
         "failed_logins_1h": failed_1h.scalar() or 0,
         "failed_logins_24h": failed_24h.scalar() or 0,
         "locked_accounts": locked_accounts.scalar() or 0,
-        "mfa_adoption": {
-            "total_local_users": total_local_count,
-            "mfa_enabled": mfa_enabled_count,
-            "adoption_rate_pct": mfa_rate,
-        },
         "recent_security_events": [
             {
                 "action": log.action,

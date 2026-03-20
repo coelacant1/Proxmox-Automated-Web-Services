@@ -71,14 +71,14 @@ run_frontend_build() {
 run_docker_tests() {
     info "Starting test services (docker compose --profile test)..."
     cd "$ROOT_DIR"
-    docker compose --profile test up -d test-db test-redis test-minio
+    docker compose --profile test up -d test-db test-redis
 
     info "Waiting for test services..."
     sleep 3
 
     export PAWS_DATABASE_URL="postgresql+asyncpg://paws_test:paws_test@localhost:5433/paws_test"
     export PAWS_REDIS_URL="redis://localhost:6380/0"
-    export PAWS_MINIO_ENDPOINT="localhost:9002"
+    export PAWS_S3_ENDPOINT_URL="http://localhost:7480"
     export PAWS_SECRET_KEY="test-secret-key-not-for-production"
 
     cd "$BACKEND_DIR"

@@ -1,5 +1,5 @@
 """Tests for object metadata, bucket sharing, bucket detail, custom metrics,
-ingress config, billing detail, and backup browser APIs."""
+ingress config, and backup browser APIs."""
 
 import json
 import uuid
@@ -189,28 +189,6 @@ async def test_get_ingress_config(auth_client):
     r = await auth_client.get("/api/endpoints/ingress-config")
     assert r.status_code == 200
     assert isinstance(r.json(), dict)
-
-
-# --- Billing Detail ------------------------------------------------------
-
-
-@pytest.mark.anyio
-async def test_billing_resource_cost(auth_client, db_session):
-    vm_id = await _make_resource(db_session, "billing-vm")
-    r = await auth_client.get(f"/api/billing/resources/{vm_id}")
-    assert r.status_code == 200
-    assert "breakdown" in r.json()
-    assert r.json()["breakdown"]["cpu"]["units"] == 2
-
-
-@pytest.mark.anyio
-async def test_billing_summary(auth_client, db_session):
-    await _make_resource(db_session, "summary-vm-1")
-    await _make_resource(db_session, "summary-vm-2")
-    r = await auth_client.get("/api/billing/summary")
-    assert r.status_code == 200
-    assert "by_type" in r.json()
-    assert r.json()["resource_count"] >= 2
 
 
 # --- Backup Browser & Notifications --------------------------------------

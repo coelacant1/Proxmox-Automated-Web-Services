@@ -121,8 +121,8 @@ export default function InstanceDetail() {
   const [backupFileLoading, setBackupFileLoading] = useState(false);
   const [showNetModal, setShowNetModal] = useState(false);
   const [netForm, setNetForm] = useState({ net_id: 'net0', vpc_id: '' });
+  const [selectedNic, setSelectedNic] = useState<string | null>(null);
   const [ipAddresses, setIpAddresses] = useState<Record<string, string[]>>({});
-  const [resourceType, setResourceType] = useState<string>('');
   const [showAddNic, setShowAddNic] = useState(false);
   const [addNicVpc, setAddNicVpc] = useState('');
 
@@ -177,7 +177,6 @@ export default function InstanceDetail() {
       setNetInterfaces(r.data?.interfaces || {});
       setVpcs(r.data?.vpcs || []);
       setIpAddresses(r.data?.ip_addresses || {});
-      setResourceType(r.data?.resource_type || '');
     }).catch(() => {});
     api.get(`/api/volumes/?resource_id=${id}`).then((r) => setVolumes(r.data || [])).catch(() => {});
     api.get(`/api/compute/instances/${id}/ha`).then((r) => setHaStatus(r.data)).catch(() => setHaStatus(null));
@@ -231,7 +230,6 @@ export default function InstanceDetail() {
       setNetInterfaces(r.data?.interfaces || {});
       setVpcs(r.data?.vpcs || []);
       setIpAddresses(r.data?.ip_addresses || {});
-      setResourceType(r.data?.resource_type || '');
     }).catch(() => {});
   };
 
@@ -1034,7 +1032,7 @@ export default function InstanceDetail() {
                   </div>
                 </div>
               ) : (
-                <p className="text-sm text-paws-text-dim">No network assigned — network mode not available.</p>
+                <p className="text-sm text-paws-text-dim">No network assigned - network mode not available.</p>
               )}
             </CardContent>
           </Card>
@@ -1044,26 +1042,24 @@ export default function InstanceDetail() {
             <CardHeader>
               <div className="flex items-center justify-between w-full">
                 <CardTitle>Network Interfaces</CardTitle>
-                <div className="flex gap-2">
-                  {resourceType === 'qemu' && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!networkMode || networkMode.network_mode === 'isolated' || Object.keys(netInterfaces).length >= 2}
-                      title={
-                        !networkMode ? 'No network assigned' :
-                        networkMode.network_mode === 'isolated' ? 'Cannot add NIC on isolated network' :
-                        Object.keys(netInterfaces).length >= 2 ? 'Maximum 2 NICs' : 'Add network interface'
-                      }
-                      onClick={() => { setAddNicVpc(''); setShowAddNic(true); }}
-                    >
-                      <Plus className="h-3.5 w-3.5 mr-1" /> Add NIC
-                    </Button>
-                  )}
-                  <Button variant="outline" size="sm" onClick={() => setShowNetModal(true)}>
-                    <Network className="h-3.5 w-3.5 mr-1" /> Change Network
-                  </Button>
-                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    !networkMode ||
+                    networkMode.network_mode === 'isolated' ||
+                    (networkMode.network_mode === 'published' && Object.keys(netInterfaces).length >= 1)
+                  }
+                  title={
+                    !networkMode ? 'No network assigned' :
+                    networkMode.network_mode === 'isolated' ? 'Cannot add NIC on isolated network' :
+                    networkMode.network_mode === 'published' && Object.keys(netInterfaces).length >= 1 ? 'Published networks allow only 1 NIC' :
+                    'Add network interface'
+                  }
+                  onClick={() => { setAddNicVpc(''); setShowAddNic(true); }}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1" /> Add NIC
+                </Button>
               </div>
             </CardHeader>
             <CardContent>
@@ -1078,36 +1074,22 @@ export default function InstanceDetail() {
                     const mac = macPart ? macPart.replace('hwaddr=', '') : '';
                     const matchingIface = Object.entries(ipAddresses).find(([, ips]) => ips.length > 0);
                     const ifaceIps = k === 'net0' && matchingIface ? matchingIface[1] : (ipAddresses[`eth${k.replace('net', '')}`] || []);
+                    const matchedVpc = vpcs.find((vpc) => vpc.vnet === bridge);
                     return (
-                      <div key={k} className="rounded-lg border border-paws-border-subtle p-3">
+                      <button
+                        key={k}
+                        type="button"
+                        className="w-full text-left rounded-lg border border-paws-border-subtle p-3 hover:border-paws-primary/50 hover:bg-paws-primary/5 transition-colors cursor-pointer"
+                        onClick={() => { setSelectedNic(k); setNetForm({ net_id: k, vpc_id: '' }); setShowNetModal(true); }}
+                      >
                         <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm font-medium text-paws-accent">{k}</span>
                           <div className="flex items-center gap-2">
-                            <span className="text-xs text-paws-text-dim font-mono">{bridge}</span>
-                            {k !== 'net0' && resourceType === 'qemu' && (
-                              <button
-                                className="text-xs text-red-400 hover:text-red-300"
-                                onClick={() => setConfirmDialog({
-                                  title: 'Remove NIC',
-                                  message: `Remove interface ${k}? The VM may need to be stopped first.`,
-                                  variant: 'danger',
-                                  confirmLabel: 'Remove',
-                                  onConfirm: async () => {
-                                    try {
-                                      await api.delete(`/api/compute/vms/${id}/network/nics/${k}`);
-                                      toast(`Interface ${k} removed`, 'success');
-                                      refreshNetwork();
-                                    } catch (e: any) {
-                                      toast(e.response?.data?.detail || 'Failed to remove NIC', 'error');
-                                    }
-                                    setConfirmDialog(null);
-                                  },
-                                })}
-                              >
-                                <X className="h-3.5 w-3.5" />
-                              </button>
+                            <span className="text-sm font-medium text-paws-accent">{k}</span>
+                            {matchedVpc && (
+                              <span className="text-xs text-paws-text-dim">({matchedVpc.name})</span>
                             )}
                           </div>
+                          <span className="text-xs text-paws-text-dim font-mono">{bridge}</span>
                         </div>
                         {mac && <p className="text-xs text-paws-text-dim font-mono">{mac}</p>}
                         {ifaceIps.length > 0 && (
@@ -1119,7 +1101,7 @@ export default function InstanceDetail() {
                             ))}
                           </div>
                         )}
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -1822,31 +1804,93 @@ export default function InstanceDetail() {
         </div>
       </Modal>
 
-      {/* Network Change Modal */}
-      <Modal open={showNetModal} onClose={() => setShowNetModal(false)} title="Change VPC Network">
-        <div className="space-y-3">
-          <Select label="Interface" value={netForm.net_id}
-            onChange={(e) => setNetForm((p) => ({ ...p, net_id: e.target.value }))}
-            options={Object.keys(netInterfaces).length > 0
-              ? Object.keys(netInterfaces).map((k) => ({ value: k, label: k }))
-              : [{ value: 'net0', label: 'net0' }]} />
-          {vpcs.length > 0 ? (
-            <Select label="VPC" value={netForm.vpc_id}
-              onChange={(e) => setNetForm((p) => ({ ...p, vpc_id: e.target.value }))}
-              options={[
-                { value: '', label: '- Select a VPC -' },
-                ...vpcs.map((v) => ({
-                  value: v.id,
-                  label: `${v.name} (${v.cidr || ''}) ${v.vnet ? `- vnet: ${v.vnet}` : ''}`,
-                })),
-              ]} />
-          ) : (
-            <p className="text-sm text-paws-text-dim">No VPCs available. Create a VPC first.</p>
-          )}
-          <p className="text-xs text-paws-text-dim">Note: VM should be stopped before changing network.</p>
-          <Button onClick={handleNetworkUpdate} variant="primary" className="w-full" disabled={!netForm.vpc_id}>
-            Update Network
-          </Button>
+      {/* NIC Detail Modal - edit network or remove */}
+      <Modal open={showNetModal} onClose={() => { setShowNetModal(false); setSelectedNic(null); }} title={`Interface ${selectedNic || netForm.net_id}`}>
+        <div className="space-y-4">
+          {(() => {
+            const nicKey = selectedNic || netForm.net_id;
+            const nicVal = netInterfaces[nicKey] || '';
+            const parts = String(nicVal).split(',');
+            const bridge = parts.find((p) => p.startsWith('bridge='))?.split('=')[1] || '';
+            const macPart = parts.find((p) => /^([0-9A-Fa-f]{2}:){5}/.test(p) || p.startsWith('hwaddr='));
+            const mac = macPart ? macPart.replace('hwaddr=', '') : '';
+            const matchedVpc = vpcs.find((vpc) => vpc.vnet === bridge);
+            const nicIps = nicKey === 'net0'
+              ? (Object.entries(ipAddresses).find(([, ips]) => ips.length > 0)?.[1] || [])
+              : (ipAddresses[`eth${nicKey.replace('net', '')}`] || []);
+            const isSecondary = nicKey !== 'net0';
+            return (
+              <>
+                <div className="rounded-lg bg-paws-surface p-3 space-y-2 text-sm">
+                  <div className="flex justify-between"><span className="text-paws-text-dim">Bridge</span><span className="font-mono text-paws-text">{bridge}</span></div>
+                  {matchedVpc && <div className="flex justify-between"><span className="text-paws-text-dim">Network</span><span className="text-paws-text">{matchedVpc.name}</span></div>}
+                  {mac && <div className="flex justify-between"><span className="text-paws-text-dim">MAC</span><span className="font-mono text-paws-text">{mac}</span></div>}
+                  {nicIps.length > 0 && (
+                    <div className="flex justify-between items-start">
+                      <span className="text-paws-text-dim">IP</span>
+                      <div className="flex flex-wrap gap-1 justify-end">
+                        {nicIps.map((ip) => (
+                          <span key={ip} className="inline-block rounded bg-paws-primary/10 px-1.5 py-0.5 text-xs font-mono text-paws-primary">{ip}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-paws-border pt-3 space-y-3">
+                  <p className="text-sm font-medium text-paws-text">Change Network</p>
+                  {vpcs.length > 0 ? (
+                    <Select label="VPC" value={netForm.vpc_id}
+                      onChange={(e) => setNetForm((p) => ({ ...p, vpc_id: e.target.value }))}
+                      options={[
+                        { value: '', label: '- Select a VPC -' },
+                        ...(isSecondary
+                          ? vpcs.filter((v) => !v.network_mode || v.network_mode === 'private')
+                          : vpcs
+                        ).map((v) => ({
+                          value: v.id,
+                          label: `${v.name}${v.network_mode ? ` (${v.network_mode})` : ''} ${v.vnet ? `- ${v.vnet}` : ''}`,
+                        })),
+                      ]} />
+                  ) : (
+                    <p className="text-sm text-paws-text-dim">No VPCs available. Create a VPC first.</p>
+                  )}
+                  <p className="text-xs text-paws-text-dim">The instance should be stopped before changing network. It will be restarted automatically.</p>
+                  <Button onClick={handleNetworkUpdate} variant="primary" className="w-full" disabled={!netForm.vpc_id}>
+                    Update Network
+                  </Button>
+                </div>
+
+                {isSecondary && (
+                  <div className="border-t border-paws-border pt-3">
+                    <Button variant="danger" className="w-full"
+                      onClick={() => {
+                        setShowNetModal(false);
+                        setConfirmDialog({
+                          title: 'Remove NIC',
+                          message: `Remove interface ${nicKey}? The instance should be stopped first.`,
+                          variant: 'danger',
+                          confirmLabel: 'Remove',
+                          onConfirm: async () => {
+                            try {
+                              await api.delete(`/api/compute/vms/${id}/network/nics/${nicKey}`);
+                              toast(`Interface ${nicKey} removed`, 'success');
+                              refreshNetwork();
+                            } catch (e: any) {
+                              toast(e.response?.data?.detail || 'Failed to remove NIC', 'error');
+                            }
+                            setConfirmDialog(null);
+                            setSelectedNic(null);
+                          },
+                        });
+                      }}>
+                      <Trash2 className="h-3.5 w-3.5 mr-1" /> Remove Interface
+                    </Button>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       </Modal>
 
@@ -1861,22 +1905,25 @@ export default function InstanceDetail() {
                   { value: '', label: '- Select a private network -' },
                   ...vpcs.filter((v) => !v.network_mode || v.network_mode === 'private').map((v) => ({
                     value: v.id,
-                    label: `${v.name} (${v.cidr || ''}) ${v.vnet ? `- vnet: ${v.vnet}` : ''}`,
+                    label: `${v.name} ${v.vnet ? `(${v.vnet})` : ''}`,
                   })),
                 ]} />
-              <p className="text-xs text-paws-text-dim">Secondary NICs can only be added to private networks. Maximum 2 NICs per instance.</p>
+              <p className="text-xs text-paws-text-dim">Secondary NICs can only be added to private networks.</p>
             </>
           ) : (
             <p className="text-sm text-paws-text-dim">No VPCs available.</p>
           )}
-          <p className="text-xs text-paws-text-dim">The VM should be stopped before adding a NIC.</p>
+          <p className="text-xs text-paws-text-dim">The instance should be stopped before adding a NIC.</p>
           <Button variant="primary" className="w-full" disabled={!addNicVpc}
             onClick={async () => {
               try {
                 await api.post(`/api/compute/vms/${id}/network/nics`, { vpc_id: addNicVpc });
                 setShowAddNic(false);
                 refreshNetwork();
-              } catch { /* ignore */ }
+                toast('Network interface added', 'success');
+              } catch (err: any) {
+                toast(err?.response?.data?.detail || 'Failed to add NIC', 'error');
+              }
             }}>
             Add NIC
           </Button>

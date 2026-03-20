@@ -776,7 +776,7 @@ export default function Groups() {
       <Modal open={showRawToken} onClose={() => { setShowRawToken(false); setNewTokenRaw(null); }} title="Token Created">
         <div className="space-y-3">
           <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded">
-            <p className="text-sm text-yellow-200 font-medium mb-1">Copy this token now — it won't be shown again.</p>
+            <p className="text-sm text-yellow-200 font-medium mb-1">Copy this token now - it won't be shown again.</p>
           </div>
           <div className="flex items-center gap-2">
             <code className="flex-1 text-sm bg-paws-bg border border-paws-border rounded px-3 py-2 text-paws-text break-all">

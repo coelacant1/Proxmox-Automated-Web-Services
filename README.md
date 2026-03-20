@@ -11,11 +11,11 @@ A self-hosted, AWS-like infrastructure platform built on Proxmox VE. Provides mu
 
 - **Compute** - VMs and LXC containers from templates, full lifecycle, web console (noVNC/xterm.js), snapshots, import/export
 - **Networking** - VPCs with subnets, security groups, service endpoints, DNS
-- **Storage** - S3-compatible object storage (MinIO) with file browser, sharing, presigned URLs
+- **Storage** - S3-compatible object storage (Ceph RadosGW) with file browser, sharing, presigned URLs
 - **Backups** - PBS integration, scheduled plans, point-in-time restore
 - **Monitoring** - Per-resource metrics, alarms, log aggregation
 - **Billing** - Virtual credits, per-resource cost tracking, usage dashboards
-- **Auth** - Local accounts (JWT) + OAuth2/OIDC, MFA (TOTP/WebAuthn), RBAC (Admin/Operator/Member/Viewer)
+- **Auth** - Local accounts (JWT) + OAuth2/OIDC, RBAC (Admin/Operator/Member/Viewer)
 - **Admin** - User management, template catalog, quotas, audit logging
 
 ## Stack
@@ -26,7 +26,7 @@ A self-hosted, AWS-like infrastructure platform built on Proxmox VE. Provides mu
 | Backend | Python 3.12+, FastAPI, SQLAlchemy 2 (async), Pydantic v2 |
 | Database | PostgreSQL 16 |
 | Cache/Queue | Redis 7, Celery |
-| Storage | MinIO, Proxmox Backup Server |
+| Storage | Ceph RadosGW, Proxmox Backup Server |
 | Hypervisor | Proxmox VE 8+ |
 
 ## Quick Start
@@ -61,7 +61,7 @@ API docs at `http://localhost:8000/docs`, `http://localhost:8000/redoc`, and `ht
 
 ```bash
 # Data services
-docker compose up -d db redis minio
+sudo docker compose up -d db redis
 
 # Backend
 cd backend

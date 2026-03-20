@@ -12,6 +12,7 @@ interface QuotaRequest {
 interface DashboardSummary {
   resources: {
     vms: number; containers: number; networks: number; storage_buckets: number;
+    storage_size_gb: number;
     vcpus_used: number; ram_mb_used: number; disk_gb_used: number; snapshots: number;
   };
   quota: {
@@ -19,6 +20,7 @@ interface DashboardSummary {
     max_ram_mb: number; max_disk_gb: number; max_snapshots: number;
     max_backups: number; max_backup_size_gb: number;
     max_networks: number; max_subnets_per_network: number; max_elastic_ips: number;
+    max_buckets: number; max_storage_gb: number;
   };
 }
 
@@ -37,6 +39,7 @@ const QUOTA_LABELS: Record<string, string> = {
   max_backups: 'Max Backups', max_backup_size_gb: 'Max Backup Storage (GB)',
   max_networks: 'Max Networks', max_subnets_per_network: 'Max Subnets per Network',
   max_elastic_ips: 'Max Elastic IPs',
+  max_buckets: 'Max S3 Buckets', max_storage_gb: 'Max S3 Storage (GB)',
 };
 
 function formatSize(bytes: number): string {
@@ -222,7 +225,11 @@ export default function QuotaRequests() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
                 <div className="flex items-center gap-3">
                   <Database className="h-5 w-5 text-paws-success shrink-0" />
-                  <div className="flex-1"><QuotaBar label="Buckets" used={summary.resources.storage_buckets} limit={summary.quota.max_vms > 0 ? 5 : 0} /></div>
+                  <div className="flex-1"><QuotaBar label="Buckets" used={summary.resources.storage_buckets} limit={summary.quota.max_buckets ?? 5} /></div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Database className="h-5 w-5 text-paws-success shrink-0" />
+                  <div className="flex-1"><QuotaBar label="Storage" used={summary.resources.storage_size_gb ?? 0} limit={summary.quota.max_storage_gb ?? 50} unit=" GB" /></div>
                 </div>
               </div>
             </CardContent>

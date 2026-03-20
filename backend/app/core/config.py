@@ -54,12 +54,11 @@ class Settings(BaseSettings):
     password_require_special: bool = True
     password_history_count: int = 5
 
-    # MinIO / S3 Storage
-    minio_endpoint: str = "localhost:9000"
-    minio_root_user: str = "minioadmin"
-    minio_root_password: str = "minioadmin"
-    minio_use_ssl: bool = False
-    minio_region: str = "us-east-1"
+    # S3 Storage (Ceph RadosGW)
+    s3_endpoint_url: str = "http://localhost:7480"
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_region: str = "us-east-1"
 
     # Proxmox Backup Server (PBS)
     pbs_host: str = ""

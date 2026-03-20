@@ -15,7 +15,7 @@ from app.core.security import (
     revoke_token,
     validate_password,
 )
-from app.models.models import Project, ProjectMember, ProjectRole, SecurityGroup, SecurityGroupRule, User, UserMFA
+from app.models.models import Project, ProjectMember, ProjectRole, SecurityGroup, SecurityGroupRule, User
 from app.schemas.schemas import LoginRequest, Token, UserCreate, UserRead
 from app.services.audit_service import log_auth_event
 from app.services.oauth_service import oauth_service
@@ -176,24 +176,6 @@ async def login(body: LoginRequest, request: Request, response: Response, db: As
         if user_check:
             await _record_failed_login(db, user_check)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-
-    # Check MFA requirement
-    from sqlalchemy import select as sa_select
-
-    mfa_result = await db.execute(sa_select(UserMFA).where(UserMFA.user_id == user.id))
-    mfa = mfa_result.scalar_one_or_none()
-    if mfa and mfa.is_enabled:
-        mfa_code = getattr(body, "mfa_code", None)
-        if not mfa_code:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="MFA code required",
-                headers={"X-MFA-Required": "true"},
-            )
-        from app.routers.mfa import verify_mfa_code
-
-        if not verify_mfa_code(mfa, mfa_code):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid MFA code")
 
     await _clear_failed_logins(db, user)
     await log_auth_event(db, "auth.login_success", user_id=user.id, details={"ip": client_ip})

@@ -202,6 +202,7 @@ def _build_net0(
     rate: float = 0,
     link_down: bool = False,
     model: str = "virtio",
+    iface_name: str | None = None,
 ) -> str:
     """Build a net0 config string for Proxmox. SINGLE source of truth for NIC config format.
 
@@ -209,7 +210,8 @@ def _build_net0(
     format inconsistencies between create, update, and IP change paths.
     """
     if resource_type == "lxc":
-        parts = [f"name=eth0,bridge={bridge}"]
+        name = iface_name or "eth0"
+        parts = [f"name={name},bridge={bridge}"]
         if ip and prefix_len and gateway:
             parts.append(f"ip={ip}/{prefix_len},gw={gateway}")
         parts.append(f"firewall={firewall}")
@@ -443,7 +445,7 @@ async def create_vm(
 
     rtype = "lxc" if is_lxc_template else "qemu"
     try:
-        # Resize specs (cores/memory) — separate from config
+        # Resize specs (cores/memory) - separate from config
         if is_lxc_template:
             proxmox_client.set_container_config(
                 resource.proxmox_node, new_vmid,
@@ -725,7 +727,7 @@ async def vm_console(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
-    # Resolve actual node — VM may have migrated since DB record was written
+    # Resolve actual node - VM may have migrated since DB record was written
     actual_node = proxmox_client.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
     if actual_node != resource.proxmox_node:
         resource.proxmox_node = actual_node
@@ -787,7 +789,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
     try:
         async for db in get_db():
             resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
-            # Resolve actual node — VM may have migrated
+            # Resolve actual node - VM may have migrated
             actual_node = proxmox_client.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
             if actual_node != resource.proxmox_node:
                 print(f"[CONSOLE] Node corrected: DB={resource.proxmox_node} -> actual={actual_node}", flush=True)
@@ -1125,7 +1127,7 @@ async def vm_network(
         )
         vpcs = vpc_result.scalars().all()
         vpc_list = [
-            {"id": str(v.id), "name": v.name, "vnet": v.proxmox_vnet, "vxlan_tag": v.vxlan_tag, "cidr": v.cidr}
+            {"id": str(v.id), "name": v.name, "vnet": v.proxmox_vnet, "vxlan_tag": v.vxlan_tag, "cidr": v.cidr, "network_mode": v.network_mode or "private"}
             for v in vpcs
         ]
         return {
@@ -1217,7 +1219,7 @@ async def update_vm_network(
         )
         dns = (subnet.dns_server or "1.1.1.1") if subnet else "1.1.1.1"
 
-        # Check if running — NIC bridge changes require stop/start for VMs
+        # Check if running - NIC bridge changes require stop/start for VMs
         was_running = False
         if vmtype != "lxc":
             try:
@@ -1296,26 +1298,28 @@ async def add_nic(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    """Add a secondary network interface to a VM (VMs only, max 2 NICs).
+    """Add a secondary network interface to an instance.
 
-    The target network must be private. The primary NIC's network cannot be
-    isolated (isolated networks do not allow secondary NICs).
+    Rules:
+    - Published primary network: max 1 NIC (no additional NICs allowed)
+    - Isolated primary network: no secondary NICs allowed
+    - Private primary network: can add NICs for each private network owned
+    - Secondary NICs must target private networks
+    - Cannot attach the same network twice
     """
     import ipaddress as _ipaddr
     import uuid as _uuid
     from app.models.models import IPReservation, VPC
 
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
-    if resource.resource_type != "qemu":
-        raise HTTPException(status_code=400, detail="Additional NICs are only supported for VMs")
 
-    # Check max 2 NICs
-    config = proxmox_client.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
+    if resource.resource_type == "lxc":
+        config = proxmox_client.get_container_config(resource.proxmox_node, resource.proxmox_vmid)
+    else:
+        config = proxmox_client.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
     existing = [k for k in config if k.startswith("net") and k[3:].isdigit()]
-    if len(existing) >= 2:
-        raise HTTPException(status_code=400, detail="Maximum 2 NICs per instance")
 
-    # Check primary VPC mode — isolated instances cannot have secondary NICs
+    # Check primary VPC mode
     specs = json.loads(resource.specs) if resource.specs else {}
     primary_vpc_id = specs.get("vpc_id")
     if primary_vpc_id:
@@ -1323,13 +1327,19 @@ async def add_nic(
             select(VPC).where(VPC.id == _uuid.UUID(primary_vpc_id))
         )
         primary_vpc = primary_vpc_row.scalar_one_or_none()
-        if primary_vpc and primary_vpc.network_mode == "isolated":
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot add secondary NIC to an instance on an isolated network",
-            )
+        if primary_vpc:
+            if primary_vpc.network_mode == "isolated":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot add secondary NIC to an instance on an isolated network",
+                )
+            if primary_vpc.network_mode == "published" and len(existing) >= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Published networks only allow a single network interface",
+                )
 
-    # Target VPC must be private
+    # Target VPC must be private and owned by user
     vpc = (await db.execute(
         select(VPC).where(VPC.id == _uuid.UUID(body.vpc_id), VPC.owner_id == user.id)
     )).scalar_one_or_none()
@@ -1340,6 +1350,15 @@ async def add_nic(
             status_code=400,
             detail="Secondary NICs can only be attached to private networks",
         )
+
+    # Check for duplicate - cannot attach same VNet twice
+    for key in existing:
+        val = config.get(key, "")
+        if isinstance(val, str) and f"bridge={vpc.proxmox_vnet}" in val:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Network '{vpc.name}' is already attached to this instance",
+            )
 
     next_idx = max((int(k[3:]) for k in existing), default=-1) + 1
     net_id = f"net{next_idx}"
@@ -1373,16 +1392,20 @@ async def add_nic(
             logger.warning("Failed to allocate IP for secondary NIC", exc_info=True)
 
     net_val = _build_net0(
-        "qemu", vpc.proxmox_vnet,
+        resource.resource_type, vpc.proxmox_vnet,
         ip=ip_str, prefix_len=prefix_len, gateway=gateway,
         firewall=body.firewall, model=body.model,
+        iface_name=f"eth{next_idx}" if resource.resource_type == "lxc" else None,
     )
 
     try:
-        proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
+        if resource.resource_type == "lxc":
+            proxmox_client.update_container_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
+        else:
+            proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
 
-        # Set cloud-init ipconfig for secondary NIC
-        if ip_str and prefix_len:
+        # Set cloud-init ipconfig for secondary NIC (VMs only)
+        if resource.resource_type == "qemu" and ip_str and prefix_len:
             ipconfig_key = f"ipconfig{next_idx}"
             ipconfig_val = f"ip={ip_str}/{prefix_len}"
             if gateway:
@@ -1421,12 +1444,10 @@ async def remove_nic(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    """Remove a secondary network interface from a VM (cannot remove net0)."""
+    """Remove a secondary network interface from an instance (cannot remove net0)."""
     from app.models.models import IPReservation
 
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
-    if resource.resource_type != "qemu":
-        raise HTTPException(status_code=400, detail="NIC removal only supported for VMs")
     if net_id == "net0":
         raise HTTPException(status_code=400, detail="Cannot remove primary interface net0")
     if not (net_id.startswith("net") and net_id[3:].isdigit()):
@@ -1435,20 +1456,24 @@ async def remove_nic(
     net_idx = int(net_id[3:])
 
     try:
-        # Remove NIC config
-        proxmox_client.update_vm_config(
-            resource.proxmox_node, resource.proxmox_vmid, delete=net_id
-        )
-
-        # Remove cloud-init ipconfig for this NIC
-        ipconfig_key = f"ipconfig{net_idx}"
-        try:
-            proxmox_client.update_vm_config(
-                resource.proxmox_node, resource.proxmox_vmid, delete=ipconfig_key
+        if resource.resource_type == "lxc":
+            proxmox_client.update_container_config(
+                resource.proxmox_node, resource.proxmox_vmid, delete=net_id
             )
-            proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
-        except Exception:
-            logger.debug("No ipconfig%d to remove", net_idx)
+        else:
+            # Remove NIC config
+            proxmox_client.update_vm_config(
+                resource.proxmox_node, resource.proxmox_vmid, delete=net_id
+            )
+            # Remove cloud-init ipconfig for this NIC
+            ipconfig_key = f"ipconfig{net_idx}"
+            try:
+                proxmox_client.update_vm_config(
+                    resource.proxmox_node, resource.proxmox_vmid, delete=ipconfig_key
+                )
+                proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
+            except Exception:
+                logger.debug("No ipconfig%d to remove", net_idx)
 
         # Release IP reservations for this NIC
         label_pattern = f"{resource.display_name}-{net_id}"
@@ -2348,13 +2373,13 @@ async def _cleanup_resource_children(db: AsyncSession, resource_id: uuid.UUID) -
         HealthCheck, IPReservation, LifecyclePolicy, ServiceEndpoint,
         Tag, TemplateRequest,
     )
-    # Non-nullable FK tables — rows MUST be deleted or they block resource deletion
+    # Non-nullable FK tables - rows MUST be deleted or they block resource deletion
     for model in (
         Backup, BackupPlan, ServiceEndpoint, Alarm, HealthCheck,
         LifecyclePolicy, Tag, TemplateRequest,
     ):
         await db.execute(delete(model).where(model.resource_id == resource_id))
-    # Nullable FK tables — delete to avoid orphans (could also SET NULL)
+    # Nullable FK tables - delete to avoid orphans (could also SET NULL)
     for model in (IPReservation, CustomMetric, GroupResourceShare):
         await db.execute(delete(model).where(model.resource_id == resource_id))
 
@@ -2417,7 +2442,7 @@ async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dic
                             #
                             # Fallback: if the disk was cross-node attached,
                             # the unused entry references a foreign volid that
-                            # PVE might fail to delete anyway — still safe.
+                            # PVE might fail to delete anyway - still safe.
                             pass  # Leave it; PVE delete may warn but we can't safely remove
                     # Clear the owner reference so volumes page knows the
                     # backing VM is gone and the user can re-create if needed
@@ -2492,7 +2517,7 @@ async def _resolve_vpc_networking(
 
     If vpc_id is provided, sets the NIC bridge to the VPC's VNet, auto-allocates
     a static IP from the subnet, and applies network mode firewall rules.
-    The network_mode parameter is ignored — mode is derived from the VPC.
+    The network_mode parameter is ignored - mode is derived from the VPC.
     If no vpc_id, sets NIC to vmbr0 with link_down=1 (disconnected).
     """
     import ipaddress as _ipaddr
@@ -2512,7 +2537,7 @@ async def _resolve_vpc_networking(
         vpc = result.scalar_one_or_none()
 
     if not vpc or not vpc.proxmox_vnet:
-        # No VPC — set NIC to vmbr0 disconnected
+        # No VPC - set NIC to vmbr0 disconnected
         try:
             net0_val = _build_net0(vmtype, "vmbr0", link_down=True)
             if vmtype == "lxc":
@@ -2606,6 +2631,20 @@ async def _resolve_vpc_networking(
         except Exception:
             logger.warning("Failed to apply firewall mode for %s/%s", node, vmid, exc_info=True)
 
+    # Auto-attach managed security group for published networks
+    if effective_mode == "published" and vpc.security_group_id:
+        from app.models.models import ResourceSecurityGroup
+        existing_link = await db.execute(
+            select(ResourceSecurityGroup).where(
+                ResourceSecurityGroup.resource_id == resource.id,
+                ResourceSecurityGroup.security_group_id == vpc.security_group_id,
+            )
+        )
+        if not existing_link.scalar_one_or_none():
+            db.add(ResourceSecurityGroup(
+                resource_id=resource.id, security_group_id=vpc.security_group_id,
+            ))
+
 
 def _do_action(resource: Resource, action: str, **kwargs) -> str:
     """Execute a lifecycle action on a VM or LXC, returning the UPID."""
@@ -2663,7 +2702,7 @@ def _enforce_network_safety(resource: Resource) -> None:
         # Allow if not on vmbr0 (already on SDN VNet)
         if bridge != "vmbr0":
             return
-        # On vmbr0 — only allow if disconnected
+        # On vmbr0 - only allow if disconnected
         if link_down == "1":
             return
         raise ValueError(

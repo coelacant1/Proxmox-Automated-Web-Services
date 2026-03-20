@@ -153,7 +153,7 @@ async def admin_cluster_tasks(
 
     target_nodes = [node] if node else [n["node"] for n in nodes_list if n.get("status") == "online"]
 
-    # Build VMID → PAWS resource/user lookup
+    # Build VMID -> PAWS resource/user lookup
     result = await db.execute(
         select(Resource).where(Resource.proxmox_vmid.isnot(None))
     )

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Network, Plus, Trash2, Server, Globe, Map, Edit2 } from 'lucide-react';
+import { Network, Plus, Trash2, Server, Globe, Map, Edit2, Shield } from 'lucide-react';
 import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
@@ -20,6 +20,7 @@ interface VPC {
   proxmox_vnet: string | null;
   dhcp_enabled: boolean;
   network_mode?: string;
+  security_group_id?: string | null;
   subnets: Subnet[];
   created_at: string;
 }
@@ -236,15 +237,15 @@ export default function VPCs() {
                           </div>
                           <div>
                             <p className="text-xs text-paws-text-dim">VNet</p>
-                            <p className="font-mono text-sm text-paws-text">{selected.proxmox_vnet || '—'}</p>
+                            <p className="font-mono text-sm text-paws-text">{selected.proxmox_vnet || '-'}</p>
                           </div>
                           <div>
                             <p className="text-xs text-paws-text-dim">VXLAN Tag</p>
-                            <p className="font-mono text-sm text-paws-text">{selected.vxlan_tag ?? '—'}</p>
+                            <p className="font-mono text-sm text-paws-text">{selected.vxlan_tag ?? '-'}</p>
                           </div>
                           <div>
                             <p className="text-xs text-paws-text-dim">Zone</p>
-                            <p className="font-mono text-sm text-paws-text">{selected.proxmox_zone || '—'}</p>
+                            <p className="font-mono text-sm text-paws-text">{selected.proxmox_zone || '-'}</p>
                           </div>
                           <div>
                             <p className="text-xs text-paws-text-dim">Network Mode</p>
@@ -305,6 +306,24 @@ export default function VPCs() {
                         </div>
                       </CardContent>
                     </Card>
+
+                    {/* Managed Firewall (Published Networks) */}
+                    {selected.network_mode === 'published' && selected.security_group_id && (
+                      <Card>
+                        <CardContent>
+                          <div className="flex items-center gap-3">
+                            <Shield className="h-5 w-5 text-yellow-400 shrink-0" />
+                            <div>
+                              <p className="text-sm font-medium text-paws-text">Managed Firewall Active</p>
+                              <p className="text-xs text-paws-text-dim">
+                                This published network has an auto-managed firewall group that blocks all bogon/RFC1918 traffic.
+                                Only your own subnet and admin-configured upstream proxies are allowed.
+                              </p>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
 
                     {/* Subnets */}
                     <Card>

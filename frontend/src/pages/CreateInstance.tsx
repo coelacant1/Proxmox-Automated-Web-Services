@@ -292,9 +292,9 @@ export default function CreateInstance() {
           <Select
             label="Network Mode"
             options={[
-              { value: 'private', label: 'Private — Full LAN + Internet access' },
-              { value: 'published', label: 'Published — Internet only, LAN blocked (for public services)' },
-              { value: 'isolated', label: 'Isolated — Own subnet only (airgapped)' },
+              { value: 'private', label: 'Private - Full LAN + Internet access' },
+              { value: 'published', label: 'Published - Internet only, LAN blocked (for public services)' },
+              { value: 'isolated', label: 'Isolated - Own subnet only (airgapped)' },
             ]}
             value={form.network_mode}
             onChange={(e) => setForm({ ...form, network_mode: e.target.value })}

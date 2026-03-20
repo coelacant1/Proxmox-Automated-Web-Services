@@ -139,7 +139,7 @@ export default function APIKeys() {
         <div className="space-y-3">
           <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded flex items-start gap-2">
             <AlertTriangle className="w-5 h-5 text-yellow-400 shrink-0 mt-0.5" />
-            <p className="text-sm text-yellow-200">Copy this key now — it won't be shown again.</p>
+            <p className="text-sm text-yellow-200">Copy this key now - it won't be shown again.</p>
           </div>
           <div className="flex items-center gap-2">
             <code className="flex-1 text-sm bg-paws-bg border border-paws-border rounded px-3 py-2 text-paws-text break-all select-all">

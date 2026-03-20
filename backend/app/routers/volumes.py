@@ -317,7 +317,7 @@ async def attach_volume(
 
     try:
         if target_vmid == vol.proxmox_owner_vmid:
-            # Re-attaching to the same VM — find unused slot and promote
+            # Re-attaching to the same VM - find unused slot and promote
             unused_slot = _find_unused_slot(target_config, vol.proxmox_volid)
             if unused_slot:
                 pve.update_vm_config(
@@ -328,7 +328,7 @@ async def attach_volume(
                 # Unused entry may not exist; try direct reference
                 pve.update_vm_config(target_node, target_vmid, **{slot: vol.proxmox_volid})
         else:
-            # Different VM — use direct volid reference on shared storage.
+            # Different VM - use direct volid reference on shared storage.
             # move_disk requires same-node and often fails cross-node,
             # so we always use direct reference for simplicity.
             pve.update_vm_config(target_node, target_vmid, **{slot: vol.proxmox_volid})

@@ -283,24 +283,6 @@ class SystemSetting(Base):
     )
 
 
-class UserMFA(Base):
-    """Multi-factor authentication configuration for a user."""
-
-    __tablename__ = "user_mfa"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), unique=True)
-    totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    backup_codes: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of hashed codes
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    user: Mapped["User"] = relationship()
-
-
 class InstanceType(Base):
     """Pre-defined instance sizes (like EC2 t2.micro, m5.large, etc)."""
 
@@ -435,6 +417,7 @@ class VPC(Base):
     gateway: Mapped[str | None] = mapped_column(String(20), nullable=True)
     dhcp_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     network_mode: Mapped[str] = mapped_column(String(20), default="private")  # published, private, isolated
+    security_group_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("security_groups.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")  # active, creating, deleting, error
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     project_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("projects.id"), nullable=True)
@@ -639,22 +622,6 @@ class Alarm(Base):
     owner: Mapped["User"] = relationship()
 
 
-class CostRate(Base):
-    """Cost rates for resource billing. Tracks per-resource-type pricing."""
-
-    __tablename__ = "cost_rates"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    resource_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    metric: Mapped[str] = mapped_column(String(30), nullable=False)
-    rate: Mapped[float] = mapped_column(nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (UniqueConstraint("resource_type", "metric", name="uq_cost_rate"),)
-
-
 class HealthCheck(Base):
     """Periodic health check results for resources."""
 
@@ -718,21 +685,6 @@ class CustomMetric(Base):
     unit: Mapped[str | None] = mapped_column(String(30), nullable=True)
     dimensions: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON key-value pairs
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class Tag(Base):
-    """User-defined tags for organizing resources."""
-
-    __tablename__ = "tags"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
-    key: Mapped[str] = mapped_column(String(128), nullable=False)
-    value: Mapped[str] = mapped_column(String(256), default="")
-    resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (UniqueConstraint("resource_id", "key", name="uq_tag_resource_key"),)
 
 
 class BugReport(Base):

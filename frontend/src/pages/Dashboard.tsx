@@ -18,6 +18,7 @@ interface BackupQuota {
 interface DashboardData {
   resources: {
     vms: number; containers: number; networks: number; storage_buckets: number;
+    storage_size_gb: number;
     vcpus_used: number; ram_mb_used: number; disk_gb_used: number; snapshots: number;
   };
   quota: {
@@ -25,6 +26,7 @@ interface DashboardData {
     max_ram_mb: number; max_disk_gb: number; max_snapshots: number;
     max_backups: number; max_backup_size_gb: number;
     max_networks: number; max_subnets_per_network: number; max_elastic_ips: number;
+    max_buckets: number; max_storage_gb: number;
   };
   status_breakdown: Record<string, number>;
   recent_activity: Array<{ action: string; resource_type: string; created_at: string }>;
@@ -195,9 +197,9 @@ export default function Dashboard() {
             />
             <MetricCard
               label="Storage Buckets"
-              value={data.resources.storage_buckets}
+              value={`${data.resources.storage_buckets} / ${data.quota.max_buckets}`}
               icon={HardDrive}
-              variant="warning"
+              variant="default"
             />
           </div>
 
@@ -219,6 +221,8 @@ export default function Dashboard() {
               <QuotaBar label="Snapshots" used={backupQuota?.snapshot_count ?? data.resources.snapshots} limit={data.quota.max_snapshots} />
               <QuotaBar label="Backups" used={backupQuota?.proxmox_backup_count ?? 0} limit={data.quota.max_backups} />
               <QuotaBar label="Backup Storage" used={backupQuota ? Math.round(backupQuota.total_backup_size / (1024 * 1024 * 1024)) : 0} limit={data.quota.max_backup_size_gb} unit=" GB" />
+              <QuotaBar label="S3 Buckets" used={data.resources.storage_buckets} limit={data.quota.max_buckets} />
+              <QuotaBar label="S3 Storage" used={data.resources.storage_size_gb} limit={data.quota.max_storage_gb} unit=" GB" />
             </CardContent>
           </Card>
 

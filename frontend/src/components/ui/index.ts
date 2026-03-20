@@ -13,6 +13,5 @@ export { QuotaBar } from './QuotaBar';
 export { Select } from './Select';
 export { StatusBadge } from './StatusBadge';
 export { Tabs } from './Tabs';
-export { TagPills } from './TagPills';
 export { Textarea } from './Textarea';
 export { ToastProvider, useToast } from './Toast';

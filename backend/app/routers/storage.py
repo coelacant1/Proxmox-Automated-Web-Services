@@ -1,4 +1,4 @@
-"""Object storage (S3-compatible / MinIO) endpoints.
+"""Object storage (S3-compatible / Ceph RadosGW) endpoints.
 
 Manages storage buckets with proper quota enforcement, versioning, and tagging.
 """
@@ -21,6 +21,42 @@ from app.services.storage_service import storage_service
 router = APIRouter(prefix="/api/storage", tags=["storage"])
 
 BUCKET_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$")
+
+
+@router.get("/s3-info")
+async def get_s3_connection_info(user: User = Depends(get_current_active_user)):
+    """Return S3 endpoint info so users can configure CLI tools and SDKs."""
+    from app.core.config import settings
+
+    return {
+        "endpoint_url": settings.s3_endpoint_url,
+        "region": settings.s3_region,
+        "note": "Use your PAWS API key as the Access Key. Generate one from Account > API Keys.",
+    }
+
+
+@router.get("/quota")
+async def get_storage_quota(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+):
+    """Return current user's storage quota and usage."""
+    quota = await _get_storage_quota(db, user.id)
+    count_result = await db.execute(
+        select(func.count(StorageBucket.id)).where(StorageBucket.owner_id == user.id)
+    )
+    size_result = await db.execute(
+        select(func.coalesce(func.sum(StorageBucket.size_bytes), 0)).where(StorageBucket.owner_id == user.id)
+    )
+    bucket_count = count_result.scalar() or 0
+    total_bytes = size_result.scalar() or 0
+    return {
+        "buckets_used": bucket_count,
+        "buckets_max": quota["max_buckets"],
+        "storage_used_bytes": total_bytes,
+        "storage_used_gb": round(total_bytes / 1_073_741_824, 3),
+        "storage_max_gb": quota["max_storage_gb"],
+    }
 
 
 class BucketCreateRequest(BaseModel):
@@ -63,6 +99,7 @@ async def list_buckets(
             "region": b.region,
             "versioning_enabled": b.versioning_enabled,
             "size_bytes": b.size_bytes,
+            "total_size": b.size_bytes,
             "object_count": b.object_count,
             "is_public": b.is_public,
             "tags": json.loads(b.tags) if b.tags else {},
@@ -122,6 +159,7 @@ async def get_bucket(
         "region": bucket.region,
         "versioning_enabled": bucket.versioning_enabled,
         "size_bytes": bucket.size_bytes,
+        "total_size": bucket.size_bytes,
         "object_count": bucket.object_count,
         "is_public": bucket.is_public,
         "tags": json.loads(bucket.tags) if bucket.tags else {},
@@ -162,7 +200,7 @@ async def delete_bucket(
         raise HTTPException(status_code=409, detail="Bucket is not empty. Use force=true to delete.")
 
     try:
-        await storage_service.delete_bucket(bucket.name)
+        await storage_service.delete_bucket(bucket.name, force=force)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to delete bucket: {e}")
 
@@ -325,6 +363,7 @@ class PresignedUrlRequest(BaseModel):
 
 
 @router.post("/buckets/{bucket_id}/presign")
+@router.post("/buckets/{bucket_id}/presigned")
 async def generate_presigned_url(
     bucket_id: str,
     body: PresignedUrlRequest,
@@ -333,7 +372,7 @@ async def generate_presigned_url(
 ):
     """Generate a presigned URL for temporary object access."""
     bucket = await _get_user_bucket(db, user.id, bucket_id)
-    url = storage_service.generate_presigned_url(
+    url = await storage_service.generate_presigned_url(
         bucket.name, body.key, body.expires_in, body.method
     )
     return {"url": url, "method": body.method, "expires_in": body.expires_in}
@@ -697,9 +736,16 @@ async def list_shared_buckets(
 
 
 async def _get_user_bucket(db: AsyncSession, user_id: uuid.UUID, bucket_id: str) -> StorageBucket:
-    result = await db.execute(
-        select(StorageBucket).where(StorageBucket.id == uuid.UUID(bucket_id), StorageBucket.owner_id == user_id)
-    )
+    # Try UUID lookup first, fall back to name-based lookup
+    try:
+        bid = uuid.UUID(bucket_id)
+        result = await db.execute(
+            select(StorageBucket).where(StorageBucket.id == bid, StorageBucket.owner_id == user_id)
+        )
+    except ValueError:
+        result = await db.execute(
+            select(StorageBucket).where(StorageBucket.name == bucket_id, StorageBucket.owner_id == user_id)
+        )
     bucket = result.scalar_one_or_none()
     if not bucket:
         raise HTTPException(status_code=404, detail="Bucket not found")

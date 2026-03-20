@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.4 - 2026-03-20
+
+### Added
+
+- **Ceph RadosGW Integration** - Migrated object storage backend from MinIO to Ceph RadosGW with S3-compatible API via aioboto3 and AWS SigV4 authentication
+- **S3 Usage Guide** - Collapsible in-app guide on the Storage page with tabbed code examples for AWS CLI, Python (boto3), JavaScript (AWS SDK v3), and presigned URLs; dynamically populated with real endpoint URL and region from server config
+- **S3 Quota Visibility** - Bucket count and storage GB quotas displayed on Dashboard (metric cards + quota bars), Storage page (quota bars), and Quota Requests page (Object Storage section); admin-configurable defaults via `default_max_buckets` and `default_max_storage_gb` system settings
+- **Storage Quota Endpoint** - `GET /api/storage/quota` returns current bucket/storage usage vs limits
+- **S3 Info Endpoint** - `GET /api/storage/s3-info` returns endpoint URL and region for client configuration
+- **Native File Upload** - OS file picker and drag-and-drop upload in File Browser sending raw bytes with proper Content-Type headers
+
+### Changed
+
+- Storage backend rewritten from httpx with basic auth to aioboto3 with SigV4 (`storage_service.py`)
+- Config keys renamed from `minio_*` to `s3_endpoint_url`, `s3_access_key`, `s3_secret_key`, `s3_region`
+- MinIO services and volumes removed from `docker-compose.yml`
+- Presigned URL generation is now async; both `/presign` and `/presigned` paths accepted
+- Bucket delete now force-empties all objects before removing the bucket
+- Bucket cards use `<div role="button">` instead of nested `<button>` elements (fixes HTML validation)
+- Dashboard storage bucket count queries `storage_buckets` table directly instead of `resources` table
+- S3 quota labels (`max_buckets`, `max_storage_gb`) added to quota request form
+
+### Fixed
+
+- Bucket operations returning 500 when frontend passes bucket name instead of UUID (added name-based fallback lookup)
+- Presigned URL endpoint returning 404 (frontend called `/presigned`, backend only had `/presign`)
+- Object size displaying as "NaN undefined" (backend returned `size_bytes`, frontend expected `total_size`)
+- File upload failing silently (frontend sent JSON text instead of raw file bytes)
+- Deleting non-empty buckets returning 409 Conflict (now empties bucket contents first)
+- Bucket count on dashboard showing 0 despite existing buckets (was querying wrong table)
+
 ## 0.2.3 - 2026-03-13
 
 ### Added
@@ -74,7 +105,7 @@
 - Resource access endpoints auto-touch `last_accessed_at` on every access
 - Auth login flow always sets `last_login_at` on successful login (local + OAuth)
 - Clone/create operations now wait for Proxmox task completion before applying config/metadata
-- StatusBadge component added `provisioning` → `info` variant mapping
+- StatusBadge component added `provisioning` -> `info` variant mapping
 
 ### Fixed
 
