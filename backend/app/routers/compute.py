@@ -5,9 +5,9 @@ import json
 import logging
 import ssl
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,17 +16,16 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
-from app.core.lifecycle import get_action_transition, validate_instance_specs
-from app.models.models import Resource, SSHKeyPair, Subnet, SystemSetting, User, UserQuota, VPC, VMIDPool, Volume
+from app.core.lifecycle import validate_instance_specs
+from app.models.models import VPC, Resource, SSHKeyPair, Subnet, SystemSetting, User, UserQuota, VMIDPool, Volume
 from app.services.audit_service import log_action
 from app.services.firewall_profile import FirewallProfileService
 from app.services.node_service import get_next_vmid, select_node
+from app.services.pool_service import add_resource_to_pool, cleanup_user_pool, ensure_user_pool
 from app.services.proxmox_client import proxmox_client
-from app.services.pbs_client import pbs_client
-from app.services.pool_service import ensure_user_pool, add_resource_to_pool, cleanup_user_pool
+from app.services.rate_limiter import check_action_rate_limit
 
 logger = logging.getLogger(__name__)
-from app.services.rate_limiter import check_action_rate_limit
 
 router = APIRouter(prefix="/api/compute", tags=["compute"])
 
@@ -109,7 +108,9 @@ class InstanceResizeRequest(BaseModel):
 
 
 async def _resolve_ssh_keys(
-    db: AsyncSession, user_id: uuid.UUID, ssh_key_ids: list[str] | None,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    ssh_key_ids: list[str] | None,
 ) -> list[str]:
     """Resolve SSH key IDs to actual public key strings from the database."""
     if not ssh_key_ids:
@@ -183,9 +184,9 @@ def _apply_instance_config(
         if dns_domain is not None:
             params["searchdomain"] = dns_domain
         if ssh_public_keys is not None:
-            params["sshkeys"] = urllib.parse.quote(
-                "\n".join(ssh_public_keys) + "\n", safe=""
-            ) if ssh_public_keys else ""
+            params["sshkeys"] = (
+                urllib.parse.quote("\n".join(ssh_public_keys) + "\n", safe="") if ssh_public_keys else ""
+            )
         if params:
             proxmox_client.update_vm_config(node, vmid, **params)
             proxmox_client.regenerate_cloudinit(node, vmid)
@@ -342,9 +343,7 @@ async def create_vm(
             template_disk_storage = proxmox_client.get_container_disk_storage(template_node, body.template_vmid)
         else:
             template_disk_storage = proxmox_client.get_vm_disk_storage(template_node, body.template_vmid)
-        storage_is_shared = (
-            proxmox_client.is_storage_shared(template_disk_storage) if template_disk_storage else False
-        )
+        storage_is_shared = proxmox_client.is_storage_shared(template_disk_storage) if template_disk_storage else False
 
         # Linked clone if storage is shared, full clone if local
         use_full_clone = not storage_is_shared
@@ -392,10 +391,15 @@ async def create_vm(
         proxmox_node=clone_node,
         status="provisioning",
         termination_protected=body.termination_protected,
-        specs=json.dumps({
-            "cores": body.cores, "memory_mb": body.memory_mb, "disk_gb": body.disk_gb,
-            "hostname": body.hostname, "vpc_id": body.vpc_id,
-        }),
+        specs=json.dumps(
+            {
+                "cores": body.cores,
+                "memory_mb": body.memory_mb,
+                "disk_gb": body.disk_gb,
+                "hostname": body.hostname,
+                "vpc_id": body.vpc_id,
+            }
+        ),
     )
     db.add(resource)
 
@@ -448,26 +452,28 @@ async def create_vm(
         # Resize specs (cores/memory) - separate from config
         if is_lxc_template:
             proxmox_client.set_container_config(
-                resource.proxmox_node, new_vmid,
-                cores=body.cores, memory=body.memory_mb,
+                resource.proxmox_node,
+                new_vmid,
+                cores=body.cores,
+                memory=body.memory_mb,
             )
         else:
             proxmox_client.update_vm_config(
-                resource.proxmox_node, new_vmid,
-                cores=body.cores, memory=body.memory_mb,
+                resource.proxmox_node,
+                new_vmid,
+                cores=body.cores,
+                memory=body.memory_mb,
             )
         # Apply instance config via unified helper
         _apply_instance_config(
-            resource.proxmox_node, new_vmid, rtype,
+            resource.proxmox_node,
+            new_vmid,
+            rtype,
             username=body.ci_user or ("paws" if not is_lxc_template else None),
             password=body.ci_password,
             hostname=body.hostname,
-            dns_server=body.dns_server or (
-                " ".join(body.nameservers) if body.nameservers else None
-            ),
-            dns_domain=body.dns_domain or (
-                ",".join(body.searchdomains) if body.searchdomains else None
-            ),
+            dns_server=body.dns_server or (" ".join(body.nameservers) if body.nameservers else None),
+            dns_domain=body.dns_domain or (",".join(body.searchdomains) if body.searchdomains else None),
             ssh_public_keys=resolved_ssh_keys if resolved_ssh_keys else None,
         )
     except Exception as cfg_err:
@@ -480,8 +486,22 @@ async def create_vm(
     await _resolve_vpc_networking(db, user, resource, body.vpc_id, body.network_mode)
     await db.commit()
 
-    await log_action(db, user.id, f"{resource_type}_create", resource_type, resource.id, {"vmid": new_vmid, "node": resource.proxmox_node})
-    return {"id": str(resource.id), "vmid": new_vmid, "node": resource.proxmox_node, "status": "provisioning", "task": upid, "type": resource_type}
+    await log_action(
+        db,
+        user.id,
+        f"{resource_type}_create",
+        resource_type,
+        resource.id,
+        {"vmid": new_vmid, "node": resource.proxmox_node},
+    )
+    return {
+        "id": str(resource.id),
+        "vmid": new_vmid,
+        "node": resource.proxmox_node,
+        "status": "provisioning",
+        "task": upid,
+        "type": resource_type,
+    }
 
 
 @router.get("/vms")
@@ -700,7 +720,12 @@ async def resize_vm(
 
     try:
         if resource.resource_type == "lxc":
-            proxmox_client.set_container_config(resource.proxmox_node, resource.proxmox_vmid, cores=new_cores, memory=new_ram)
+            proxmox_client.set_container_config(
+                resource.proxmox_node,
+                resource.proxmox_vmid,
+                cores=new_cores,
+                memory=new_ram,
+            )
         else:
             proxmox_client.resize_vm(resource.proxmox_node, resource.proxmox_vmid, new_cores, new_ram)
     except Exception as e:
@@ -761,6 +786,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
         await websocket.close(code=4003, reason="Unauthorized")
         return
     from app.core.security import decode_token
+
     payload = decode_token(token)
     if payload is None or payload.get("type") != "access":
         await websocket.close(code=4003, reason="Unauthorized")
@@ -770,6 +796,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
         await websocket.close(code=4003, reason="Unauthorized")
         return
     import uuid as _uuid
+
     try:
         uid = _uuid.UUID(user_id)
     except ValueError:
@@ -778,6 +805,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
     user = None
     async for db in get_db():
         from sqlalchemy import select as _sel
+
         result = await db.execute(_sel(User).where(User.id == uid))
         user = result.scalar_one_or_none()
         break
@@ -832,6 +860,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
     node = resource.proxmox_node  # Already resolved to actual node above
 
     from urllib.parse import quote
+
     encoded_ticket = quote(ticket, safe="")
 
     # Both VNC and terminal use the vncwebsocket endpoint for the WS connection
@@ -847,7 +876,10 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
 
     await websocket.accept(subprotocol="binary")
 
-    print(f"[CONSOLE] WS accepted, connecting to PVE: wss://{pve_host}:{pve_port}/...{node}/{vmid} type={console_type}", flush=True)
+    print(
+        f"[CONSOLE] WS accepted, connecting to PVE: wss://{pve_host}:{pve_port}/...{node}/{vmid} type={console_type}",
+        flush=True,
+    )
 
     pve_ws = None
     try:
@@ -878,7 +910,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
                     await websocket.close(code=4503, reason="Terminal auth rejected")
                     return
                 print("[CONSOLE] Terminal auth OK", flush=True)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 print("[CONSOLE] Terminal auth response timed out", flush=True)
             except Exception as auth_err:
                 print(f"[CONSOLE] Terminal auth failed: {auth_err}", flush=True)
@@ -908,7 +940,10 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
                         if data:
                             msg_count_c2p += 1
                             if msg_count_c2p <= 5:
-                                print(f"[CONSOLE] Client->PVE #{msg_count_c2p}: {type(data).__name__} len={len(data)}", flush=True)
+                                print(
+                                    f"[CONSOLE] Client->PVE #{msg_count_c2p}: {type(data).__name__} len={len(data)}",
+                                    flush=True,
+                                )
                             await pve_ws.send(data)
                     elif msg_type == "websocket.disconnect":
                         print("[CONSOLE] Client disconnected", flush=True)
@@ -932,7 +967,11 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
                     msg_count_p2c += 1
                     if msg_count_p2c <= 5:
                         preview = msg[:30] if isinstance(msg, bytes) else msg[:30]
-                        print(f"[CONSOLE] PVE->Client #{msg_count_p2c}: {type(msg).__name__} len={len(msg)} preview={preview!r}", flush=True)
+                        print(
+                            f"[CONSOLE] PVE->Client #{msg_count_p2c}:"
+                            f" {type(msg).__name__} len={len(msg)} preview={preview!r}",
+                            flush=True,
+                        )
                     if isinstance(msg, bytes):
                         await websocket.send_bytes(msg)
                     else:
@@ -1003,9 +1042,7 @@ async def rollback_vm_snapshot(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        upid = proxmox_client.rollback_snapshot(
-            resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype
-        )
+        upid = proxmox_client.rollback_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype)
         await log_action(db, user.id, "snapshot_rollback", resource.resource_type, resource.id, {"snapshot": snapname})
         return {"status": "ok", "task": upid}
     except Exception as e:
@@ -1022,9 +1059,7 @@ async def delete_vm_snapshot(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        upid = proxmox_client.delete_snapshot(
-            resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype
-        )
+        upid = proxmox_client.delete_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype)
         await log_action(db, user.id, "snapshot_delete", resource.resource_type, resource.id, {"snapshot": snapname})
         return {"status": "ok", "task": upid}
     except Exception as e:
@@ -1045,7 +1080,13 @@ async def vm_metrics(
     if timeframe not in ("hour", "day", "week", "month", "year"):
         raise HTTPException(status_code=400, detail="Invalid timeframe")
     try:
-        data = proxmox_client.get_rrd_data(resource.proxmox_node, resource.proxmox_vmid, vmtype="lxc" if resource.resource_type == "lxc" else "qemu", timeframe=timeframe)
+        vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
+        data = proxmox_client.get_rrd_data(
+            resource.proxmox_node,
+            resource.proxmox_vmid,
+            vmtype=vmtype,
+            timeframe=timeframe,
+        )
         # Downsample to max 60 points for chart readability
         max_points = 60
         if len(data) > max_points:
@@ -1095,9 +1136,7 @@ async def vm_network(
         ip_addresses: dict[str, list[str]] = {}
         if resource.resource_type == "qemu":
             try:
-                ifaces = proxmox_client.get_agent_network_interfaces(
-                    resource.proxmox_node, resource.proxmox_vmid
-                )
+                ifaces = proxmox_client.get_agent_network_interfaces(resource.proxmox_node, resource.proxmox_vmid)
                 for iface in ifaces:
                     name = iface.get("name", "")
                     ips = [
@@ -1122,12 +1161,18 @@ async def vm_network(
 
         # Fetch user's VPCs
         from app.models.models import VPC
-        vpc_result = await db.execute(
-            select(VPC).where(VPC.owner_id == user.id, VPC.status == "active")
-        )
+
+        vpc_result = await db.execute(select(VPC).where(VPC.owner_id == user.id, VPC.status == "active"))
         vpcs = vpc_result.scalars().all()
         vpc_list = [
-            {"id": str(v.id), "name": v.name, "vnet": v.proxmox_vnet, "vxlan_tag": v.vxlan_tag, "cidr": v.cidr, "network_mode": v.network_mode or "private"}
+            {
+                "id": str(v.id),
+                "name": v.name,
+                "vnet": v.proxmox_vnet,
+                "vxlan_tag": v.vxlan_tag,
+                "cidr": v.cidr,
+                "network_mode": v.network_mode or "private",
+            }
             for v in vpcs
         ]
         return {
@@ -1157,18 +1202,19 @@ async def update_vm_network(
 ):
     """Update a VM's network interface to use a specific user VPC with static IP."""
     import ipaddress as _ipaddr
+
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
     # Validate the VPC belongs to this user
-    from app.models.models import IPReservation, VPC
     import uuid as _uuid
+
+    from app.models.models import VPC, IPReservation
+
     try:
         vpc_uuid = _uuid.UUID(body.vpc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid VPC ID")
-    vpc_result = await db.execute(
-        select(VPC).where(VPC.id == vpc_uuid, VPC.owner_id == user.id)
-    )
+    vpc_result = await db.execute(select(VPC).where(VPC.id == vpc_uuid, VPC.owner_id == user.id))
     vpc = vpc_result.scalar_one_or_none()
     if not vpc:
         raise HTTPException(status_code=404, detail="VPC not found or not owned by you")
@@ -1176,13 +1222,12 @@ async def update_vm_network(
         raise HTTPException(status_code=400, detail="VPC has no Proxmox vnet configured")
 
     # Release any old IP reservations for this resource
-    await db.execute(
-        delete(IPReservation).where(IPReservation.resource_id == resource.id)
-    )
+    await db.execute(delete(IPReservation).where(IPReservation.resource_id == resource.id))
 
     # Auto-allocate static IP from first active subnet
     subnet_result = await db.execute(
-        select(Subnet).where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
+        select(Subnet)
+        .where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
         .options(selectinload(Subnet.ip_reservations))
         .limit(1)
     )
@@ -1202,10 +1247,16 @@ async def update_vm_network(
                     ip_str = str(host)
                     break
             if ip_str:
-                db.add(IPReservation(
-                    subnet_id=subnet.id, ip_address=ip_str, resource_id=resource.id,
-                    label=resource.display_name, is_gateway=False, owner_id=user.id,
-                ))
+                db.add(
+                    IPReservation(
+                        subnet_id=subnet.id,
+                        ip_address=ip_str,
+                        resource_id=resource.id,
+                        label=resource.display_name,
+                        is_gateway=False,
+                        owner_id=user.id,
+                    )
+                )
         except Exception:
             logger.warning("Failed to allocate IP for network change on %s", resource_id, exc_info=True)
 
@@ -1213,9 +1264,13 @@ async def update_vm_network(
     vmtype = resource.resource_type if resource.resource_type == "lxc" else "qemu"
     try:
         net0_val = _build_net0(
-            vmtype, vpc.proxmox_vnet,
-            ip=ip_str, prefix_len=prefix_len, gateway=gateway,
-            firewall=body.firewall, model=body.model,
+            vmtype,
+            vpc.proxmox_vnet,
+            ip=ip_str,
+            prefix_len=prefix_len,
+            gateway=gateway,
+            firewall=body.firewall,
+            model=body.model,
         )
         dns = (subnet.dns_server or "1.1.1.1") if subnet else "1.1.1.1"
 
@@ -1243,8 +1298,13 @@ async def update_vm_network(
         # For net0, use _apply_nic; for other NICs, apply directly
         if body.net_id == "net0":
             _apply_nic(
-                resource.proxmox_node, resource.proxmox_vmid, vmtype, net0_val,
-                ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+                resource.proxmox_node,
+                resource.proxmox_vmid,
+                vmtype,
+                net0_val,
+                ip=ip_str,
+                prefix_len=prefix_len,
+                gateway=gateway,
                 dns_server=dns,
             )
         else:
@@ -1253,9 +1313,7 @@ async def update_vm_network(
                     resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val}
                 )
             else:
-                proxmox_client.update_vm_config(
-                    resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val}
-                )
+                proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val})
 
         specs = json.loads(resource.specs) if resource.specs else {}
         specs["vpc_id"] = str(vpc.id)
@@ -1309,7 +1367,8 @@ async def add_nic(
     """
     import ipaddress as _ipaddr
     import uuid as _uuid
-    from app.models.models import IPReservation, VPC
+
+    from app.models.models import VPC, IPReservation
 
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
@@ -1323,9 +1382,7 @@ async def add_nic(
     specs = json.loads(resource.specs) if resource.specs else {}
     primary_vpc_id = specs.get("vpc_id")
     if primary_vpc_id:
-        primary_vpc_row = await db.execute(
-            select(VPC).where(VPC.id == _uuid.UUID(primary_vpc_id))
-        )
+        primary_vpc_row = await db.execute(select(VPC).where(VPC.id == _uuid.UUID(primary_vpc_id)))
         primary_vpc = primary_vpc_row.scalar_one_or_none()
         if primary_vpc:
             if primary_vpc.network_mode == "isolated":
@@ -1340,9 +1397,9 @@ async def add_nic(
                 )
 
     # Target VPC must be private and owned by user
-    vpc = (await db.execute(
-        select(VPC).where(VPC.id == _uuid.UUID(body.vpc_id), VPC.owner_id == user.id)
-    )).scalar_one_or_none()
+    vpc = (
+        await db.execute(select(VPC).where(VPC.id == _uuid.UUID(body.vpc_id), VPC.owner_id == user.id))
+    ).scalar_one_or_none()
     if not vpc or not vpc.proxmox_vnet:
         raise HTTPException(status_code=404, detail="Network not found or has no VNet")
     if vpc.network_mode != "private":
@@ -1365,7 +1422,8 @@ async def add_nic(
 
     # Auto-allocate static IP from the target VPC's subnet
     subnet_result = await db.execute(
-        select(Subnet).where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
+        select(Subnet)
+        .where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
         .options(selectinload(Subnet.ip_reservations))
         .limit(1)
     )
@@ -1392,9 +1450,13 @@ async def add_nic(
             logger.warning("Failed to allocate IP for secondary NIC", exc_info=True)
 
     net_val = _build_net0(
-        resource.resource_type, vpc.proxmox_vnet,
-        ip=ip_str, prefix_len=prefix_len, gateway=gateway,
-        firewall=body.firewall, model=body.model,
+        resource.resource_type,
+        vpc.proxmox_vnet,
+        ip=ip_str,
+        prefix_len=prefix_len,
+        gateway=gateway,
+        firewall=body.firewall,
+        model=body.model,
         iface_name=f"eth{next_idx}" if resource.resource_type == "lxc" else None,
     )
 
@@ -1410,15 +1472,25 @@ async def add_nic(
             ipconfig_val = f"ip={ip_str}/{prefix_len}"
             if gateway:
                 ipconfig_val += f",gw={gateway}"
-            proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{ipconfig_key: ipconfig_val})
+            proxmox_client.update_vm_config(
+                resource.proxmox_node,
+                resource.proxmox_vmid,
+                **{ipconfig_key: ipconfig_val},
+            )
             proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
 
         # Create IP reservation
         if ip_str and subnet:
-            db.add(IPReservation(
-                subnet_id=subnet.id, ip_address=ip_str, resource_id=resource.id,
-                label=f"{resource.display_name}-{net_id}", is_gateway=False, owner_id=user.id,
-            ))
+            db.add(
+                IPReservation(
+                    subnet_id=subnet.id,
+                    ip_address=ip_str,
+                    resource_id=resource.id,
+                    label=f"{resource.display_name}-{net_id}",
+                    is_gateway=False,
+                    owner_id=user.id,
+                )
+            )
 
         # Track secondary VPC in specs
         secondary_vpc_ids = specs.get("secondary_vpc_ids", [])
@@ -1428,8 +1500,11 @@ async def add_nic(
         await db.commit()
 
         return {
-            "status": "ok", "net_id": net_id, "value": net_val,
-            "ip_address": ip_str, "vpc_id": str(vpc.id),
+            "status": "ok",
+            "net_id": net_id,
+            "value": net_val,
+            "ip_address": ip_str,
+            "vpc_id": str(vpc.id),
         }
     except HTTPException:
         raise
@@ -1457,20 +1532,14 @@ async def remove_nic(
 
     try:
         if resource.resource_type == "lxc":
-            proxmox_client.update_container_config(
-                resource.proxmox_node, resource.proxmox_vmid, delete=net_id
-            )
+            proxmox_client.update_container_config(resource.proxmox_node, resource.proxmox_vmid, delete=net_id)
         else:
             # Remove NIC config
-            proxmox_client.update_vm_config(
-                resource.proxmox_node, resource.proxmox_vmid, delete=net_id
-            )
+            proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, delete=net_id)
             # Remove cloud-init ipconfig for this NIC
             ipconfig_key = f"ipconfig{net_idx}"
             try:
-                proxmox_client.update_vm_config(
-                    resource.proxmox_node, resource.proxmox_vmid, delete=ipconfig_key
-                )
+                proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, delete=ipconfig_key)
                 proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
             except Exception:
                 logger.debug("No ipconfig%d to remove", net_idx)
@@ -1506,6 +1575,7 @@ async def remove_nic(
 
 class InstanceConfigRequest(BaseModel):
     """Structured cloud-init (VM) / LXC config fields."""
+
     username: str | None = None
     password: str | None = None
     ssh_key_ids: list[str] | None = None
@@ -1537,9 +1607,7 @@ async def get_instance_config(
     }
 
     # Load user's saved SSH keys for matching
-    user_keys_result = await db.execute(
-        select(SSHKeyPair).where(SSHKeyPair.owner_id == user.id)
-    )
+    user_keys_result = await db.execute(select(SSHKeyPair).where(SSHKeyPair.owner_id == user.id))
     user_keys = {k.public_key.strip(): str(k.id) for k in user_keys_result.scalars().all()}
 
     try:
@@ -1550,6 +1618,7 @@ async def get_instance_config(
             raw_keys = config.get("sshkeys", "")
             if raw_keys:
                 import urllib.parse
+
                 decoded = urllib.parse.unquote(raw_keys)
                 installed_keys = [k.strip() for k in decoded.strip().split("\n") if k.strip()]
                 matched_ids = [user_keys[k] for k in installed_keys if k in user_keys]
@@ -1582,9 +1651,8 @@ async def get_instance_config(
 
     # Get allocated IP from database
     from app.models.models import IPReservation
-    ip_res = await db.execute(
-        select(IPReservation).where(IPReservation.resource_id == resource.id)
-    )
+
+    ip_res = await db.execute(select(IPReservation).where(IPReservation.resource_id == resource.id))
     reservations = ip_res.scalars().all()
     if reservations:
         result["allocated_ip"] = reservations[0].ip_address
@@ -1617,7 +1685,9 @@ async def update_instance_config(
 
     try:
         _apply_instance_config(
-            node, vmid, resource.resource_type,
+            node,
+            vmid,
+            resource.resource_type,
             username=body.username,
             password=body.password,
             hostname=body.hostname,
@@ -1631,11 +1701,15 @@ async def update_instance_config(
     changed = {k: v for k, v in body.model_dump().items() if v is not None}
     if "password" in changed:
         changed["password"] = "***"
-    await log_action(db, user.id, "config_update", resource_id=str(resource.id),
-                     details=f"Config updated: {', '.join(changed.keys())}")
+    await log_action(
+        db,
+        user.id,
+        "config_update",
+        resource_id=str(resource.id),
+        details=f"Config updated: {', '.join(changed.keys())}",
+    )
     await db.commit()
     return {"status": "ok", "updated_fields": list(changed.keys())}
-
 
 
 async def list_backup_storages(
@@ -1645,9 +1719,7 @@ async def list_backup_storages(
     """List admin-configured backup storages available to the current user."""
     import json as _json
 
-    result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == "backup_storages")
-    )
+    result = await db.execute(select(SystemSetting).where(SystemSetting.key == "backup_storages"))
     setting = result.scalar_one_or_none()
     allowed = _json.loads(setting.value) if setting else []
     if not allowed:
@@ -1666,11 +1738,13 @@ async def list_available_backup_storages(
         result = []
         for s in storages:
             if "backup" in s.get("content", ""):
-                result.append({
-                    "storage": s["storage"],
-                    "type": s.get("type", ""),
-                    "shared": bool(s.get("shared", 0)),
-                })
+                result.append(
+                    {
+                        "storage": s["storage"],
+                        "type": s.get("type", ""),
+                        "shared": bool(s.get("shared", 0)),
+                    }
+                )
         return result
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -1695,9 +1769,7 @@ async def vm_backups(
             if "backup" not in s.get("content", ""):
                 continue
             try:
-                contents = proxmox_client.get_storage_content(
-                    s.get("node", resource.proxmox_node), s["storage"]
-                )
+                contents = proxmox_client.get_storage_content(s.get("node", resource.proxmox_node), s["storage"])
                 is_pbs = s.get("type") == "pbs"
                 for item in contents:
                     if item.get("content") != "backup":
@@ -1747,6 +1819,7 @@ async def create_vm_backup(
     """Create a backup of a VM. Auto-creates PBS namespace for user isolation."""
     import json as _json
     from typing import Any as _Any
+
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
 
     # Check backup quota
@@ -1771,12 +1844,16 @@ async def create_vm_backup(
     except Exception:
         pass
     if current_count >= max_backups:
-        raise HTTPException(status_code=409, detail=f"Backup quota exceeded ({current_count}/{max_backups}). Delete old backups or request a quota increase.")
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Backup quota exceeded ({current_count}/{max_backups})."
+                " Delete old backups or request a quota increase."
+            ),
+        )
 
     # Validate storage against admin-configured list
-    result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == "backup_storages")
-    )
+    result = await db.execute(select(SystemSetting).where(SystemSetting.key == "backup_storages"))
     setting = result.scalar_one_or_none()
     allowed = _json.loads(setting.value) if setting else []
     if not allowed:
@@ -1852,18 +1929,25 @@ async def restore_vm_backup(
     try:
         if vmtype == "lxc":
             upid = proxmox_client.restore_ct_backup(
-                resource.proxmox_node, resource.proxmox_vmid, body.volid,
+                resource.proxmox_node,
+                resource.proxmox_vmid,
+                body.volid,
             )
         else:
             upid = proxmox_client.restore_vm_backup(
-                resource.proxmox_node, resource.proxmox_vmid, body.volid,
+                resource.proxmox_node,
+                resource.proxmox_vmid,
+                body.volid,
             )
         await log_action(db, user.id, "backup_restore", "vm", resource.id, {"volid": body.volid})
         return {"status": "restoring", "task": upid}
     except Exception as e:
         msg = str(e)
         if "can't overwrite running" in msg.lower() or "overwrite running" in msg.lower():
-            raise HTTPException(status_code=409, detail="Cannot restore: the instance is currently running. Stop it first, then retry.")
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot restore: the instance is currently running. Stop it first, then retry.",
+            )
         raise HTTPException(status_code=502, detail=msg)
 
 
@@ -1887,14 +1971,25 @@ async def list_backup_files(
     resource = await _get_user_resource(db, user.id, resource_id, "vm")
 
     try:
-        logger.info("list_backup_files: node=%s storage=%s volid=%s filepath=%s",
-                     resource.proxmox_node, body.storage, body.volid, body.filepath or "/")
-        files = proxmox_client.list_backup_files(
-            resource.proxmox_node, body.storage, body.volid, body.filepath or "/",
+        logger.info(
+            "list_backup_files: node=%s storage=%s volid=%s filepath=%s",
+            resource.proxmox_node,
+            body.storage,
+            body.volid,
+            body.filepath or "/",
         )
-        logger.info("list_backup_files returned: type=%s len=%s sample=%s",
-                     type(files).__name__, len(files) if isinstance(files, list) else "N/A",
-                     str(files)[:200] if files else "empty")
+        files = proxmox_client.list_backup_files(
+            resource.proxmox_node,
+            body.storage,
+            body.volid,
+            body.filepath or "/",
+        )
+        logger.info(
+            "list_backup_files returned: type=%s len=%s sample=%s",
+            type(files).__name__,
+            len(files) if isinstance(files, list) else "N/A",
+            str(files)[:200] if files else "empty",
+        )
         return {"files": files}
     except Exception as e:
         logger.exception("list_backup_files failed")
@@ -1910,11 +2005,15 @@ async def download_backup_file(
 ):
     """Download a file/directory from a backup snapshot via PVE file-restore API."""
     from starlette.responses import Response
+
     resource = await _get_user_resource(db, user.id, resource_id, "vm")
 
     try:
         data = proxmox_client.download_backup_file(
-            resource.proxmox_node, body.storage, body.volid, body.filepath,
+            resource.proxmox_node,
+            body.storage,
+            body.volid,
+            body.filepath,
         )
         # proxmoxer may return raw content in 'errors' key for non-JSON responses
         if isinstance(data, dict):
@@ -2065,11 +2164,15 @@ async def create_container(
         if body.template_vmid:
             try:
                 proxmox_client.set_container_config(
-                    resource.proxmox_node, new_vmid,
-                    cores=body.cores, memory=body.memory_mb,
+                    resource.proxmox_node,
+                    new_vmid,
+                    cores=body.cores,
+                    memory=body.memory_mb,
                 )
                 _apply_instance_config(
-                    resource.proxmox_node, new_vmid, "lxc",
+                    resource.proxmox_node,
+                    new_vmid,
+                    "lxc",
                     password=body.ci_password,
                     hostname=body.hostname,
                     dns_server=body.dns_server,
@@ -2086,7 +2189,13 @@ async def create_container(
         await _resolve_vpc_networking(db, user, resource, body.vpc_id, body.network_mode)
         await db.commit()
 
-        return {"id": str(resource.id), "vmid": new_vmid, "node": resource.proxmox_node, "status": "provisioning", "task": upid}
+        return {
+            "id": str(resource.id),
+            "vmid": new_vmid,
+            "node": resource.proxmox_node,
+            "status": "provisioning",
+            "task": upid,
+        }
     except Exception as e:
         # Release VMID on failure
         result = await db.execute(select(VMIDPool).where(VMIDPool.vmid == new_vmid))
@@ -2311,12 +2420,8 @@ async def _count_resources(db: AsyncSession, user_id: uuid.UUID, resource_type: 
 
 async def _get_vmid_range(db: AsyncSession) -> tuple[int, int]:
     """Read VMID range from system settings."""
-    start_result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == "vmid_range_start")
-    )
-    end_result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == "vmid_range_end")
-    )
+    start_result = await db.execute(select(SystemSetting).where(SystemSetting.key == "vmid_range_start"))
+    end_result = await db.execute(select(SystemSetting).where(SystemSetting.key == "vmid_range_end"))
     start_setting = start_result.scalar_one_or_none()
     end_setting = end_result.scalar_one_or_none()
     start = int(start_setting.value) if start_setting else 1000
@@ -2325,7 +2430,10 @@ async def _get_vmid_range(db: AsyncSession) -> tuple[int, int]:
 
 
 async def _get_user_resource(
-    db: AsyncSession, user_id: uuid.UUID, resource_id: str, resource_type: str,
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    resource_id: str,
+    resource_type: str,
     min_group_perm: str = "read",
 ) -> Resource:
     rid = uuid.UUID(resource_id)
@@ -2341,6 +2449,7 @@ async def _get_user_resource(
     # Fall back to group-level access
     if not resource:
         from app.services.group_access import check_group_access
+
         base = select(Resource).where(Resource.id == rid)
         if resource_type == "vm":
             base = base.where(Resource.resource_type.in_(["vm", "lxc"]))
@@ -2356,7 +2465,7 @@ async def _get_user_resource(
     if resource.status == "destroyed":
         raise HTTPException(status_code=410, detail="Resource has been destroyed")
     # Touch last_accessed_at for lifecycle tracking
-    resource.last_accessed_at = datetime.now(timezone.utc)
+    resource.last_accessed_at = datetime.now(UTC)
     await db.commit()
     return resource
 
@@ -2369,14 +2478,29 @@ async def _cleanup_resource_children(db: AsyncSession, resource_id: uuid.UUID) -
     Any new model with FK to resources.id must be added here.
     """
     from app.models.models import (
-        Alarm, Backup, BackupPlan, CustomMetric, GroupResourceShare,
-        HealthCheck, IPReservation, LifecyclePolicy, ServiceEndpoint,
-        Tag, TemplateRequest,
+        Alarm,
+        Backup,
+        BackupPlan,
+        CustomMetric,
+        GroupResourceShare,
+        HealthCheck,
+        IPReservation,
+        LifecyclePolicy,
+        ServiceEndpoint,
+        Tag,
+        TemplateRequest,
     )
+
     # Non-nullable FK tables - rows MUST be deleted or they block resource deletion
     for model in (
-        Backup, BackupPlan, ServiceEndpoint, Alarm, HealthCheck,
-        LifecyclePolicy, Tag, TemplateRequest,
+        Backup,
+        BackupPlan,
+        ServiceEndpoint,
+        Alarm,
+        HealthCheck,
+        LifecyclePolicy,
+        Tag,
+        TemplateRequest,
     ):
         await db.execute(delete(model).where(model.resource_id == resource_id))
     # Nullable FK tables - delete to avoid orphans (could also SET NULL)
@@ -2424,9 +2548,7 @@ async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dic
             # unused config entries before deletion so PVE won't touch them.
             # If removal fails, block deletion to protect user data.
             try:
-                config = proxmox_client.get_vm_config(
-                    resource.proxmox_node, resource.proxmox_vmid
-                )
+                config = proxmox_client.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
                 for ov in orphan_vols:
                     if ov.proxmox_volid:
                         unused_slot = None
@@ -2479,7 +2601,13 @@ async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dic
     # Delete the resource record entirely
     await db.delete(resource)
     await db.commit()
-    await log_action(db, user.id, f"{resource.resource_type}_delete", resource.resource_type, details={"vmid": old_vmid})
+    await log_action(
+        db,
+        user.id,
+        f"{resource.resource_type}_delete",
+        resource.resource_type,
+        details={"vmid": old_vmid},
+    )
 
     # Clean up Proxmox pool if user has no remaining VMs/LXCs
     try:
@@ -2510,8 +2638,11 @@ def _get_live_status(resource: Resource) -> dict:
 
 
 async def _resolve_vpc_networking(
-    db: AsyncSession, user: User, resource: Resource,
-    vpc_id: str | None, network_mode: str = "private",
+    db: AsyncSession,
+    user: User,
+    resource: Resource,
+    vpc_id: str | None,
+    network_mode: str = "private",
 ) -> None:
     """Resolve VPC and apply NIC bridge, bandwidth, and firewall rules post-creation.
 
@@ -2522,6 +2653,7 @@ async def _resolve_vpc_networking(
     """
     import ipaddress as _ipaddr
     import uuid as _uuid
+
     from app.models.models import IPReservation, UserTier
 
     node = resource.proxmox_node
@@ -2553,20 +2685,17 @@ async def _resolve_vpc_networking(
 
     # Get first subnet for IP allocation
     subnet_result = await db.execute(
-        select(Subnet).where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
+        select(Subnet)
+        .where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
         .options(selectinload(Subnet.ip_reservations))
         .limit(1)
     )
     subnet = subnet_result.scalar_one_or_none()
 
     # Get bandwidth limit from tier
-    tier_result = await db.execute(
-        select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user.id)
-    )
+    tier_result = await db.execute(select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user.id))
     tier = tier_result.scalar_one_or_none()
-    bw = FirewallProfileService.get_effective_bandwidth(
-        tier.bandwidth_limit_mbps if tier else None, None
-    )
+    bw = FirewallProfileService.get_effective_bandwidth(tier.bandwidth_limit_mbps if tier else None, None)
 
     # Auto-allocate a static IP from the subnet (DHCP not supported on EVPN/VXLAN)
     ip_str = None
@@ -2583,10 +2712,16 @@ async def _resolve_vpc_networking(
                     ip_str = str(host)
                     break
             if ip_str:
-                db.add(IPReservation(
-                    subnet_id=subnet.id, ip_address=ip_str, resource_id=resource.id,
-                    label=resource.display_name, is_gateway=False, owner_id=user.id,
-                ))
+                db.add(
+                    IPReservation(
+                        subnet_id=subnet.id,
+                        ip_address=ip_str,
+                        resource_id=resource.id,
+                        label=resource.display_name,
+                        is_gateway=False,
+                        owner_id=user.id,
+                    )
+                )
         except Exception:
             logger.warning("Failed to allocate IP for %s/%s", node, vmid, exc_info=True)
 
@@ -2594,14 +2729,22 @@ async def _resolve_vpc_networking(
     bridge = vpc.proxmox_vnet
     try:
         net0_val = _build_net0(
-            vmtype, bridge,
-            ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+            vmtype,
+            bridge,
+            ip=ip_str,
+            prefix_len=prefix_len,
+            gateway=gateway,
             rate=bw,
         )
         dns = (subnet.dns_server or "1.1.1.1") if subnet else "1.1.1.1"
         _apply_nic(
-            node, vmid, vmtype, net0_val,
-            ip=ip_str, prefix_len=prefix_len, gateway=gateway,
+            node,
+            vmid,
+            vmtype,
+            net0_val,
+            ip=ip_str,
+            prefix_len=prefix_len,
+            gateway=gateway,
             dns_server=dns,
         )
     except Exception:
@@ -2625,8 +2768,13 @@ async def _resolve_vpc_networking(
             upstream_ips = await FirewallProfileService.get_upstream_ips_async(db)
             FirewallProfileService.enable_firewall(node, vmid, vmtype)
             FirewallProfileService.apply_network_mode(
-                node, vmid, vmtype, effective_mode, subnet.cidr,
-                lan_ranges=lan_ranges, upstream_ips=upstream_ips,
+                node,
+                vmid,
+                vmtype,
+                effective_mode,
+                subnet.cidr,
+                lan_ranges=lan_ranges,
+                upstream_ips=upstream_ips,
             )
         except Exception:
             logger.warning("Failed to apply firewall mode for %s/%s", node, vmid, exc_info=True)
@@ -2634,6 +2782,7 @@ async def _resolve_vpc_networking(
     # Auto-attach managed security group for published networks
     if effective_mode == "published" and vpc.security_group_id:
         from app.models.models import ResourceSecurityGroup
+
         existing_link = await db.execute(
             select(ResourceSecurityGroup).where(
                 ResourceSecurityGroup.resource_id == resource.id,
@@ -2641,9 +2790,12 @@ async def _resolve_vpc_networking(
             )
         )
         if not existing_link.scalar_one_or_none():
-            db.add(ResourceSecurityGroup(
-                resource_id=resource.id, security_group_id=vpc.security_group_id,
-            ))
+            db.add(
+                ResourceSecurityGroup(
+                    resource_id=resource.id,
+                    security_group_id=vpc.security_group_id,
+                )
+            )
 
 
 def _do_action(resource: Resource, action: str, **kwargs) -> str:

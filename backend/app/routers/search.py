@@ -23,17 +23,17 @@ async def global_search(
 
     # Search user resources
     res = await db.execute(
-        select(Resource)
-        .where(Resource.owner_id == user.id, Resource.display_name.ilike(pattern))
-        .limit(10)
+        select(Resource).where(Resource.owner_id == user.id, Resource.display_name.ilike(pattern)).limit(10)
     )
     for r in res.scalars().all():
-        results["resources"].append({
-            "id": str(r.id),
-            "name": r.display_name,
-            "type": r.resource_type,
-            "status": r.status,
-        })
+        results["resources"].append(
+            {
+                "id": str(r.id),
+                "name": r.display_name,
+                "type": r.resource_type,
+                "status": r.status,
+            }
+        )
 
     # Search templates
     res = await db.execute(
@@ -42,12 +42,14 @@ async def global_search(
         .limit(10)
     )
     for t in res.scalars().all():
-        results["templates"].append({
-            "id": str(t.id),
-            "name": t.name,
-            "os_type": t.os_type,
-            "category": t.category,
-        })
+        results["templates"].append(
+            {
+                "id": str(t.id),
+                "name": t.name,
+                "os_type": t.os_type,
+                "category": t.category,
+            }
+        )
 
     # Search buckets (resources of type 'bucket')
     res = await db.execute(
@@ -60,11 +62,13 @@ async def global_search(
         .limit(10)
     )
     for b in res.scalars().all():
-        results["buckets"].append({
-            "id": str(b.id),
-            "name": b.display_name,
-            "status": b.status,
-        })
+        results["buckets"].append(
+            {
+                "id": str(b.id),
+                "name": b.display_name,
+                "status": b.status,
+            }
+        )
 
     total = sum(len(v) for v in results.values())
     return {"query": q, "total": total, "results": results}

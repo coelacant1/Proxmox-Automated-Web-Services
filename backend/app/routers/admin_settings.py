@@ -41,7 +41,7 @@ KNOWN_SETTINGS: dict[str, tuple[str, str | None]] = {
     # SDN / Networking
     "sdn.default_max_subnet_prefix": ("24", "Default maximum subnet prefix (e.g. 24 = /24, 254 hosts)"),
     "sdn.lan_ranges": ('["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"]', "RFC1918 ranges blocked in published mode"),
-    "sdn.upstream_ips": ('[]', "Upstream proxy IPs whitelisted in published mode (JSON array)"),
+    "sdn.upstream_ips": ("[]", "Upstream proxy IPs whitelisted in published mode (JSON array)"),
     # Authentication
     "registration_mode": ("open", "Registration mode (open/closed/invite)"),
     "session_timeout_minutes": ("1440", "Session timeout in minutes"),
@@ -58,9 +58,7 @@ KNOWN_SETTINGS: dict[str, tuple[str, str | None]] = {
 @router.get("/public")
 async def get_public_settings(db: AsyncSession = Depends(get_db)):
     """Return non-sensitive system settings (no auth required)."""
-    result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key.in_(PUBLIC_SETTING_KEYS))
-    )
+    result = await db.execute(select(SystemSetting).where(SystemSetting.key.in_(PUBLIC_SETTING_KEYS)))
     return {s.key: s.value for s in result.scalars().all()}
 
 

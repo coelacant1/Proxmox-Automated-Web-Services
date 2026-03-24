@@ -69,9 +69,7 @@ async def create_policy(
     user: User = Depends(get_current_active_user),
 ):
     # Quota
-    count = await db.execute(
-        select(func.count(LifecyclePolicy.id)).where(LifecyclePolicy.owner_id == user.id)
-    )
+    count = await db.execute(select(func.count(LifecyclePolicy.id)).where(LifecyclePolicy.owner_id == user.id))
     if (count.scalar() or 0) >= MAX_POLICIES_PER_USER:
         raise HTTPException(status_code=403, detail="Lifecycle policy quota exceeded")
 

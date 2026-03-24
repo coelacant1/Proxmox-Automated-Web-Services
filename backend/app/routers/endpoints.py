@@ -84,9 +84,7 @@ async def create_endpoint(
     user: User = Depends(get_current_active_user),
 ):
     # Quota check
-    count_result = await db.execute(
-        select(func.count(ServiceEndpoint.id)).where(ServiceEndpoint.owner_id == user.id)
-    )
+    count_result = await db.execute(select(func.count(ServiceEndpoint.id)).where(ServiceEndpoint.owner_id == user.id))
     if (count_result.scalar() or 0) >= MAX_ENDPOINTS_PER_USER:
         raise HTTPException(status_code=403, detail=f"Endpoint quota exceeded ({MAX_ENDPOINTS_PER_USER} max)")
 
@@ -103,9 +101,7 @@ async def create_endpoint(
         raise HTTPException(status_code=404, detail="Resource not found")
 
     # Check subdomain uniqueness
-    existing = await db.execute(
-        select(ServiceEndpoint).where(ServiceEndpoint.subdomain == body.subdomain)
-    )
+    existing = await db.execute(select(ServiceEndpoint).where(ServiceEndpoint.subdomain == body.subdomain))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Subdomain '{body.subdomain}' is already in use")
 
@@ -137,9 +133,7 @@ async def get_ingress_config(
     """Get current ingress/proxy configuration (from system settings)."""
     from app.models.models import SystemSetting
 
-    result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key.like("ingress_%"))
-    )
+    result = await db.execute(select(SystemSetting).where(SystemSetting.key.like("ingress_%")))
     settings_list = result.scalars().all()
     config = {s.key.replace("ingress_", ""): s.value for s in settings_list}
     return config
@@ -151,9 +145,7 @@ async def get_endpoint_quota(
     user: User = Depends(get_current_active_user),
 ):
     """Get endpoint quota usage for current user."""
-    count_result = await db.execute(
-        select(func.count(ServiceEndpoint.id)).where(ServiceEndpoint.owner_id == user.id)
-    )
+    count_result = await db.execute(select(func.count(ServiceEndpoint.id)).where(ServiceEndpoint.owner_id == user.id))
     used = count_result.scalar() or 0
     # Count by protocol
     proto_result = await db.execute(
@@ -184,9 +176,7 @@ async def validate_subdomain_endpoint(
         errors.append(f"'{subdomain}' is a reserved subdomain")
 
     # Check collision
-    existing = await db.execute(
-        select(ServiceEndpoint).where(ServiceEndpoint.subdomain == subdomain)
-    )
+    existing = await db.execute(select(ServiceEndpoint).where(ServiceEndpoint.subdomain == subdomain))
     if existing.scalar_one_or_none():
         errors.append("Subdomain already in use")
 
@@ -197,9 +187,7 @@ async def validate_subdomain_endpoint(
         for suffix in [f"-{user.username[:8]}", "-2", "-app", "-svc"]:
             candidate = f"{base}{suffix}"
             if SUBDOMAIN_PATTERN.match(candidate) and candidate not in RESERVED_SUBDOMAINS:
-                res = await db.execute(
-                    select(ServiceEndpoint).where(ServiceEndpoint.subdomain == candidate)
-                )
+                res = await db.execute(select(ServiceEndpoint).where(ServiceEndpoint.subdomain == candidate))
                 if not res.scalar_one_or_none():
                     suggestions.append(candidate)
                     if len(suggestions) >= 3:
@@ -302,9 +290,7 @@ def _serialize_endpoint(e: ServiceEndpoint) -> dict:
 
 async def _get_user_endpoint(db: AsyncSession, user_id: uuid.UUID, endpoint_id: str) -> ServiceEndpoint:
     result = await db.execute(
-        select(ServiceEndpoint).where(
-            ServiceEndpoint.id == uuid.UUID(endpoint_id), ServiceEndpoint.owner_id == user_id
-        )
+        select(ServiceEndpoint).where(ServiceEndpoint.id == uuid.UUID(endpoint_id), ServiceEndpoint.owner_id == user_id)
     )
     endpoint = result.scalar_one_or_none()
     if not endpoint:

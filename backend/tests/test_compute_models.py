@@ -3,7 +3,6 @@
 import pytest
 from httpx import AsyncClient
 
-
 # --- SSH Keys ------------------------------------------------------------
 
 
@@ -71,14 +70,17 @@ async def test_add_rule_to_security_group(auth_client: AsyncClient):
     sg = await auth_client.post("/api/security-groups/", json={"name": "rule-test"})
     sg_id = sg.json()["id"]
 
-    r = await auth_client.post(f"/api/security-groups/{sg_id}/rules", json={
-        "direction": "ingress",
-        "protocol": "tcp",
-        "port_from": 80,
-        "port_to": 80,
-        "cidr": "0.0.0.0/0",
-        "description": "HTTP",
-    })
+    r = await auth_client.post(
+        f"/api/security-groups/{sg_id}/rules",
+        json={
+            "direction": "ingress",
+            "protocol": "tcp",
+            "port_from": 80,
+            "port_to": 80,
+            "cidr": "0.0.0.0/0",
+            "description": "HTTP",
+        },
+    )
     assert r.status_code == 201
     assert r.json()["port_from"] == 80
 
@@ -91,9 +93,15 @@ async def test_add_rule_to_security_group(auth_client: AsyncClient):
 async def test_delete_rule_from_security_group(auth_client: AsyncClient):
     sg = await auth_client.post("/api/security-groups/", json={"name": "del-rule-test"})
     sg_id = sg.json()["id"]
-    rule = await auth_client.post(f"/api/security-groups/{sg_id}/rules", json={
-        "direction": "egress", "protocol": "tcp", "port_from": 443, "port_to": 443,
-    })
+    rule = await auth_client.post(
+        f"/api/security-groups/{sg_id}/rules",
+        json={
+            "direction": "egress",
+            "protocol": "tcp",
+            "port_from": 443,
+            "port_to": 443,
+        },
+    )
     rule_id = rule.json()["id"]
 
     r = await auth_client.delete(f"/api/security-groups/{sg_id}/rules/{rule_id}")
@@ -112,9 +120,13 @@ async def test_delete_security_group(auth_client: AsyncClient):
 async def test_invalid_rule_direction(auth_client: AsyncClient):
     sg = await auth_client.post("/api/security-groups/", json={"name": "bad-dir"})
     sg_id = sg.json()["id"]
-    r = await auth_client.post(f"/api/security-groups/{sg_id}/rules", json={
-        "direction": "invalid", "protocol": "tcp",
-    })
+    r = await auth_client.post(
+        f"/api/security-groups/{sg_id}/rules",
+        json={
+            "direction": "invalid",
+            "protocol": "tcp",
+        },
+    )
     assert r.status_code == 422
 
 

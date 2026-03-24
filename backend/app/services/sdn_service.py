@@ -55,9 +55,7 @@ class SDNService:
             logger.error("Failed to get VNet %s: %s", vnet_name, e)
             return None
 
-    def create_vnet(
-        self, vnet_name: str, vxlan_tag: int, zone: str | None = None, alias: str = ""
-    ) -> str:
+    def create_vnet(self, vnet_name: str, vxlan_tag: int, zone: str | None = None, alias: str = "") -> str:
         """Create a VNet in the PAWS EVPN zone with a VXLAN tag."""
         zone = zone or EVPN_ZONE
         try:
@@ -117,7 +115,10 @@ class SDNService:
         """
         try:
             proxmox_client.create_sdn_subnet(
-                vnet_name, cidr, gateway, snat=snat,
+                vnet_name,
+                cidr,
+                gateway,
+                snat=snat,
             )
             self._apply_sdn()
             logger.info("Created subnet %s on VNet %s (snat=%s)", cidr, vnet_name, snat)

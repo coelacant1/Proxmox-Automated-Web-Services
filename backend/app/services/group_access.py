@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import select, or_
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import (
@@ -36,9 +36,7 @@ async def get_group_permission(
             or_(
                 UserGroupMember.user_id == user_id,
                 # Also check if user is the group owner
-                GroupResourceShare.group_id.in_(
-                    select(UserGroup.id).where(UserGroup.owner_id == user_id)
-                ),
+                GroupResourceShare.group_id.in_(select(UserGroup.id).where(UserGroup.owner_id == user_id)),
             ),
         )
     )

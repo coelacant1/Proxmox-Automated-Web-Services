@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, Query, Request, WebSocket, status
 from fastapi.security import OAuth2PasswordBearer
@@ -90,14 +90,12 @@ async def get_current_user(
 
     # Check admin-configured session timeout
     try:
-        result = await db.execute(
-            select(SystemSetting.value).where(SystemSetting.key == "session_timeout_minutes")
-        )
+        result = await db.execute(select(SystemSetting.value).where(SystemSetting.key == "session_timeout_minutes"))
         timeout_val = result.scalar_one_or_none()
         if timeout_val:
             timeout_minutes = int(timeout_val)
             if timeout_minutes > 0 and iat:
-                token_age = datetime.now(timezone.utc).timestamp() - iat
+                token_age = datetime.now(UTC).timestamp() - iat
                 if token_age > timeout_minutes * 60:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,

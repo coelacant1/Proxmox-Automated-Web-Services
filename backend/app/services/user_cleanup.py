@@ -2,12 +2,12 @@
 
 import logging
 import uuid
-from datetime import datetime, timezone
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import (
+    VPC,
     Alarm,
     AuditLog,
     Backup,
@@ -22,9 +22,9 @@ from app.models.models import (
     ProjectMember,
     QuotaRequest,
     Resource,
-    SSHKeyPair,
     SecurityGroup,
     ServiceEndpoint,
+    SSHKeyPair,
     StorageBucket,
     Tag,
     TemplateRequest,
@@ -35,7 +35,6 @@ from app.models.models import (
     UserMFA,
     UserQuota,
     Volume,
-    VPC,
 )
 
 log = logging.getLogger(__name__)
@@ -179,6 +178,7 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
 
     # API keys (from api_keys table)
     from sqlalchemy import text
+
     await db.execute(text("DELETE FROM api_keys WHERE user_id = :uid"), {"uid": str(user_id)})
 
     # MFA

@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -36,6 +36,7 @@ class TemplateRequestReview(BaseModel):
 
 
 # --- User endpoints ---
+
 
 @router.post("/request", status_code=201)
 async def submit_template_request(
@@ -88,14 +89,13 @@ async def my_template_requests(
     user: User = Depends(get_current_active_user),
 ):
     result = await db.execute(
-        select(TemplateRequest)
-        .where(TemplateRequest.user_id == user.id)
-        .order_by(TemplateRequest.created_at.desc())
+        select(TemplateRequest).where(TemplateRequest.user_id == user.id).order_by(TemplateRequest.created_at.desc())
     )
     return [_request_dict(r) for r in result.scalars().all()]
 
 
 # --- Admin endpoints ---
+
 
 @router.get("/requests")
 async def admin_list_requests(
@@ -129,7 +129,7 @@ async def review_template_request(
 
     req.admin_notes = body.admin_notes
     req.reviewed_by = admin.id
-    req.reviewed_at = datetime.now(timezone.utc)
+    req.reviewed_at = datetime.now(UTC)
 
     if body.status == "rejected":
         req.status = "rejected"

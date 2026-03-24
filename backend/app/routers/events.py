@@ -74,9 +74,7 @@ async def get_event(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(
-        select(Event).where(Event.id == uuid.UUID(event_id), Event.user_id == user.id)
-    )
+    result = await db.execute(select(Event).where(Event.id == uuid.UUID(event_id), Event.user_id == user.id))
     event = result.scalar_one_or_none()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")

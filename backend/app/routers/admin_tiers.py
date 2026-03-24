@@ -2,9 +2,8 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -194,6 +193,7 @@ async def assign_user_tier(
 
 # --- Admin: Tier request review ---
 
+
 @router.get("/requests")
 async def list_tier_requests(
     status_filter: str | None = None,
@@ -205,6 +205,11 @@ async def list_tier_requests(
         q = q.where(TierRequest.status == status_filter)
     result = await db.execute(q)
     return [_request_dict(r) for r in result.scalars().all()]
+
+
+class ReviewBody(BaseModel):
+    status: str  # approved or rejected
+    admin_notes: str | None = None
 
 
 @router.patch("/requests/{request_id}")
@@ -235,11 +240,6 @@ async def review_tier_request(
     await db.commit()
     await db.refresh(req)
     return _request_dict(req)
-
-
-class ReviewBody(BaseModel):
-    status: str  # approved or rejected
-    admin_notes: str | None = None
 
 
 def _request_dict(r: TierRequest) -> dict:
@@ -306,6 +306,11 @@ async def get_my_tier(user: User = Depends(get_current_active_user)):
     return None
 
 
+class TierRequestBody(BaseModel):
+    tier_id: uuid.UUID
+    reason: str | None = None
+
+
 @user_router.post("/request", status_code=201)
 async def request_tier(
     body: TierRequestBody,
@@ -346,13 +351,6 @@ async def my_tier_requests(
 ):
     """List the current user's tier requests."""
     result = await db.execute(
-        select(TierRequest)
-        .where(TierRequest.user_id == user.id)
-        .order_by(TierRequest.created_at.desc())
+        select(TierRequest).where(TierRequest.user_id == user.id).order_by(TierRequest.created_at.desc())
     )
     return [_request_dict(r) for r in result.scalars().all()]
-
-
-class TierRequestBody(BaseModel):
-    tier_id: uuid.UUID
-    reason: str | None = None

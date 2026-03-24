@@ -29,19 +29,23 @@ async def evaluate_due_plans(db: AsyncSession) -> list[dict]:
 
         try:
             backup_record = await _execute_backup(db, plan)
-            executed.append({
-                "plan_id": str(plan.id),
-                "resource_id": str(plan.resource_id),
-                "backup_id": str(backup_record.id),
-                "status": "dispatched",
-            })
+            executed.append(
+                {
+                    "plan_id": str(plan.id),
+                    "resource_id": str(plan.resource_id),
+                    "backup_id": str(backup_record.id),
+                    "status": "dispatched",
+                }
+            )
         except Exception:
             logger.exception("Failed to execute backup plan %s", plan.id)
-            executed.append({
-                "plan_id": str(plan.id),
-                "resource_id": str(plan.resource_id),
-                "status": "failed",
-            })
+            executed.append(
+                {
+                    "plan_id": str(plan.id),
+                    "resource_id": str(plan.resource_id),
+                    "status": "failed",
+                }
+            )
 
     return executed
 
@@ -103,9 +107,7 @@ async def _execute_backup(db: AsyncSession, plan: BackupPlan) -> Backup:
 async def cleanup_old_backups(db: AsyncSession, plan: BackupPlan) -> int:
     """Remove backups exceeding retention count for a plan."""
     result = await db.execute(
-        select(Backup)
-        .where(Backup.plan_id == plan.id, Backup.status == "completed")
-        .order_by(Backup.created_at.desc())
+        select(Backup).where(Backup.plan_id == plan.id, Backup.status == "completed").order_by(Backup.created_at.desc())
     )
     backups = list(result.scalars().all())
 

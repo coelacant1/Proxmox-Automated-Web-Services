@@ -21,6 +21,7 @@ router = APIRouter()
 
 # --- Schemas ---
 
+
 class HAGroupCreate(BaseModel):
     name: str
     description: str | None = None
@@ -30,6 +31,7 @@ class HAGroupCreate(BaseModel):
     nofailback: bool = False
     max_relocate: int = 1
     max_restart: int = 1
+
 
 class HAGroupUpdate(BaseModel):
     name: str | None = None
@@ -41,6 +43,7 @@ class HAGroupUpdate(BaseModel):
     max_restart: int | None = None
     is_active: bool | None = None
 
+
 class HAEnableRequest(BaseModel):
     ha_group_id: str | None = None
     max_relocate: int | None = None
@@ -48,6 +51,7 @@ class HAEnableRequest(BaseModel):
 
 
 # --- Admin endpoints ---
+
 
 @router.get("/api/admin/ha/groups")
 async def list_ha_groups(db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)):
@@ -57,7 +61,11 @@ async def list_ha_groups(db: AsyncSession = Depends(get_db), _admin: User = Depe
 
 
 @router.post("/api/admin/ha/groups", status_code=201)
-async def create_ha_group(body: HAGroupCreate, db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)):
+async def create_ha_group(
+    body: HAGroupCreate,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
     # Check uniqueness
     existing = await db.execute(select(HAGroup).where(HAGroup.pve_group_name == body.pve_group_name))
     if existing.scalar_one_or_none():
@@ -92,7 +100,12 @@ async def create_ha_group(body: HAGroupCreate, db: AsyncSession = Depends(get_db
 
 
 @router.patch("/api/admin/ha/groups/{group_id}")
-async def update_ha_group(group_id: str, body: HAGroupUpdate, db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)):
+async def update_ha_group(
+    group_id: str,
+    body: HAGroupUpdate,
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
     group = await db.get(HAGroup, uuid.UUID(group_id))
     if not group:
         raise HTTPException(404, "HA group not found")
@@ -179,6 +192,7 @@ async def sync_ha_groups(db: AsyncSession = Depends(get_db), _admin: User = Depe
 
 # --- User HA endpoints (gated by ha.manage capability) ---
 
+
 @router.get("/api/compute/instances/{resource_id}/ha")
 async def get_instance_ha(
     resource_id: str,
@@ -190,7 +204,14 @@ async def get_instance_ha(
 
     try:
         ha_res = pve.get_ha_resource(sid)
-        return {"enabled": True, "state": ha_res.get("state", "unknown"), "group": ha_res.get("group"), "sid": sid, "max_relocate": ha_res.get("max_relocate"), "max_restart": ha_res.get("max_restart")}
+        return {
+            "enabled": True,
+            "state": ha_res.get("state", "unknown"),
+            "group": ha_res.get("group"),
+            "sid": sid,
+            "max_relocate": ha_res.get("max_relocate"),
+            "max_restart": ha_res.get("max_restart"),
+        }
     except Exception:
         return {"enabled": False, "state": None, "group": None, "sid": sid}
 
@@ -258,10 +279,13 @@ async def list_user_ha_groups(
         select(HAGroup).where(HAGroup.is_active == True, HAGroup.restricted == False).order_by(HAGroup.name)  # noqa: E712
     )
     groups = result.scalars().all()
-    return [{"id": str(g.id), "name": g.name, "description": g.description, "nodes": json.loads(g.nodes)} for g in groups]
+    return [
+        {"id": str(g.id), "name": g.name, "description": g.description, "nodes": json.loads(g.nodes)} for g in groups
+    ]
 
 
 # --- Helpers ---
+
 
 def _serialize_group(g: HAGroup) -> dict:
     return {

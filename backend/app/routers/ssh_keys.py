@@ -51,9 +51,7 @@ async def create_ssh_key(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid SSH public key format")
 
     # Check limit
-    count_result = await db.execute(
-        select(func.count()).select_from(SSHKeyPair).where(SSHKeyPair.owner_id == user.id)
-    )
+    count_result = await db.execute(select(func.count()).select_from(SSHKeyPair).where(SSHKeyPair.owner_id == user.id))
     if (count_result.scalar() or 0) >= MAX_KEYS_PER_USER:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -61,9 +59,7 @@ async def create_ssh_key(
         )
 
     # Check duplicate name
-    existing = await db.execute(
-        select(SSHKeyPair).where(SSHKeyPair.owner_id == user.id, SSHKeyPair.name == body.name)
-    )
+    existing = await db.execute(select(SSHKeyPair).where(SSHKeyPair.owner_id == user.id, SSHKeyPair.name == body.name))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SSH key name already exists")
 

@@ -19,7 +19,6 @@ class LoginRequest(BaseModel):
     password: str
 
 
-
 class UserRead(BaseModel):
     id: uuid.UUID
     email: str

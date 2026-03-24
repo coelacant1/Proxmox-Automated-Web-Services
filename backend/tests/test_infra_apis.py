@@ -133,12 +133,12 @@ async def test_revoke_all(auth_client):
 @pytest.mark.anyio
 async def test_registration_creates_default_vpc(auth_client, db_session):
     """Verify VPCs exist for the test user (created during fixture setup)."""
-    from app.models.models import VPC
-
     from sqlalchemy import select
 
+    from app.models.models import VPC
+
     result = await db_session.execute(select(VPC).where(VPC.owner_id == TEST_USER_ID))
-    vpcs = list(result.scalars().all())
+    list(result.scalars().all())
     # At least one VPC should exist (default from registration)
     # Note: test fixtures may not trigger registration, so we just test the endpoint
     r = await auth_client.get("/api/vpcs/")

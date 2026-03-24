@@ -42,16 +42,8 @@ async def list_all_groups(
 
     items = []
     for g in groups:
-        member_count = (
-            await db.execute(
-                select(func.count()).where(UserGroupMember.group_id == g.id)
-            )
-        ).scalar() or 0
-        share_count = (
-            await db.execute(
-                select(func.count()).where(GroupResourceShare.group_id == g.id)
-            )
-        ).scalar() or 0
+        member_count = (await db.execute(select(func.count()).where(UserGroupMember.group_id == g.id))).scalar() or 0
+        share_count = (await db.execute(select(func.count()).where(GroupResourceShare.group_id == g.id))).scalar() or 0
         items.append(
             {
                 "id": str(g.id),

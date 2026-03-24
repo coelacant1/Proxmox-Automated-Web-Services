@@ -38,9 +38,7 @@ async def create_catalog_template(
     _: User = Depends(require_admin),
 ):
     """Add a Proxmox template to the user-facing catalog."""
-    existing = await db.execute(
-        select(TemplateCatalog).where(TemplateCatalog.proxmox_vmid == data.proxmox_vmid)
-    )
+    existing = await db.execute(select(TemplateCatalog).where(TemplateCatalog.proxmox_vmid == data.proxmox_vmid))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Template with this VMID already in catalog")
 
@@ -133,17 +131,19 @@ async def list_proxmox_templates(
         category = "lxc" if pve_type == "lxc" else "vm"
         os_type = _detect_os_type(name)
 
-        templates.append({
-            "vmid": vmid,
-            "name": name,
-            "node": r.get("node"),
-            "category": category,
-            "os_type": os_type,
-            "cpu": r.get("maxcpu", 1),
-            "ram_mb": r.get("maxmem", 0) // (1024 * 1024),
-            "disk_gb": r.get("maxdisk", 0) // (1024 * 1024 * 1024),
-            "tags": r.get("tags", "").split(";") if r.get("tags") else [],
-        })
+        templates.append(
+            {
+                "vmid": vmid,
+                "name": name,
+                "node": r.get("node"),
+                "category": category,
+                "os_type": os_type,
+                "cpu": r.get("maxcpu", 1),
+                "ram_mb": r.get("maxmem", 0) // (1024 * 1024),
+                "disk_gb": r.get("maxdisk", 0) // (1024 * 1024 * 1024),
+                "tags": r.get("tags", "").split(";") if r.get("tags") else [],
+            }
+        )
 
     return sorted(templates, key=lambda t: t["vmid"])
 
@@ -153,8 +153,23 @@ def _detect_os_type(name: str) -> str:
     lower = name.lower()
     if any(w in lower for w in ("windows", "win7", "win10", "win11", "w11", "w10")):
         return "windows"
-    if any(w in lower for w in ("ubuntu", "debian", "centos", "rhel", "fedora", "kali",
-                                 "linux", "alpine", "arch", "suse", "rocky", "alma")):
+    if any(
+        w in lower
+        for w in (
+            "ubuntu",
+            "debian",
+            "centos",
+            "rhel",
+            "fedora",
+            "kali",
+            "linux",
+            "alpine",
+            "arch",
+            "suse",
+            "rocky",
+            "alma",
+        )
+    ):
         return "linux"
     if any(w in lower for w in ("freebsd", "openbsd", "netbsd", "pfsense", "opnsense")):
         return "bsd"

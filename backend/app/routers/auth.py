@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,16 +69,21 @@ async def _record_failed_login(db: AsyncSession, user: User) -> None:
     user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
     if user.failed_login_attempts >= 10:
         user.locked_until = datetime.now(UTC) + timedelta(minutes=30)
-        await log_auth_event(db, "auth.account_locked", user_id=user.id, details={
-            "failed_attempts": user.failed_login_attempts,
-            "locked_until": user.locked_until.isoformat(),
-        })
+        await log_auth_event(
+            db,
+            "auth.account_locked",
+            user_id=user.id,
+            details={
+                "failed_attempts": user.failed_login_attempts,
+                "locked_until": user.locked_until.isoformat(),
+            },
+        )
     await db.commit()
 
 
 async def _clear_failed_logins(db: AsyncSession, user: User) -> None:
     """Reset failed login counter and record login time on successful login."""
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(UTC)
     if user.failed_login_attempts and user.failed_login_attempts > 0:
         user.failed_login_attempts = 0
         user.locked_until = None
@@ -364,6 +369,7 @@ async def oauth_callback(
 @router.get("/me")
 async def get_me(request: Request, user: User = Depends(get_current_active_user), db: AsyncSession = Depends(get_db)):
     from app.services.lifecycle_policy import get_effective_lifecycle
+
     lifecycle = await get_effective_lifecycle(db, user)
     data = {
         "id": str(user.id),
@@ -405,24 +411,50 @@ async def _create_default_security_group(db: AsyncSession, user: User) -> None:
     db.add(sg)
     await db.flush()
     # Allow all outbound
-    db.add(SecurityGroupRule(
-        security_group_id=sg.id, direction="egress", protocol="tcp",
-        port_from=1, port_to=65535, cidr="0.0.0.0/0", description="Allow all outbound TCP",
-    ))
-    db.add(SecurityGroupRule(
-        security_group_id=sg.id, direction="egress", protocol="udp",
-        port_from=1, port_to=65535, cidr="0.0.0.0/0", description="Allow all outbound UDP",
-    ))
+    db.add(
+        SecurityGroupRule(
+            security_group_id=sg.id,
+            direction="egress",
+            protocol="tcp",
+            port_from=1,
+            port_to=65535,
+            cidr="0.0.0.0/0",
+            description="Allow all outbound TCP",
+        )
+    )
+    db.add(
+        SecurityGroupRule(
+            security_group_id=sg.id,
+            direction="egress",
+            protocol="udp",
+            port_from=1,
+            port_to=65535,
+            cidr="0.0.0.0/0",
+            description="Allow all outbound UDP",
+        )
+    )
     # Allow inbound SSH
-    db.add(SecurityGroupRule(
-        security_group_id=sg.id, direction="ingress", protocol="tcp",
-        port_from=22, port_to=22, cidr="0.0.0.0/0", description="Allow SSH",
-    ))
+    db.add(
+        SecurityGroupRule(
+            security_group_id=sg.id,
+            direction="ingress",
+            protocol="tcp",
+            port_from=22,
+            port_to=22,
+            cidr="0.0.0.0/0",
+            description="Allow SSH",
+        )
+    )
     # Allow inbound ICMP
-    db.add(SecurityGroupRule(
-        security_group_id=sg.id, direction="ingress", protocol="icmp",
-        cidr="0.0.0.0/0", description="Allow ICMP (ping)",
-    ))
+    db.add(
+        SecurityGroupRule(
+            security_group_id=sg.id,
+            direction="ingress",
+            protocol="icmp",
+            cidr="0.0.0.0/0",
+            description="Allow ICMP (ping)",
+        )
+    )
     await db.commit()
 
 

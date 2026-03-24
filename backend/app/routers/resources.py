@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.core.pagination import PaginatedParams, PaginatedResponse
 from app.models.models import ProjectMember, Resource, User, UserQuota
-from app.schemas.schemas import QuotaRead, ResourceRead, UsageResponse
+from app.schemas.schemas import QuotaRead, UsageResponse
 from app.services.proxmox_client import proxmox_client
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,10 @@ async def list_my_resources(
         else:
             base = select(Resource).where(Resource.project_id == project_id)
     else:
-        base = select(Resource).where(Resource.owner_id == user.id, Resource.status.notin_(["destroyed", "error", "creating"]))
+        base = select(Resource).where(
+            Resource.owner_id == user.id,
+            Resource.status.notin_(["destroyed", "error", "creating"]),
+        )
 
     if resource_type:
         base = base.where(Resource.resource_type == resource_type)

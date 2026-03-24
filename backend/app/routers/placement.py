@@ -32,11 +32,7 @@ async def list_placement_groups(
     user: User = Depends(get_current_active_user),
 ):
     """List all placement groups for the user."""
-    user_groups = [
-        {**g, "id": gid}
-        for gid, g in _placement_groups.items()
-        if g["owner_id"] == str(user.id)
-    ]
+    user_groups = [{**g, "id": gid} for gid, g in _placement_groups.items() if g["owner_id"] == str(user.id)]
     return user_groups
 
 

@@ -1,9 +1,6 @@
 """Backup and backup plan API tests."""
 
 import pytest
-from sqlalchemy import select
-
-from app.models.models import Backup, BackupPlan
 
 
 @pytest.mark.anyio

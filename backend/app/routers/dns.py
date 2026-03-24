@@ -82,9 +82,7 @@ async def create_dns_record(
     user: User = Depends(get_current_active_user),
 ):
     # Quota check
-    count_result = await db.execute(
-        select(func.count(DNSRecord.id)).where(DNSRecord.owner_id == user.id)
-    )
+    count_result = await db.execute(select(func.count(DNSRecord.id)).where(DNSRecord.owner_id == user.id))
     if (count_result.scalar() or 0) >= MAX_DNS_RECORDS_PER_USER:
         raise HTTPException(status_code=403, detail=f"DNS record quota exceeded ({MAX_DNS_RECORDS_PER_USER} max)")
 

@@ -60,9 +60,7 @@ class ProxmoxClient:
         import requests
 
         if not settings.proxmox_password:
-            raise ConnectionError(
-                "PAWS_PROXMOX_PASSWORD required for terminal console access"
-            )
+            raise ConnectionError("PAWS_PROXMOX_PASSWORD required for terminal console access")
 
         host = settings.proxmox_host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
         port = settings.proxmox_port
@@ -194,7 +192,10 @@ class ProxmoxClient:
         self.api.nodes(node).qemu(vmid).resize.put(disk=disk, size=size)
 
     def move_vm_disk(
-        self, node: str, vmid: int, disk: str,
+        self,
+        node: str,
+        vmid: int,
+        disk: str,
         target_vmid: int | None = None,
         target_disk: str | None = None,
         storage: str | None = None,
@@ -209,13 +210,9 @@ class ProxmoxClient:
             params["storage"] = storage
         return self.api.nodes(node).qemu(vmid).move_disk.post(**params)
 
-    def allocate_storage_volume(
-        self, node: str, storage: str, vmid: int, size: str, fmt: str = "raw"
-    ) -> str:
+    def allocate_storage_volume(self, node: str, storage: str, vmid: int, size: str, fmt: str = "raw") -> str:
         """Allocate a new volume on storage. Returns the volume identifier."""
-        return self.api.nodes(node).storage(storage).content.post(
-            vmid=vmid, size=size, format=fmt
-        )
+        return self.api.nodes(node).storage(storage).content.post(vmid=vmid, size=size, format=fmt)
 
     def update_vm_config(self, node: str, vmid: int, **kwargs: Any) -> None:
         self.api.nodes(node).qemu(vmid).config.put(**kwargs)
@@ -279,9 +276,15 @@ class ProxmoxClient:
         return self.api.storage(storage).get()
 
     def create_pbs_storage(
-        self, name: str, server: str, datastore: str,
-        namespace: str, fingerprint: str,
-        username: str, password: str, port: int = 8007,
+        self,
+        name: str,
+        server: str,
+        datastore: str,
+        namespace: str,
+        fingerprint: str,
+        username: str,
+        password: str,
+        port: int = 8007,
     ) -> None:
         """Create a PVE storage config pointing to a PBS namespace."""
         self.api.storage.post(
@@ -312,9 +315,15 @@ class ProxmoxClient:
     def list_backup_files(self, node: str, storage: str, volid: str, filepath: str = "/") -> list[dict[str, Any]]:
         """List files inside a backup via PVE's file-restore API."""
         import base64
+
         fp_b64 = base64.b64encode(filepath.encode()).decode()
-        result = self.api.nodes(node).storage(storage)("file-restore")("list").get(
-            volume=volid, filepath=fp_b64,
+        result = (
+            self.api.nodes(node)
+            .storage(storage)("file-restore")("list")
+            .get(
+                volume=volid,
+                filepath=fp_b64,
+            )
         )
         if isinstance(result, list):
             return result
@@ -325,13 +334,23 @@ class ProxmoxClient:
     def download_backup_file(self, node: str, storage: str, volid: str, filepath: str) -> Any:
         """Download a file from a backup via PVE's file-restore API. Returns raw response."""
         import base64
+
         fp_b64 = base64.b64encode(filepath.encode()).decode()
-        return self.api.nodes(node).storage(storage)("file-restore")("download").get(
-            volume=volid, filepath=fp_b64,
+        return (
+            self.api.nodes(node)
+            .storage(storage)("file-restore")("download")
+            .get(
+                volume=volid,
+                filepath=fp_b64,
+            )
         )
 
     def restore_vm_backup(
-        self, node: str, vmid: int, archive: str, storage: str | None = None,
+        self,
+        node: str,
+        vmid: int,
+        archive: str,
+        storage: str | None = None,
     ) -> str:
         """Restore a VM from a backup archive (qmrestore)."""
         kwargs: dict[str, Any] = {"vmid": vmid, "archive": archive, "force": 1}
@@ -340,7 +359,11 @@ class ProxmoxClient:
         return self.api.nodes(node).qemu.post(**kwargs)
 
     def restore_ct_backup(
-        self, node: str, vmid: int, archive: str, storage: str | None = None,
+        self,
+        node: str,
+        vmid: int,
+        archive: str,
+        storage: str | None = None,
     ) -> str:
         """Restore a container from a backup archive (pct restore)."""
         kwargs: dict[str, Any] = {"vmid": vmid, "ostemplate": archive, "force": 1, "restore": 1}
@@ -389,6 +412,7 @@ class ProxmoxClient:
     def wait_for_task(self, node: str, upid: str, timeout: int = 120, interval: int = 2) -> dict[str, Any]:
         """Poll a task until it completes or times out."""
         import time
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             status = self.get_task_status(node, upid)
@@ -433,12 +457,9 @@ class ProxmoxClient:
     def get_sdn_subnets(self, vnet: str) -> list[dict[str, Any]]:
         return self.api.cluster.sdn.vnets(vnet).subnets.get()
 
-    def create_sdn_subnet(
-        self, vnet: str, subnet: str, gateway: str, snat: bool = True, **kwargs: Any
-    ) -> None:
+    def create_sdn_subnet(self, vnet: str, subnet: str, gateway: str, snat: bool = True, **kwargs: Any) -> None:
         self.api.cluster.sdn.vnets(vnet).subnets.post(
-            subnet=subnet, gateway=gateway,
-            snat=1 if snat else 0, type="subnet", **kwargs
+            subnet=subnet, gateway=gateway, snat=1 if snat else 0, type="subnet", **kwargs
         )
 
     def delete_sdn_subnet(self, vnet: str, subnet_id: str) -> None:
@@ -458,14 +479,10 @@ class ProxmoxClient:
     def get_vm_firewall_rules(self, node: str, vmid: int) -> list[dict[str, Any]]:
         return self.api.nodes(node).qemu(vmid).firewall.rules.get()
 
-    def create_vm_firewall_rule(
-        self, node: str, vmid: int, **kwargs: Any
-    ) -> None:
+    def create_vm_firewall_rule(self, node: str, vmid: int, **kwargs: Any) -> None:
         self.api.nodes(node).qemu(vmid).firewall.rules.post(**kwargs)
 
-    def update_vm_firewall_rule(
-        self, node: str, vmid: int, pos: int, **kwargs: Any
-    ) -> None:
+    def update_vm_firewall_rule(self, node: str, vmid: int, pos: int, **kwargs: Any) -> None:
         self.api.nodes(node).qemu(vmid).firewall.rules(pos).put(**kwargs)
 
     def delete_vm_firewall_rule(self, node: str, vmid: int, pos: int) -> None:
@@ -474,65 +491,45 @@ class ProxmoxClient:
     def get_container_firewall_options(self, node: str, vmid: int) -> dict[str, Any]:
         return self.api.nodes(node).lxc(vmid).firewall.options.get()
 
-    def set_container_firewall_options(
-        self, node: str, vmid: int, **kwargs: Any
-    ) -> None:
+    def set_container_firewall_options(self, node: str, vmid: int, **kwargs: Any) -> None:
         self.api.nodes(node).lxc(vmid).firewall.options.put(**kwargs)
 
-    def get_container_firewall_rules(
-        self, node: str, vmid: int
-    ) -> list[dict[str, Any]]:
+    def get_container_firewall_rules(self, node: str, vmid: int) -> list[dict[str, Any]]:
         return self.api.nodes(node).lxc(vmid).firewall.rules.get()
 
-    def create_container_firewall_rule(
-        self, node: str, vmid: int, **kwargs: Any
-    ) -> None:
+    def create_container_firewall_rule(self, node: str, vmid: int, **kwargs: Any) -> None:
         self.api.nodes(node).lxc(vmid).firewall.rules.post(**kwargs)
 
-    def update_container_firewall_rule(
-        self, node: str, vmid: int, pos: int, **kwargs: Any
-    ) -> None:
+    def update_container_firewall_rule(self, node: str, vmid: int, pos: int, **kwargs: Any) -> None:
         self.api.nodes(node).lxc(vmid).firewall.rules(pos).put(**kwargs)
 
-    def delete_container_firewall_rule(
-        self, node: str, vmid: int, pos: int
-    ) -> None:
+    def delete_container_firewall_rule(self, node: str, vmid: int, pos: int) -> None:
         self.api.nodes(node).lxc(vmid).firewall.rules(pos).delete()
 
-    def get_firewall_rules(
-        self, node: str, vmid: int, vmtype: str = "qemu"
-    ) -> list[dict[str, Any]]:
+    def get_firewall_rules(self, node: str, vmid: int, vmtype: str = "qemu") -> list[dict[str, Any]]:
         if vmtype == "lxc":
             return self.get_container_firewall_rules(node, vmid)
         return self.get_vm_firewall_rules(node, vmid)
 
-    def create_firewall_rule(
-        self, node: str, vmid: int, vmtype: str = "qemu", **kwargs: Any
-    ) -> None:
+    def create_firewall_rule(self, node: str, vmid: int, vmtype: str = "qemu", **kwargs: Any) -> None:
         if vmtype == "lxc":
             self.create_container_firewall_rule(node, vmid, **kwargs)
         else:
             self.create_vm_firewall_rule(node, vmid, **kwargs)
 
-    def delete_firewall_rule(
-        self, node: str, vmid: int, pos: int, vmtype: str = "qemu"
-    ) -> None:
+    def delete_firewall_rule(self, node: str, vmid: int, pos: int, vmtype: str = "qemu") -> None:
         if vmtype == "lxc":
             self.delete_container_firewall_rule(node, vmid, pos)
         else:
             self.delete_vm_firewall_rule(node, vmid, pos)
 
-    def set_firewall_options(
-        self, node: str, vmid: int, vmtype: str = "qemu", **kwargs: Any
-    ) -> None:
+    def set_firewall_options(self, node: str, vmid: int, vmtype: str = "qemu", **kwargs: Any) -> None:
         if vmtype == "lxc":
             self.set_container_firewall_options(node, vmid, **kwargs)
         else:
             self.set_vm_firewall_options(node, vmid, **kwargs)
 
-    def clear_firewall_rules_by_comment(
-        self, node: str, vmid: int, vmtype: str, comment_prefix: str
-    ) -> int:
+    def clear_firewall_rules_by_comment(self, node: str, vmid: int, vmtype: str, comment_prefix: str) -> int:
         """Delete all firewall rules whose comment starts with the given prefix.
         Returns the number of rules deleted."""
         rules = self.get_firewall_rules(node, vmid, vmtype)
@@ -546,9 +543,7 @@ class ProxmoxClient:
 
     # --- Guest Agent ---
 
-    def get_agent_network_interfaces(
-        self, node: str, vmid: int
-    ) -> list[dict[str, Any]]:
+    def get_agent_network_interfaces(self, node: str, vmid: int) -> list[dict[str, Any]]:
         """Get network interfaces reported by the QEMU guest agent."""
         try:
             result = self.api.nodes(node).qemu(vmid).agent("network-get-interfaces").get()

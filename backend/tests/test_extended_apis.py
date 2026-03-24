@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from app.models.models import Backup, BackupPlan, CustomMetric, Resource
+from app.models.models import Backup, BackupPlan, Resource
 from tests.conftest import TEST_USER_ID
 
 

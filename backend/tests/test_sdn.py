@@ -1,8 +1,6 @@
 """SDN service tests."""
 
-import pytest
-
-from app.services.sdn_service import SDNService, VXLAN_TAG_MIN
+from app.services.sdn_service import VXLAN_TAG_MIN, SDNService
 
 
 def test_generate_vnet_name():

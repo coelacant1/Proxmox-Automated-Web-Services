@@ -91,9 +91,7 @@ async def get_resource_metrics(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        rrd_data = proxmox_client.get_rrd_data(
-            resource.proxmox_node, resource.proxmox_vmid, vmtype, timeframe
-        )
+        rrd_data = proxmox_client.get_rrd_data(resource.proxmox_node, resource.proxmox_vmid, vmtype, timeframe)
         return {"resource_id": resource_id, "timeframe": timeframe, "data": rrd_data}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -166,9 +164,7 @@ async def create_alarm(
     user: User = Depends(get_current_active_user),
 ):
     # Quota check
-    count_result = await db.execute(
-        select(func.count(Alarm.id)).where(Alarm.owner_id == user.id)
-    )
+    count_result = await db.execute(select(func.count(Alarm.id)).where(Alarm.owner_id == user.id))
     if (count_result.scalar() or 0) >= MAX_ALARMS_PER_USER:
         raise HTTPException(status_code=403, detail=f"Alarm quota exceeded ({MAX_ALARMS_PER_USER} max)")
 
@@ -214,8 +210,13 @@ async def update_alarm(
     alarm = await _get_user_alarm(db, user.id, alarm_id)
 
     fields = (
-        "name", "threshold", "period_seconds", "evaluation_periods",
-        "notify_email", "notify_webhook", "is_active",
+        "name",
+        "threshold",
+        "period_seconds",
+        "evaluation_periods",
+        "notify_email",
+        "notify_webhook",
+        "is_active",
     )
     for field in fields:
         val = getattr(body, field, None)
@@ -276,9 +277,7 @@ async def _get_resource(db: AsyncSession, user_id: uuid.UUID, resource_id: str) 
 
 
 async def _get_user_alarm(db: AsyncSession, user_id: uuid.UUID, alarm_id: str) -> Alarm:
-    result = await db.execute(
-        select(Alarm).where(Alarm.id == uuid.UUID(alarm_id), Alarm.owner_id == user_id)
-    )
+    result = await db.execute(select(Alarm).where(Alarm.id == uuid.UUID(alarm_id), Alarm.owner_id == user_id))
     alarm = result.scalar_one_or_none()
     if not alarm:
         raise HTTPException(status_code=404, detail="Alarm not found")

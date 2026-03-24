@@ -18,7 +18,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.core.pagination import MessageResponse
 from app.models.models import Resource, SystemSetting, User, Volume
-from app.schemas.schemas import VolumeAttachRequest, VolumeCreate, VolumeRead
+from app.schemas.schemas import VolumeAttachRequest, VolumeCreate
 from app.services.proxmox_client import ProxmoxClient
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
@@ -32,6 +32,7 @@ class VolumeResizeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_proxmox() -> ProxmoxClient:
     return ProxmoxClient()
@@ -70,9 +71,7 @@ def _parse_volid_from_config(config: dict, slot: str) -> str | None:
     return str(val).split(",")[0]
 
 
-async def _get_vm_resource(
-    db: AsyncSession, resource_id: str, owner_id
-) -> Resource:
+async def _get_vm_resource(db: AsyncSession, resource_id: str, owner_id) -> Resource:
     """Fetch a VM resource owned by the user, raising 404 if missing."""
     result = await db.execute(
         select(Resource).where(
@@ -91,7 +90,10 @@ async def _get_vm_resource(
 
 
 async def _get_user_volume(
-    db: AsyncSession, user_id: _uuid.UUID, volume_id: str, min_perm: str = "read",
+    db: AsyncSession,
+    user_id: _uuid.UUID,
+    volume_id: str,
+    min_perm: str = "read",
 ) -> Volume:
     """Get a volume by ownership or group share."""
     vid = _uuid.UUID(volume_id) if isinstance(volume_id, str) else volume_id
@@ -99,6 +101,7 @@ async def _get_user_volume(
     vol = result.scalar_one_or_none()
     if not vol:
         from app.services.group_access import check_group_access
+
         res2 = await db.execute(select(Volume).where(Volume.id == vid))
         vol = res2.scalar_one_or_none()
         if vol and not await check_group_access(db, user_id, "volume", vid, min_perm):
@@ -172,9 +175,7 @@ async def create_volume(
         raise HTTPException(status_code=422, detail="Size must be 1-10000 GiB")
 
     # Validate storage pool
-    pools_result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == "storage_pools")
-    )
+    pools_result = await db.execute(select(SystemSetting).where(SystemSetting.key == "storage_pools"))
     pools_setting = pools_result.scalar_one_or_none()
     allowed = json.loads(pools_setting.value) if pools_setting else ["local-lvm"]
     if body.storage_pool not in allowed:
@@ -275,7 +276,8 @@ async def detach_volume(
             log.warning(
                 "Volume %s (volid=%s) not found in unused slots after detach. "
                 "Disk may have been removed by storage backend.",
-                vol.id, vol.proxmox_volid,
+                vol.id,
+                vol.proxmox_volid,
             )
     except Exception:
         pass
@@ -321,7 +323,8 @@ async def attach_volume(
             unused_slot = _find_unused_slot(target_config, vol.proxmox_volid)
             if unused_slot:
                 pve.update_vm_config(
-                    target_node, target_vmid,
+                    target_node,
+                    target_vmid,
                     **{slot: vol.proxmox_volid, "delete": unused_slot},
                 )
             else:

@@ -7,7 +7,10 @@ import pytest
 
 @pytest.mark.anyio
 async def test_list_sdn_zones(auth_client):
-    with patch("app.services.proxmox_client.proxmox_client.get_sdn_zones", return_value=[{"zone": "paws", "type": "evpn"}]):
+    with patch(
+        "app.services.proxmox_client.proxmox_client.get_sdn_zones",
+        return_value=[{"zone": "paws", "type": "evpn"}],
+    ):
         resp = await auth_client.get("/api/networking/zones")
     assert resp.status_code == 200
     zones = resp.json()
@@ -17,7 +20,10 @@ async def test_list_sdn_zones(auth_client):
 
 @pytest.mark.anyio
 async def test_list_vnets(auth_client):
-    with patch("app.services.proxmox_client.proxmox_client.get_sdn_vnets", return_value=[{"vnet": "testvn1", "zone": "paws"}]):
+    with patch(
+        "app.services.proxmox_client.proxmox_client.get_sdn_vnets",
+        return_value=[{"vnet": "testvn1", "zone": "paws"}],
+    ):
         resp = await auth_client.get("/api/networking/vnets")
     assert resp.status_code == 200
     vnets = resp.json()

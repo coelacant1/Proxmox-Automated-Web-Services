@@ -223,9 +223,7 @@ async def delete_backup(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    result = await db.execute(
-        select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id)
-    )
+    result = await db.execute(select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id))
     backup = result.scalar_one_or_none()
     if not backup:
         raise HTTPException(status_code=404, detail="Backup not found")
@@ -353,9 +351,7 @@ async def browse_backup_contents(
     user: User = Depends(get_current_active_user),
 ):
     """List files/disks in a backup (via Proxmox backup catalog)."""
-    result = await db.execute(
-        select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id)
-    )
+    result = await db.execute(select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id))
     backup = result.scalar_one_or_none()
     if not backup:
         raise HTTPException(status_code=404, detail="Backup not found")
@@ -448,9 +444,7 @@ async def restore_inplace(
     user: User = Depends(get_current_active_user),
 ):
     """Restore a backup in-place (overwrites current resource state)."""
-    result = await db.execute(
-        select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id)
-    )
+    result = await db.execute(select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id))
     backup = result.scalar_one_or_none()
     if not backup:
         raise HTTPException(status_code=404, detail="Backup not found")
@@ -484,9 +478,7 @@ async def restore_to_new_vm(
     user: User = Depends(get_current_active_user),
 ):
     """Restore a backup to a new VM/container."""
-    result = await db.execute(
-        select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id)
-    )
+    result = await db.execute(select(Backup).where(Backup.id == uuid.UUID(backup_id), Backup.owner_id == user.id))
     backup = result.scalar_one_or_none()
     if not backup:
         raise HTTPException(status_code=404, detail="Backup not found")
@@ -527,10 +519,13 @@ async def list_restore_jobs(
 ):
     """List recent restore operations (resources in 'creating' state from restores)."""
     result = await db.execute(
-        select(Resource).where(
+        select(Resource)
+        .where(
             Resource.owner_id == user.id,
             Resource.status == "creating",
-        ).order_by(Resource.created_at.desc()).limit(20)
+        )
+        .order_by(Resource.created_at.desc())
+        .limit(20)
     )
     resources = result.scalars().all()
     return [
@@ -734,7 +729,10 @@ async def download_proxmox_backup(
 
     try:
         data = proxmox_client.download_backup_file(
-            resource.proxmox_node, storage, volid, filepath,
+            resource.proxmox_node,
+            storage,
+            volid,
+            filepath,
         )
         if isinstance(data, dict):
             content = data.get("errors", b"")
@@ -770,7 +768,10 @@ async def browse_proxmox_backup(
 
     try:
         files = proxmox_client.list_backup_files(
-            resource.proxmox_node, storage, volid, filepath,
+            resource.proxmox_node,
+            storage,
+            volid,
+            filepath,
         )
         return {"files": files}
     except Exception as e:
@@ -793,9 +794,7 @@ async def get_pruning_policy(
     _admin: User = Depends(require_admin),
 ):
     """Get admin backup pruning policy."""
-    result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == "backup_pruning_policy")
-    )
+    result = await db.execute(select(SystemSetting).where(SystemSetting.key == "backup_pruning_policy"))
     setting = result.scalar_one_or_none()
     if setting:
         return _json.loads(setting.value)
@@ -809,9 +808,7 @@ async def set_pruning_policy(
     admin: User = Depends(require_admin),
 ):
     """Set admin backup pruning policy."""
-    result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == "backup_pruning_policy")
-    )
+    result = await db.execute(select(SystemSetting).where(SystemSetting.key == "backup_pruning_policy"))
     setting = result.scalar_one_or_none()
     value = _json.dumps(body.model_dump())
     if setting:
@@ -910,20 +907,22 @@ async def admin_list_all_backups(
                             matched_resource = r
                             break
 
-                    backups.append({
-                        "volid": volid,
-                        "size": item.get("size", 0),
-                        "ctime": item.get("ctime", 0),
-                        "format": item.get("format", "pbs" if is_pbs else ""),
-                        "storage": s["storage"],
-                        "notes": notes,
-                        "pbs": is_pbs,
-                        "owner_id": owner_id,
-                        "owner_name": owner_name,
-                        "resource_id": str(matched_resource.id) if matched_resource else None,
-                        "resource_name": matched_resource.display_name if matched_resource else None,
-                        "node": s.get("node") or (matched_resource.proxmox_node if matched_resource else None),
-                    })
+                    backups.append(
+                        {
+                            "volid": volid,
+                            "size": item.get("size", 0),
+                            "ctime": item.get("ctime", 0),
+                            "format": item.get("format", "pbs" if is_pbs else ""),
+                            "storage": s["storage"],
+                            "notes": notes,
+                            "pbs": is_pbs,
+                            "owner_id": owner_id,
+                            "owner_name": owner_name,
+                            "resource_id": str(matched_resource.id) if matched_resource else None,
+                            "resource_name": matched_resource.display_name if matched_resource else None,
+                            "node": s.get("node") or (matched_resource.proxmox_node if matched_resource else None),
+                        }
+                    )
             except Exception:
                 pass
     except Exception:

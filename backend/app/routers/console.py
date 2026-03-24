@@ -31,9 +31,7 @@ async def get_vnc_console(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        ticket_data = proxmox_client.get_vnc_ticket(
-            resource.proxmox_node, resource.proxmox_vmid, vmtype
-        )
+        ticket_data = proxmox_client.get_vnc_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype)
         return {
             "type": "vnc",
             "ticket": ticket_data.get("ticket"),
@@ -57,9 +55,7 @@ async def get_terminal_console(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        ticket_data = proxmox_client.get_terminal_proxy(
-            resource.proxmox_node, resource.proxmox_vmid, vmtype
-        )
+        ticket_data = proxmox_client.get_terminal_proxy(resource.proxmox_node, resource.proxmox_vmid, vmtype)
         return {
             "type": "terminal",
             "ticket": ticket_data.get("ticket"),
@@ -83,9 +79,7 @@ async def get_spice_console(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        ticket_data = proxmox_client.get_spice_ticket(
-            resource.proxmox_node, resource.proxmox_vmid, vmtype
-        )
+        ticket_data = proxmox_client.get_spice_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype)
         return {
             "type": "spice",
             "ticket": ticket_data.get("ticket"),

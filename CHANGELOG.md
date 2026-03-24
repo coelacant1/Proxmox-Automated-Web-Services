@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.6 - 2026-03-24
+
+### Fixed
+
+- **Backend lint (ruff)** - Fixed `ReviewBody` and `TierRequestBody` class definitions used before declaration in admin_tiers.py; renamed ambiguous `l` variables; fixed `== True` comparisons to `.is_(True)` for SQLAlchemy; moved misplaced import in compute.py; resolved 32 line-too-long violations; excluded alembic migrations from import sorting rules
+- **Backend format** - Applied `ruff format` across 73 files for consistent style
+- **Frontend lint (ESLint)** - Fixed empty catch blocks in InstanceDetail.tsx causing lint errors
+
 ## 0.2.5 - 2026-03-24
 
 ### Added

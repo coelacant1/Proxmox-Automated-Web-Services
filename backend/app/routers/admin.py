@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from datetime import UTC
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -12,10 +13,22 @@ from app.core.database import get_db
 from app.core.deps import require_admin
 from app.core.pagination import PaginatedParams, PaginatedResponse
 from app.core.security import create_access_token
-from app.models.models import AuditLog, Backup, IPReservation, Resource, StorageBucket, Subnet, User, UserQuota, VMIDPool, Volume, VPC
-from app.services.sdn_service import sdn_service, VXLAN_TAG_MIN, VXLAN_TAG_MAX
-from app.schemas.schemas import QuotaRead, ResourceRead, UserRead
+from app.models.models import (
+    VPC,
+    AuditLog,
+    Backup,
+    IPReservation,
+    Resource,
+    StorageBucket,
+    Subnet,
+    User,
+    UserQuota,
+    VMIDPool,
+    Volume,
+)
+from app.schemas.schemas import QuotaRead, UserRead
 from app.services.proxmox_client import proxmox_client
+from app.services.sdn_service import VXLAN_TAG_MAX, VXLAN_TAG_MIN, sdn_service
 
 router = APIRouter(prefix="/api/admin/users", tags=["admin"])
 
@@ -217,18 +230,20 @@ async def get_top_users(
         )
         login_count = login_result.scalar() or 0
 
-        users_out.append({
-            "id": str(user.id),
-            "username": user.username,
-            "email": user.email,
-            "role": user.role,
-            "is_active": user.is_active,
-            "auth_provider": user.auth_provider,
-            "created_at": str(user.created_at),
-            "resource_count": rcount or 0,
-            "type_counts": type_counts,
-            "login_count_30d": login_count,
-        })
+        users_out.append(
+            {
+                "id": str(user.id),
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "is_active": user.is_active,
+                "auth_provider": user.auth_provider,
+                "created_at": str(user.created_at),
+                "resource_count": rcount or 0,
+                "type_counts": type_counts,
+                "login_count_30d": login_count,
+            }
+        )
     return users_out
 
 
@@ -272,8 +287,7 @@ async def get_user_stats(
 
     # Volume count and total size
     vol_result = await db.execute(
-        select(func.count(Volume.id), func.coalesce(func.sum(Volume.size_gib), 0))
-        .where(Volume.owner_id == uid)
+        select(func.count(Volume.id), func.coalesce(func.sum(Volume.size_gib), 0)).where(Volume.owner_id == uid)
     )
     vol_count, vol_size = vol_result.one()
 
@@ -291,10 +305,7 @@ async def get_user_stats(
 
     # Recent activity (last 20 audit entries)
     activity_result = await db.execute(
-        select(AuditLog)
-        .where(AuditLog.user_id == uid)
-        .order_by(AuditLog.created_at.desc())
-        .limit(20)
+        select(AuditLog).where(AuditLog.user_id == uid).order_by(AuditLog.created_at.desc()).limit(20)
     )
     activity = [
         {
@@ -379,12 +390,10 @@ async def get_user_audit_log(
 
     total = (await db.execute(count_q)).scalar() or 0
     rows = (
-        await db.execute(
-            q.order_by(AuditLog.created_at.desc())
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-        )
-    ).scalars().all()
+        (await db.execute(q.order_by(AuditLog.created_at.desc()).offset((page - 1) * per_page).limit(per_page)))
+        .scalars()
+        .all()
+    )
 
     return {
         "items": [
@@ -478,7 +487,7 @@ async def transfer_resource(
 
     # Update Proxmox pools
     if resource.proxmox_vmid:
-        from app.services.pool_service import ensure_user_pool, add_resource_to_pool, cleanup_user_pool
+        from app.services.pool_service import add_resource_to_pool, cleanup_user_pool, ensure_user_pool
 
         # Remove from source pool
         if source_user:
@@ -502,7 +511,14 @@ async def transfer_resource(
     # Re-stamp PAWS metadata with new owner info
     if resource.proxmox_vmid and resource.proxmox_node:
         from app.routers.compute import _apply_paws_metadata
-        _apply_paws_metadata(resource.proxmox_node, resource.proxmox_vmid, resource.resource_type, target_user, resource)
+
+        _apply_paws_metadata(
+            resource.proxmox_node,
+            resource.proxmox_vmid,
+            resource.resource_type,
+            target_user,
+            resource,
+        )
 
     return {
         "status": "transferred",
@@ -574,7 +590,8 @@ async def import_unmanaged_resource(
     await db.commit()
 
     # Pool assignment
-    from app.services.pool_service import ensure_user_pool, add_resource_to_pool
+    from app.services.pool_service import add_resource_to_pool, ensure_user_pool
+
     try:
         await ensure_user_pool(db, target_user)
         await add_resource_to_pool(db, target_user, body.vmid)
@@ -583,6 +600,7 @@ async def import_unmanaged_resource(
 
     # Stamp PAWS ownership tags and notes on the Proxmox resource
     from app.routers.compute import _apply_paws_metadata
+
     _apply_paws_metadata(node, body.vmid, resource_type, target_user, resource)
 
     return {
@@ -601,9 +619,7 @@ async def list_unmanaged_vms(
     _: User = Depends(require_admin),
 ):
     """List VMs/containers on Proxmox that aren't managed by PAWS."""
-    managed_result = await db.execute(
-        select(Resource.proxmox_vmid).where(Resource.proxmox_vmid.isnot(None))
-    )
+    managed_result = await db.execute(select(Resource.proxmox_vmid).where(Resource.proxmox_vmid.isnot(None)))
     managed_vmids = {v for v in managed_result.scalars().all()}
 
     try:
@@ -615,15 +631,17 @@ async def list_unmanaged_vms(
     for r in cluster_resources:
         vmid = r.get("vmid")
         if vmid and vmid not in managed_vmids and not r.get("template"):
-            unmanaged.append({
-                "vmid": vmid,
-                "name": r.get("name", f"VM {vmid}"),
-                "type": "lxc" if r.get("type") == "lxc" else "vm",
-                "node": r.get("node"),
-                "status": r.get("status", "unknown"),
-                "maxcpu": r.get("maxcpu", 0),
-                "maxmem": r.get("maxmem", 0),
-            })
+            unmanaged.append(
+                {
+                    "vmid": vmid,
+                    "name": r.get("name", f"VM {vmid}"),
+                    "type": "lxc" if r.get("type") == "lxc" else "vm",
+                    "node": r.get("node"),
+                    "status": r.get("status", "unknown"),
+                    "maxcpu": r.get("maxcpu", 0),
+                    "maxmem": r.get("maxmem", 0),
+                }
+            )
     return unmanaged
 
 
@@ -636,9 +654,7 @@ async def remove_resource_from_user(
 ):
     """Unlink a resource from a user (remove from PAWS tracking without destroying on Proxmox)."""
     uid = uuid.UUID(user_id)
-    result = await db.execute(
-        select(Resource).where(Resource.id == uuid.UUID(resource_id), Resource.owner_id == uid)
-    )
+    result = await db.execute(select(Resource).where(Resource.id == uuid.UUID(resource_id), Resource.owner_id == uid))
     resource = result.scalar_one_or_none()
     if not resource:
         raise HTTPException(status_code=404, detail="Resource not found for this user")
@@ -680,6 +696,7 @@ async def remove_resource_from_user(
     # Clean up pool if empty
     if user:
         from app.services.pool_service import cleanup_user_pool
+
         try:
             await cleanup_user_pool(db, user)
         except Exception:
@@ -827,14 +844,16 @@ async def update_resource_lifecycle(
         if val is None:
             resource.last_accessed_at = None
         else:
-            from datetime import datetime as dt, timezone
+            from datetime import datetime as dt
+
             try:
                 resource.last_accessed_at = dt.fromisoformat(val.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
-                resource.last_accessed_at = dt.now(timezone.utc)
+                resource.last_accessed_at = dt.now(UTC)
     else:
-        from datetime import datetime as dt, timezone
-        resource.last_accessed_at = dt.now(timezone.utc)
+        from datetime import datetime as dt
+
+        resource.last_accessed_at = dt.now(UTC)
 
     await db.commit()
     await db.refresh(resource)
@@ -861,6 +880,7 @@ async def delete_user(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     from app.services.user_cleanup import purge_user
+
     summary = await purge_user(db, uid)
     return {"detail": "User and all resources purged", "cleanup": summary}
 
@@ -890,9 +910,7 @@ async def sdn_overview(
     total_vpcs_result = await db.execute(select(func.count(VPC.id)))
     total_vpcs = total_vpcs_result.scalar() or 0
 
-    used_vnis_result = await db.execute(
-        select(func.count(VPC.id)).where(VPC.vxlan_tag.isnot(None))
-    )
+    used_vnis_result = await db.execute(select(func.count(VPC.id)).where(VPC.vxlan_tag.isnot(None)))
     used_vnis = used_vnis_result.scalar() or 0
 
     return {
@@ -912,9 +930,7 @@ async def sdn_networks(
 ):
     """List all user VPCs with owner info and subnet counts."""
     subnet_count_sq = (
-        select(Subnet.vpc_id, func.count(Subnet.id).label("subnet_count"))
-        .group_by(Subnet.vpc_id)
-        .subquery()
+        select(Subnet.vpc_id, func.count(Subnet.id).label("subnet_count")).group_by(Subnet.vpc_id).subquery()
     )
 
     stmt = (
@@ -928,18 +944,20 @@ async def sdn_networks(
 
     networks = []
     for vpc, username, email, subnet_count in rows:
-        networks.append({
-            "id": str(vpc.id),
-            "name": vpc.name,
-            "proxmox_vnet": vpc.proxmox_vnet,
-            "vxlan_tag": vpc.vxlan_tag,
-            "status": vpc.status,
-            "cidr": vpc.cidr,
-            "owner_username": username,
-            "owner_email": email,
-            "subnet_count": subnet_count or 0,
-            "created_at": vpc.created_at.isoformat() if vpc.created_at else None,
-        })
+        networks.append(
+            {
+                "id": str(vpc.id),
+                "name": vpc.name,
+                "proxmox_vnet": vpc.proxmox_vnet,
+                "vxlan_tag": vpc.vxlan_tag,
+                "status": vpc.status,
+                "cidr": vpc.cidr,
+                "owner_username": username,
+                "owner_email": email,
+                "subnet_count": subnet_count or 0,
+                "created_at": vpc.created_at.isoformat() if vpc.created_at else None,
+            }
+        )
 
     return networks
 
@@ -955,9 +973,7 @@ async def sdn_force_delete_network(
     result = await db.execute(select(VPC).where(VPC.id == uid))
     vpc = result.scalar_one_or_none()
     if not vpc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found")
 
     # Attempt Proxmox cleanup; do not let failures block DB cleanup
     proxmox_error = None
@@ -971,12 +987,8 @@ async def sdn_force_delete_network(
     subnet_result = await db.execute(select(Subnet).where(Subnet.vpc_id == uid))
     subnets = subnet_result.scalars().all()
     for subnet in subnets:
-        await db.execute(
-            select(IPReservation).where(IPReservation.subnet_id == subnet.id)
-        )
-        ip_del = await db.execute(
-            select(IPReservation).where(IPReservation.subnet_id == subnet.id)
-        )
+        await db.execute(select(IPReservation).where(IPReservation.subnet_id == subnet.id))
+        ip_del = await db.execute(select(IPReservation).where(IPReservation.subnet_id == subnet.id))
         for ip in ip_del.scalars().all():
             await db.delete(ip)
         await db.delete(subnet)

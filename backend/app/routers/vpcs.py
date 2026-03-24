@@ -15,14 +15,23 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.models.models import (
-    VPC, IPReservation, Resource, ResourceSecurityGroup, SecurityGroup,
-    SecurityGroupRule, Subnet, SystemSetting, User, UserQuota, UserTier,
+    VPC,
+    IPReservation,
+    Resource,
+    ResourceSecurityGroup,
+    SecurityGroup,
+    SecurityGroupRule,
+    Subnet,
+    SystemSetting,
+    User,
+    UserQuota,
+    UserTier,
 )
-from app.services.proxmox_client import proxmox_client
 from app.schemas.schemas import SubnetCreate, SubnetRead, VPCCreate, VPCRead
 from app.services.audit_service import log_action
 from app.services.group_access import check_group_access
 from app.services.ipam_service import cidr_pool, ipam_service
+from app.services.proxmox_client import proxmox_client
 from app.services.sdn_service import sdn_service
 
 logger = logging.getLogger(__name__)
@@ -35,10 +44,20 @@ router = APIRouter(prefix="/api/vpcs", tags=["vpcs"])
 # ---------------------------------------------------------------------------
 
 _BOGON_RANGES = [
-    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
-    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
-    "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
-    "224.0.0.0/4", "240.0.0.0/4",
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
 ]
 
 
@@ -60,12 +79,16 @@ async def _ensure_published_sg(
 
     # Load upstream IPs from system settings
     from app.services.firewall_profile import FirewallProfileService
+
     upstream_ips = await FirewallProfileService.get_upstream_ips_async(db)
 
     sg = SecurityGroup(
         owner_id=owner_id,
         name=sg_name,
-        description=f"Auto-managed firewall for published network '{vpc_name}'. Blocks bogon/RFC1918 traffic except own subnet and upstream proxies.",
+        description=(
+            f"Auto-managed firewall for published network '{vpc_name}'."
+            " Blocks bogon/RFC1918 traffic except own subnet and upstream proxies."
+        ),
     )
     db.add(sg)
     await db.flush()
@@ -74,55 +97,96 @@ async def _ensure_published_sg(
 
     # 1. Allow own subnet
     for direction in ("ingress", "egress"):
-        rules.append(SecurityGroupRule(
-            security_group_id=sg.id, direction=direction, protocol="tcp",
-            port_from=None, port_to=None, cidr=vpc_cidr,
-            description=f"Allow {direction} from own subnet",
-        ))
-        rules.append(SecurityGroupRule(
-            security_group_id=sg.id, direction=direction, protocol="udp",
-            port_from=None, port_to=None, cidr=vpc_cidr,
-            description=f"Allow {direction} from own subnet",
-        ))
-        rules.append(SecurityGroupRule(
-            security_group_id=sg.id, direction=direction, protocol="icmp",
-            port_from=None, port_to=None, cidr=vpc_cidr,
-            description=f"Allow {direction} from own subnet",
-        ))
+        rules.append(
+            SecurityGroupRule(
+                security_group_id=sg.id,
+                direction=direction,
+                protocol="tcp",
+                port_from=None,
+                port_to=None,
+                cidr=vpc_cidr,
+                description=f"Allow {direction} from own subnet",
+            )
+        )
+        rules.append(
+            SecurityGroupRule(
+                security_group_id=sg.id,
+                direction=direction,
+                protocol="udp",
+                port_from=None,
+                port_to=None,
+                cidr=vpc_cidr,
+                description=f"Allow {direction} from own subnet",
+            )
+        )
+        rules.append(
+            SecurityGroupRule(
+                security_group_id=sg.id,
+                direction=direction,
+                protocol="icmp",
+                port_from=None,
+                port_to=None,
+                cidr=vpc_cidr,
+                description=f"Allow {direction} from own subnet",
+            )
+        )
 
     # 2. Allow upstream proxy IPs
     for ip in upstream_ips:
         for direction in ("ingress", "egress"):
-            rules.append(SecurityGroupRule(
-                security_group_id=sg.id, direction=direction, protocol="tcp",
-                port_from=None, port_to=None, cidr=ip if "/" in ip else f"{ip}/32",
-                description=f"Allow upstream proxy {ip}",
-            ))
+            rules.append(
+                SecurityGroupRule(
+                    security_group_id=sg.id,
+                    direction=direction,
+                    protocol="tcp",
+                    port_from=None,
+                    port_to=None,
+                    cidr=ip if "/" in ip else f"{ip}/32",
+                    description=f"Allow upstream proxy {ip}",
+                )
+            )
 
     # 3. Block bogon ranges
     for bogon in _BOGON_RANGES:
         for direction in ("ingress", "egress"):
-            rules.append(SecurityGroupRule(
-                security_group_id=sg.id, direction=direction, protocol="tcp",
-                port_from=None, port_to=None, cidr=bogon,
-                description=f"Block bogon {bogon}",
-            ))
-            rules.append(SecurityGroupRule(
-                security_group_id=sg.id, direction=direction, protocol="udp",
-                port_from=None, port_to=None, cidr=bogon,
-                description=f"Block bogon {bogon}",
-            ))
+            rules.append(
+                SecurityGroupRule(
+                    security_group_id=sg.id,
+                    direction=direction,
+                    protocol="tcp",
+                    port_from=None,
+                    port_to=None,
+                    cidr=bogon,
+                    description=f"Block bogon {bogon}",
+                )
+            )
+            rules.append(
+                SecurityGroupRule(
+                    security_group_id=sg.id,
+                    direction=direction,
+                    protocol="udp",
+                    port_from=None,
+                    port_to=None,
+                    cidr=bogon,
+                    description=f"Block bogon {bogon}",
+                )
+            )
 
     for r in rules:
         db.add(r)
 
     return sg
+
+
 # Helpers
 # ---------------------------------------------------------------------------
 
 
 async def _get_vpc(
-    db: AsyncSession, user_id: _uuid.UUID, vpc_id: str, min_perm: str = "read",
+    db: AsyncSession,
+    user_id: _uuid.UUID,
+    vpc_id: str,
+    min_perm: str = "read",
 ) -> VPC:
     """Get a VPC by ownership or group share."""
     vid = _uuid.UUID(vpc_id)
@@ -151,10 +215,7 @@ async def list_vpcs(
     user: User = Depends(get_current_active_user),
 ):
     result = await db.execute(
-        select(VPC)
-        .where(VPC.owner_id == user.id)
-        .options(selectinload(VPC.subnets))
-        .order_by(VPC.created_at.desc())
+        select(VPC).where(VPC.owner_id == user.id).options(selectinload(VPC.subnets)).order_by(VPC.created_at.desc())
     )
     return list(result.scalars().all())
 
@@ -174,9 +235,7 @@ async def create_vpc(
     quota_row = await db.execute(select(UserQuota).where(UserQuota.user_id == user.id))
     quota = quota_row.scalar_one_or_none()
     if quota:
-        count_row = await db.execute(
-            select(func.count()).select_from(VPC).where(VPC.owner_id == user.id)
-        )
+        count_row = await db.execute(select(func.count()).select_from(VPC).where(VPC.owner_id == user.id))
         vpc_count = count_row.scalar() or 0
         if vpc_count >= quota.max_networks:
             raise HTTPException(
@@ -231,13 +290,15 @@ async def create_vpc(
     await db.commit()
 
     await log_action(
-        db, user.id, "vpc.create", resource_type="vpc", resource_id=vpc.id,
+        db,
+        user.id,
+        "vpc.create",
+        resource_type="vpc",
+        resource_id=vpc.id,
         details={"name": body.name, "cidr": cidr, "vxlan_tag": tag, "vnet": vnet_name},
     )
 
-    result = await db.execute(
-        select(VPC).where(VPC.id == vpc.id).options(selectinload(VPC.subnets))
-    )
+    result = await db.execute(select(VPC).where(VPC.id == vpc.id).options(selectinload(VPC.subnets)))
     return result.scalar_one()
 
 
@@ -284,7 +345,11 @@ async def delete_vpc(
             logger.exception("Failed to delete Proxmox VNet %s", vpc.proxmox_vnet)
 
     await log_action(
-        db, user.id, "vpc.delete", resource_type="vpc", resource_id=vpc.id,
+        db,
+        user.id,
+        "vpc.delete",
+        resource_type="vpc",
+        resource_id=vpc.id,
         details={"name": vpc.name},
     )
 
@@ -397,15 +462,22 @@ async def update_vpc_mode(
             vmtype = "lxc" if r.resource_type == "lxc" else "qemu"
             FirewallProfileService.enable_firewall(r.proxmox_node, r.proxmox_vmid, vmtype)
             FirewallProfileService.apply_network_mode(
-                r.proxmox_node, r.proxmox_vmid, vmtype,
-                body.network_mode, subnet_cidr,
-                lan_ranges=lan_ranges, upstream_ips=upstream_ips,
+                r.proxmox_node,
+                r.proxmox_vmid,
+                vmtype,
+                body.network_mode,
+                subnet_cidr,
+                lan_ranges=lan_ranges,
+                upstream_ips=upstream_ips,
             )
             updated += 1
         except Exception as exc:
             logger.warning(
                 "Failed to apply firewall for %s on %s/%s: %s",
-                body.network_mode, r.proxmox_node, r.proxmox_vmid, exc,
+                body.network_mode,
+                r.proxmox_node,
+                r.proxmox_vmid,
+                exc,
             )
             errors.append(str(r.display_name))
 
@@ -418,9 +490,12 @@ async def update_vpc_mode(
                 )
             )
             if not existing_link.scalar_one_or_none():
-                db.add(ResourceSecurityGroup(
-                    resource_id=r.id, security_group_id=vpc.security_group_id,
-                ))
+                db.add(
+                    ResourceSecurityGroup(
+                        resource_id=r.id,
+                        security_group_id=vpc.security_group_id,
+                    )
+                )
         elif body.network_mode != "published" and vpc.security_group_id is None:
             # Detach any previously auto-linked published SGs from prior mode
             pass  # SG was unlinked from VPC, but ResourceSecurityGroup persists for safety
@@ -428,7 +503,11 @@ async def update_vpc_mode(
     await db.commit()
 
     await log_action(
-        db, user.id, "vpc.mode_change", resource_type="vpc", resource_id=vpc.id,
+        db,
+        user.id,
+        "vpc.mode_change",
+        resource_type="vpc",
+        resource_id=vpc.id,
         details={
             "name": vpc.name,
             "network_mode": body.network_mode,
@@ -475,9 +554,7 @@ async def create_subnet(
     net = ipaddress.ip_network(cidr, strict=False)
     requested_prefix = net.prefixlen
 
-    tier_row = await db.execute(
-        select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user.id)
-    )
+    tier_row = await db.execute(select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user.id))
     user_tier = tier_row.scalar_one_or_none()
     tier_max = user_tier.max_subnet_prefix if user_tier else None
 
@@ -530,7 +607,11 @@ async def create_subnet(
     await db.refresh(subnet)
 
     await log_action(
-        db, user.id, "subnet.create", resource_type="subnet", resource_id=subnet.id,
+        db,
+        user.id,
+        "subnet.create",
+        resource_type="subnet",
+        resource_id=subnet.id,
         details={"vpc_id": vpc_id, "name": body.name, "cidr": cidr},
     )
 
@@ -546,9 +627,7 @@ async def delete_subnet(
 ):
     vpc = await _get_vpc(db, user.id, vpc_id, min_perm="admin")
 
-    subnet_result = await db.execute(
-        select(Subnet).where(Subnet.id == _uuid.UUID(subnet_id), Subnet.vpc_id == vpc.id)
-    )
+    subnet_result = await db.execute(select(Subnet).where(Subnet.id == _uuid.UUID(subnet_id), Subnet.vpc_id == vpc.id))
     subnet = subnet_result.scalar_one_or_none()
     if not subnet:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subnet not found")
@@ -573,11 +652,16 @@ async def delete_subnet(
         except Exception:
             logger.exception(
                 "Failed to delete Proxmox subnet %s on VNet %s",
-                subnet.proxmox_subnet_id, vpc.proxmox_vnet,
+                subnet.proxmox_subnet_id,
+                vpc.proxmox_vnet,
             )
 
     await log_action(
-        db, user.id, "subnet.delete", resource_type="subnet", resource_id=subnet.id,
+        db,
+        user.id,
+        "subnet.delete",
+        resource_type="subnet",
+        resource_id=subnet.id,
         details={"vpc_id": vpc_id, "name": subnet.name, "cidr": subnet.cidr},
     )
 
@@ -597,26 +681,18 @@ async def list_vpc_instances(
     user: User = Depends(get_current_active_user),
 ):
     """List resources attached to a VPC with allocated and live IP addresses."""
-    vpc_result = await db.execute(
-        select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id)
-    )
+    vpc_result = await db.execute(select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id))
     if not vpc_result.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VPC not found")
 
-    result = await db.execute(
-        select(Resource).where(Resource.owner_id == user.id)
-    )
+    result = await db.execute(select(Resource).where(Resource.owner_id == user.id))
 
     # Pre-load all IP reservations for this VPC's subnets
-    subnet_result = await db.execute(
-        select(Subnet).where(Subnet.vpc_id == _uuid.UUID(vpc_id))
-    )
+    subnet_result = await db.execute(select(Subnet).where(Subnet.vpc_id == _uuid.UUID(vpc_id)))
     subnet_ids = [s.id for s in subnet_result.scalars().all()]
     reservations_by_resource: dict[str, list[str]] = {}
     if subnet_ids:
-        res_result = await db.execute(
-            select(IPReservation).where(IPReservation.subnet_id.in_(subnet_ids))
-        )
+        res_result = await db.execute(select(IPReservation).where(IPReservation.subnet_id.in_(subnet_ids)))
         for res in res_result.scalars().all():
             if res.resource_id:
                 rid = str(res.resource_id)
@@ -639,18 +715,14 @@ async def list_vpc_instances(
             if r.proxmox_node and r.proxmox_vmid:
                 try:
                     if r.resource_type == "qemu":
-                        ifaces = proxmox_client.get_agent_network_interfaces(
-                            r.proxmox_node, r.proxmox_vmid
-                        )
+                        ifaces = proxmox_client.get_agent_network_interfaces(r.proxmox_node, r.proxmox_vmid)
                         for iface in ifaces:
                             for addr in iface.get("ip-addresses", []):
                                 ip = addr.get("ip-address", "")
                                 if addr.get("ip-address-type") == "ipv4" and not ip.startswith("127."):
                                     live_ips.append(ip)
                     elif r.resource_type == "lxc":
-                        config = proxmox_client.get_container_config(
-                            r.proxmox_node, r.proxmox_vmid
-                        )
+                        config = proxmox_client.get_container_config(r.proxmox_node, r.proxmox_vmid)
                         for key, val in config.items():
                             if key.startswith("net") and key[3:].isdigit() and isinstance(val, str):
                                 for part in val.split(","):
@@ -693,17 +765,13 @@ async def change_instance_ip(
     user: User = Depends(get_current_active_user),
 ):
     """Change the static IP of an instance within its VPC subnet range."""
-    vpc_result = await db.execute(
-        select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id)
-    )
+    vpc_result = await db.execute(select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id))
     vpc = vpc_result.scalar_one_or_none()
     if not vpc:
         raise HTTPException(status_code=404, detail="VPC not found")
 
     resource_result = await db.execute(
-        select(Resource).where(
-            Resource.id == _uuid.UUID(resource_id), Resource.owner_id == user.id
-        )
+        select(Resource).where(Resource.id == _uuid.UUID(resource_id), Resource.owner_id == user.id)
     )
     resource = resource_result.scalar_one_or_none()
     if not resource:
@@ -721,7 +789,8 @@ async def change_instance_ip(
     # Find the subnet the new IP belongs to
     new_ip_obj = ipaddress.ip_address(body.new_ip)
     subnet_result = await db.execute(
-        select(Subnet).where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
+        select(Subnet)
+        .where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
         .options(selectinload(Subnet.ip_reservations))
     )
     target_subnet = None
@@ -747,12 +816,11 @@ async def change_instance_ip(
         raise HTTPException(status_code=409, detail="IP address already in use")
 
     # Release old reservations for this resource in any subnet of this VPC
-    vpc_subnet_ids_result = await db.execute(
-        select(Subnet.id).where(Subnet.vpc_id == vpc.id)
-    )
+    vpc_subnet_ids_result = await db.execute(select(Subnet.id).where(Subnet.vpc_id == vpc.id))
     vpc_subnet_ids = [s for s in vpc_subnet_ids_result.scalars().all()]
     if vpc_subnet_ids:
         from sqlalchemy import delete as sa_delete
+
         await db.execute(
             sa_delete(IPReservation).where(
                 IPReservation.resource_id == resource.id,
@@ -761,34 +829,44 @@ async def change_instance_ip(
         )
 
     # Create new reservation
-    db.add(IPReservation(
-        subnet_id=target_subnet.id,
-        ip_address=body.new_ip,
-        resource_id=resource.id,
-        label=resource.display_name,
-        is_gateway=False,
-        owner_id=user.id,
-    ))
+    db.add(
+        IPReservation(
+            subnet_id=target_subnet.id,
+            ip_address=body.new_ip,
+            resource_id=resource.id,
+            label=resource.display_name,
+            is_gateway=False,
+            owner_id=user.id,
+        )
+    )
 
     # Apply to Proxmox via unified helpers from compute module
     prefix_len = network.prefixlen
     dns_server = target_subnet.dns_server or "1.1.1.1"
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        from app.routers.compute import _build_net0, _apply_nic
+        from app.routers.compute import _apply_nic, _build_net0
+
         net0_val = _build_net0(
-            vmtype, vpc.proxmox_vnet,
-            ip=body.new_ip, prefix_len=prefix_len, gateway=gateway,
+            vmtype,
+            vpc.proxmox_vnet,
+            ip=body.new_ip,
+            prefix_len=prefix_len,
+            gateway=gateway,
         )
         _apply_nic(
-            resource.proxmox_node, resource.proxmox_vmid, vmtype, net0_val,
-            ip=body.new_ip, prefix_len=prefix_len, gateway=gateway,
+            resource.proxmox_node,
+            resource.proxmox_vmid,
+            vmtype,
+            net0_val,
+            ip=body.new_ip,
+            prefix_len=prefix_len,
+            gateway=gateway,
             dns_server=dns_server,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to apply IP change: {e}")
 
     await db.commit()
-    await log_action(db, user.id, "ip_change", resource_id=str(resource.id),
-                     details=f"IP changed to {body.new_ip}")
+    await log_action(db, user.id, "ip_change", resource_id=str(resource.id), details=f"IP changed to {body.new_ip}")
     return {"status": "ok", "ip_address": body.new_ip, "subnet": target_subnet.cidr}

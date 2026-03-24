@@ -15,15 +15,14 @@ from app.routers import (
     admin,
     admin_audit,
     admin_groups,
-    admin_quota_requests,
     admin_ha,
+    admin_quota_requests,
     admin_settings,
     admin_templates,
     admin_tiers,
     api_keys,
     auth,
     backups,
-
     bug_reports,
     cluster,
     compute,
@@ -38,7 +37,6 @@ from app.routers import (
     instance_types,
     lifecycle_policies,
     logs,
-
     migration,
     monitoring,
     networking,
@@ -54,7 +52,6 @@ from app.routers import (
     storage,
     storage_pools,
     system_rules,
-
     template_requests,
     templates,
     volumes,
@@ -70,13 +67,12 @@ def validate_security_settings() -> None:
         if not settings.debug:
             logger.critical(
                 "FATAL: JWT secret_key is set to the default value. "
-                "Generate a key with: python -c \"import secrets; print(secrets.token_hex(32))\" "
+                'Generate a key with: python -c "import secrets; print(secrets.token_hex(32))" '
                 "and set PAWS_SECRET_KEY in your .env file."
             )
             sys.exit(1)
         logger.warning(
-            "WARNING: JWT secret_key is set to the default value. "
-            "Set PAWS_SECRET_KEY in your .env before deploying."
+            "WARNING: JWT secret_key is set to the default value. Set PAWS_SECRET_KEY in your .env before deploying."
         )
 
     if settings.has_insecure_admin_password:
@@ -182,7 +178,7 @@ SYSTEM_SETTING_DEFAULTS = {
     "storage_pools": ('["local-lvm"]', "Available storage pools (JSON array of pool names)"),
     "default_storage_pool": ("local-lvm", "Default storage pool for new volumes/instances"),
     # Backup storage configuration
-    "backup_storages": ('[]', "Proxmox storages enabled for user backups (JSON array)"),
+    "backup_storages": ("[]", "Proxmox storages enabled for user backups (JSON array)"),
     # VMID range
     "vmid_range_start": ("1000", "Starting VMID for new VMs/containers"),
     "vmid_range_end": ("999999", "Ending VMID for new VMs/containers"),
@@ -233,10 +229,17 @@ async def seed_instance_types() -> None:
             if result.scalar_one_or_none() is not None:
                 return
             for name, vcpus, ram_mib, disk_gib, category, description, sort_order in DEFAULT_INSTANCE_TYPES:
-                db.add(InstanceType(
-                    name=name, vcpus=vcpus, ram_mib=ram_mib, disk_gib=disk_gib,
-                    category=category, description=description, sort_order=sort_order,
-                ))
+                db.add(
+                    InstanceType(
+                        name=name,
+                        vcpus=vcpus,
+                        ram_mib=ram_mib,
+                        disk_gib=disk_gib,
+                        category=category,
+                        description=description,
+                        sort_order=sort_order,
+                    )
+                )
             await db.commit()
             logger.info("Default instance types seeded (%d types).", len(DEFAULT_INSTANCE_TYPES))
     except Exception:

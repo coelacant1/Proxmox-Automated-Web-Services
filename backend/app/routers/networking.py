@@ -5,13 +5,13 @@ import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
-from app.models.models import IPReservation, Resource, Subnet, User, UserQuota, UserTier, VPC
+from app.models.models import VPC, IPReservation, Resource, Subnet, User, UserTier
 from app.schemas.schemas import (
     BandwidthUpdate,
     IPReservationRead,
@@ -327,9 +327,7 @@ async def update_network_mode(
     if not vpc_id:
         raise HTTPException(status_code=400, detail="Instance has no network attached")
 
-    vpc_row = await db.execute(
-        select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id)
-    )
+    vpc_row = await db.execute(select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id))
     vpc = vpc_row.scalar_one_or_none()
     if not vpc:
         raise HTTPException(status_code=404, detail="Network not found")
@@ -357,8 +355,12 @@ async def update_network_mode(
         resource.bandwidth_limit_mbps,
     )
     await log_action(
-        db, user.id, "network_mode_change", resource.resource_type,
-        resource_id=resource.id, details={"mode": body.network_mode},
+        db,
+        user.id,
+        "network_mode_change",
+        resource.resource_type,
+        resource_id=resource.id,
+        details={"mode": body.network_mode},
     )
     return NetworkModeRead(
         network_mode=body.network_mode,
@@ -396,8 +398,12 @@ async def update_bandwidth(
     await db.commit()
 
     await log_action(
-        db, user.id, "bandwidth_change", resource.resource_type,
-        resource_id=resource.id, details={"bandwidth_mbps": effective_bw},
+        db,
+        user.id,
+        "bandwidth_change",
+        resource.resource_type,
+        resource_id=resource.id,
+        details={"bandwidth_mbps": effective_bw},
     )
     return NetworkModeRead(
         network_mode=resource.network_mode or "private",
@@ -422,11 +428,7 @@ async def _get_user_resource(db: AsyncSession, user: User, resource_id: str) -> 
 
 async def _get_user_tier(db: AsyncSession, user_id: _uuid.UUID) -> UserTier | None:
     """Get the user's tier for bandwidth defaults."""
-    result = await db.execute(
-        select(UserTier)
-        .join(User, User.tier_id == UserTier.id)
-        .where(User.id == user_id)
-    )
+    result = await db.execute(select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user_id))
     return result.scalar_one_or_none()
 
 
@@ -445,8 +447,6 @@ async def _get_resource_subnet_cidr(db: AsyncSession, resource: Resource) -> str
     if not vpc_id:
         return None
 
-    result = await db.execute(
-        select(Subnet).join(VPC, Subnet.vpc_id == VPC.id).where(VPC.id == _uuid.UUID(vpc_id))
-    )
+    result = await db.execute(select(Subnet).join(VPC, Subnet.vpc_id == VPC.id).where(VPC.id == _uuid.UUID(vpc_id)))
     subnet = result.scalars().first()
     return subnet.cidr if subnet else None

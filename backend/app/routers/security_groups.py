@@ -296,7 +296,9 @@ async def list_attached_resources(
     sg = await _get_user_sg(db, user.id, sg_id)
 
     result = await db.execute(
-        select(Resource).join(ResourceSecurityGroup).where(
+        select(Resource)
+        .join(ResourceSecurityGroup)
+        .where(
             ResourceSecurityGroup.security_group_id == sg.id,
             Resource.owner_id == user.id,
         )
@@ -317,15 +319,17 @@ async def list_attached_resources(
 
 
 async def _get_user_sg(
-    db: AsyncSession, user_id: uuid.UUID, sg_id: str, min_perm: str = "read",
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    sg_id: str,
+    min_perm: str = "read",
 ) -> SecurityGroup:
     sid = uuid.UUID(sg_id) if isinstance(sg_id, str) else sg_id
-    result = await db.execute(
-        select(SecurityGroup).where(SecurityGroup.id == sid, SecurityGroup.owner_id == user_id)
-    )
+    result = await db.execute(select(SecurityGroup).where(SecurityGroup.id == sid, SecurityGroup.owner_id == user_id))
     sg = result.scalar_one_or_none()
     if not sg:
         from app.services.group_access import check_group_access
+
         res2 = await db.execute(select(SecurityGroup).where(SecurityGroup.id == sid))
         sg = res2.scalar_one_or_none()
         if sg and not await check_group_access(db, user_id, "security_group", sid, min_perm):

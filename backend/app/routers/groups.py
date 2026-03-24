@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_capability
 from app.models.models import (
+    VPC,
     Alarm,
     Backup,
     DNSRecord,
@@ -18,15 +19,14 @@ from app.models.models import (
     GroupResourceShare,
     GroupRole,
     Resource,
-    SSHKeyPair,
     SecurityGroup,
     ServiceEndpoint,
+    SSHKeyPair,
     StorageBucket,
     User,
     UserGroup,
     UserGroupMember,
     Volume,
-    VPC,
 )
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
@@ -120,6 +120,7 @@ async def _get_group_with_access(
 
 # --- Group CRUD ---
 
+
 @router.post("/", status_code=201)
 async def create_group(
     body: GroupCreate,
@@ -144,9 +145,7 @@ async def list_groups(
     user: User = Depends(get_current_active_user),
 ):
     # Groups where user is owner or member
-    member_result = await db.execute(
-        select(UserGroupMember.group_id).where(UserGroupMember.user_id == user.id)
-    )
+    member_result = await db.execute(select(UserGroupMember.group_id).where(UserGroupMember.user_id == user.id))
     group_ids = [r[0] for r in member_result.all()]
     if not group_ids:
         return []
@@ -188,16 +187,12 @@ async def shared_with_me(
     user: User = Depends(get_current_active_user),
 ):
     """All entities shared to the current user through any group."""
-    member_result = await db.execute(
-        select(UserGroupMember.group_id).where(UserGroupMember.user_id == user.id)
-    )
+    member_result = await db.execute(select(UserGroupMember.group_id).where(UserGroupMember.user_id == user.id))
     group_ids = [r[0] for r in member_result.all()]
     if not group_ids:
         return []
 
-    result = await db.execute(
-        select(GroupResourceShare).where(GroupResourceShare.group_id.in_(group_ids))
-    )
+    result = await db.execute(select(GroupResourceShare).where(GroupResourceShare.group_id.in_(group_ids)))
     shares = result.scalars().all()
 
     perm_order = {"admin": 0, "operate": 1, "read": 2}
@@ -219,7 +214,9 @@ async def shared_with_me(
         if cfg:
             entity = await db.get(cfg["model"], uuid.UUID(item["entity_id"]))
             if entity:
-                item["entity_name"] = str(getattr(entity, cfg["name"], None) or f"{cfg['label']} {item['entity_id'][:8]}")
+                item["entity_name"] = str(
+                    getattr(entity, cfg["name"], None) or f"{cfg['label']} {item['entity_id'][:8]}"
+                )
             else:
                 item["entity_name"] = "(deleted)"
         else:
@@ -246,14 +243,16 @@ async def get_group(
 
     members = []
     for m in group.members:
-        members.append({
-            "id": str(m.id),
-            "user_id": str(m.user_id),
-            "username": m.user.username if m.user else None,
-            "email": m.user.email if m.user else None,
-            "role": m.role,
-            "joined_at": m.joined_at.isoformat() if m.joined_at else None,
-        })
+        members.append(
+            {
+                "id": str(m.id),
+                "user_id": str(m.user_id),
+                "username": m.user.username if m.user else None,
+                "email": m.user.email if m.user else None,
+                "role": m.role,
+                "joined_at": m.joined_at.isoformat() if m.joined_at else None,
+            }
+        )
 
     result = _group_dict(group, members=members)
     result["my_role"] = my_role
@@ -294,6 +293,7 @@ async def delete_group(
 
 
 # --- Member management ---
+
 
 @router.post("/{group_id}/members")
 async def add_member(
@@ -387,6 +387,7 @@ async def remove_member(
 
 # --- Resource sharing ---
 
+
 async def _resolve_entity(db: AsyncSession, entity_type: str, entity_id: uuid.UUID) -> tuple[Any, str]:
     """Resolve an entity by type/id. Returns (entity, display_name)."""
     cfg = ENTITY_TYPES.get(entity_type)
@@ -479,9 +480,7 @@ async def list_shared_resources(
 ):
     await _get_group_with_access(group_id, user, db)
 
-    result = await db.execute(
-        select(GroupResourceShare).where(GroupResourceShare.group_id == group_id)
-    )
+    result = await db.execute(select(GroupResourceShare).where(GroupResourceShare.group_id == group_id))
     shares = result.scalars().all()
     out = []
     for s in shares:
@@ -491,16 +490,18 @@ async def list_shared_resources(
             entity = await db.get(cfg["model"], s.entity_id)
             if entity:
                 name = str(getattr(entity, cfg["name"], None) or f"{cfg['label']} {str(s.entity_id)[:8]}")
-        out.append({
-            "id": str(s.id),
-            "entity_type": s.entity_type,
-            "entity_id": str(s.entity_id),
-            "entity_name": name,
-            "entity_label": cfg["label"] if cfg else s.entity_type,
-            "permission": s.permission,
-            "shared_by": str(s.shared_by),
-            "created_at": s.created_at.isoformat() if s.created_at else None,
-        })
+        out.append(
+            {
+                "id": str(s.id),
+                "entity_type": s.entity_type,
+                "entity_id": str(s.entity_id),
+                "entity_name": name,
+                "entity_label": cfg["label"] if cfg else s.entity_type,
+                "permission": s.permission,
+                "shared_by": str(s.shared_by),
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+        )
     return out
 
 
@@ -540,9 +541,7 @@ async def group_dashboard(
     """Return all shared entities with full details, grouped by type."""
     await _get_group_with_access(group_id, user, db)
 
-    result = await db.execute(
-        select(GroupResourceShare).where(GroupResourceShare.group_id == group_id)
-    )
+    result = await db.execute(select(GroupResourceShare).where(GroupResourceShare.group_id == group_id))
     shares = result.scalars().all()
 
     by_type: dict[str, list[dict]] = {}
@@ -552,7 +551,11 @@ async def group_dashboard(
             continue
         entity = await db.get(cfg["model"], s.entity_id)
         name_field = cfg["name"]
-        name = str(getattr(entity, name_field, None) or f"{cfg['label']} {str(s.entity_id)[:8]}") if entity else "(deleted)"
+        name = (
+            str(getattr(entity, name_field, None) or f"{cfg['label']} {str(s.entity_id)[:8]}")
+            if entity
+            else "(deleted)"
+        )
 
         item: dict[str, Any] = {
             "share_id": str(s.id),
@@ -659,12 +662,9 @@ async def revoke_group_token(
 ):
     """Revoke a group API token. Must be group admin or owner."""
     member = await _get_group_with_access(group_id, user, db, min_role=GroupRole.ADMIN)  # noqa: F841
-    result = await db.execute(
-        select(GroupAPIKey).where(GroupAPIKey.id == token_id, GroupAPIKey.group_id == group_id)
-    )
+    result = await db.execute(select(GroupAPIKey).where(GroupAPIKey.id == token_id, GroupAPIKey.group_id == group_id))
     key = result.scalar_one_or_none()
     if not key:
         raise HTTPException(status_code=404, detail="Token not found")
     key.is_active = False
     await db.commit()
-

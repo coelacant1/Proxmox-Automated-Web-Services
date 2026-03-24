@@ -32,12 +32,11 @@ class FirewallProfileService:
         if db_session is not None:
             try:
                 from sqlalchemy import select
+
                 from app.models.models import SystemSetting
 
                 row = db_session.execute(
-                    select(SystemSetting.value).where(
-                        SystemSetting.key == "sdn.lan_ranges"
-                    )
+                    select(SystemSetting.value).where(SystemSetting.key == "sdn.lan_ranges")
                 ).scalar_one_or_none()
                 return FirewallProfileService.get_lan_ranges_from_value(row)
             except Exception:
@@ -49,12 +48,11 @@ class FirewallProfileService:
         """Get upstream proxy IPs from system settings (async)."""
         try:
             from sqlalchemy import select
+
             from app.models.models import SystemSetting
 
             result = await db_session.execute(
-                select(SystemSetting.value).where(
-                    SystemSetting.key == "sdn.upstream_ips"
-                )
+                select(SystemSetting.value).where(SystemSetting.key == "sdn.upstream_ips")
             )
             val = result.scalar_one_or_none()
             if val:
@@ -70,13 +68,10 @@ class FirewallProfileService:
         """Get LAN ranges from system settings (async)."""
         try:
             from sqlalchemy import select
+
             from app.models.models import SystemSetting
 
-            result = await db_session.execute(
-                select(SystemSetting.value).where(
-                    SystemSetting.key == "sdn.lan_ranges"
-                )
-            )
+            result = await db_session.execute(select(SystemSetting.value).where(SystemSetting.key == "sdn.lan_ranges"))
             val = result.scalar_one_or_none()
             return FirewallProfileService.get_lan_ranges_from_value(val)
         except Exception:
@@ -89,9 +84,7 @@ class FirewallProfileService:
         if setting_value:
             try:
                 ranges = json.loads(setting_value)
-                if isinstance(ranges, list) and all(
-                    isinstance(r, str) for r in ranges
-                ):
+                if isinstance(ranges, list) and all(isinstance(r, str) for r in ranges):
                     return ranges
             except (json.JSONDecodeError, TypeError):
                 logger.warning(
@@ -117,9 +110,7 @@ class FirewallProfileService:
         ``proxmox_client.create_firewall_rule(**rule)``.
         """
         if mode not in VALID_MODES:
-            raise ValueError(
-                f"Invalid network mode '{mode}'. Must be one of {VALID_MODES}"
-            )
+            raise ValueError(f"Invalid network mode '{mode}'. Must be one of {VALID_MODES}")
 
         if lan_ranges is None:
             lan_ranges = list(DEFAULT_LAN_RANGES)
@@ -147,7 +138,7 @@ class FirewallProfileService:
                 }
             )
             # Whitelist admin-configured upstream IPs (nginx/Cloudflare proxies)
-            for up_ip in (upstream_ips or []):
+            for up_ip in upstream_ips or []:
                 rules.append(
                     {
                         "type": "in",
@@ -280,21 +271,13 @@ class FirewallProfileService:
         Returns the number of rules applied.
         """
         if mode not in VALID_MODES:
-            raise ValueError(
-                f"Invalid network mode '{mode}'. Must be one of {VALID_MODES}"
-            )
+            raise ValueError(f"Invalid network mode '{mode}'. Must be one of {VALID_MODES}")
 
-        deleted = proxmox_client.clear_firewall_rules_by_comment(
-            node, vmid, vmtype, COMMENT_PREFIX
-        )
+        deleted = proxmox_client.clear_firewall_rules_by_comment(node, vmid, vmtype, COMMENT_PREFIX)
         if deleted:
-            logger.info(
-                "Cleared %d existing PAWS-MODE rules on %s/%s", deleted, node, vmid
-            )
+            logger.info("Cleared %d existing PAWS-MODE rules on %s/%s", deleted, node, vmid)
 
-        rules = FirewallProfileService.get_rules_for_mode(
-            mode, own_subnet_cidr, lan_ranges, upstream_ips=upstream_ips
-        )
+        rules = FirewallProfileService.get_rules_for_mode(mode, own_subnet_cidr, lan_ranges, upstream_ips=upstream_ips)
 
         for rule in rules:
             proxmox_client.create_firewall_rule(node, vmid, vmtype, **rule)
@@ -333,7 +316,12 @@ class FirewallProfileService:
         Equivalent to :meth:`apply_network_mode`.
         """
         return FirewallProfileService.apply_network_mode(
-            node, vmid, vmtype, mode, own_subnet_cidr, lan_ranges,
+            node,
+            vmid,
+            vmtype,
+            mode,
+            own_subnet_cidr,
+            lan_ranges,
             upstream_ips=upstream_ips,
         )
 
@@ -342,9 +330,7 @@ class FirewallProfileService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def apply_bandwidth_limit(
-        node: str, vmid: int, vmtype: str, rate_mbps: int
-    ) -> None:
+    def apply_bandwidth_limit(node: str, vmid: int, vmtype: str, rate_mbps: int) -> None:
         """Set NIC rate limit via Proxmox config (net0 rate parameter).
 
         The Proxmox ``rate`` parameter is in MB/s.
@@ -365,16 +351,12 @@ class FirewallProfileService:
             proxmox_client.update_vm_config(node, vmid, net0=net0_updated)
 
         if rate_mbps:
-            logger.info(
-                "Set bandwidth limit to %d MB/s on %s/%s", rate_mbps, node, vmid
-            )
+            logger.info("Set bandwidth limit to %d MB/s on %s/%s", rate_mbps, node, vmid)
         else:
             logger.info("Removed bandwidth limit on %s/%s", node, vmid)
 
     @staticmethod
-    def get_effective_bandwidth(
-        tier_bandwidth: int | None, resource_bandwidth: int | None
-    ) -> int:
+    def get_effective_bandwidth(tier_bandwidth: int | None, resource_bandwidth: int | None) -> int:
         """Return the effective bandwidth limit in MB/s.
 
         Priority: resource override > tier default > system default (100).

@@ -95,18 +95,25 @@ async def search_logs(
     results: list[dict] = []
 
     # Search audit logs
-    audit_query = select(AuditLog).where(
-        AuditLog.user_id == user.id,
-        AuditLog.action.ilike(f"%{q}%"),
-    ).order_by(AuditLog.created_at.desc()).limit(limit)
+    audit_query = (
+        select(AuditLog)
+        .where(
+            AuditLog.user_id == user.id,
+            AuditLog.action.ilike(f"%{q}%"),
+        )
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+    )
     audit_result = await db.execute(audit_query)
     for log in audit_result.scalars().all():
-        results.append({
-            "type": "audit",
-            "action": log.action,
-            "resource_type": log.resource_type,
-            "created_at": str(log.created_at),
-        })
+        results.append(
+            {
+                "type": "audit",
+                "action": log.action,
+                "resource_type": log.resource_type,
+                "created_at": str(log.created_at),
+            }
+        )
 
     # Search events
     event_query = select(Event).where(Event.message.ilike(f"%{q}%"))
@@ -117,13 +124,15 @@ async def search_logs(
     event_query = event_query.order_by(Event.created_at.desc()).limit(limit)
     event_result = await db.execute(event_query)
     for e in event_result.scalars().all():
-        results.append({
-            "type": "event",
-            "event_type": e.event_type,
-            "source": e.source,
-            "severity": e.severity,
-            "message": e.message,
-            "created_at": str(e.created_at),
-        })
+        results.append(
+            {
+                "type": "event",
+                "event_type": e.event_type,
+                "source": e.source,
+                "severity": e.severity,
+                "message": e.message,
+                "created_at": str(e.created_at),
+            }
+        )
 
     return {"query": q, "total": len(results), "results": results[:limit]}

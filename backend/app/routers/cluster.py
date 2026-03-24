@@ -1,7 +1,7 @@
 """User-facing cluster health endpoint - sanitized, no raw capacity numbers."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -154,9 +154,7 @@ async def admin_cluster_tasks(
     target_nodes = [node] if node else [n["node"] for n in nodes_list if n.get("status") == "online"]
 
     # Build VMID -> PAWS resource/user lookup
-    result = await db.execute(
-        select(Resource).where(Resource.proxmox_vmid.isnot(None))
-    )
+    result = await db.execute(select(Resource).where(Resource.proxmox_vmid.isnot(None)))
     resources = result.scalars().all()
     vmid_map: dict[int, dict] = {}
     owner_ids = set()
@@ -172,9 +170,7 @@ async def admin_cluster_tasks(
     # Pre-fetch user info for all resource owners
     user_map: dict[str, dict] = {}
     if owner_ids:
-        user_result = await db.execute(
-            select(User).where(User.id.in_(owner_ids))
-        )
+        user_result = await db.execute(select(User).where(User.id.in_(owner_ids)))
         for u in user_result.scalars().all():
             user_map[str(u.id)] = {"username": u.username, "email": u.email}
 
@@ -226,21 +222,23 @@ async def admin_cluster_tasks(
         end_ts = t.get("endtime")
         duration = (end_ts - start_ts) if end_ts and start_ts else None
 
-        enriched.append({
-            "upid": t.get("upid", ""),
-            "node": t.get("node", t.get("_source_node", "")),
-            "vmid": task_vmid,
-            "type": task_type,
-            "type_label": _TASK_TYPE_LABELS.get(task_type, task_type),
-            "status": t.get("status", ""),
-            "pve_user": t.get("user", ""),
-            "starttime": start_ts,
-            "endtime": end_ts,
-            "duration_seconds": duration,
-            "start_iso": datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat() if start_ts else None,
-            "end_iso": datetime.fromtimestamp(end_ts, tz=timezone.utc).isoformat() if end_ts else None,
-            "paws": paws_info,
-        })
+        enriched.append(
+            {
+                "upid": t.get("upid", ""),
+                "node": t.get("node", t.get("_source_node", "")),
+                "vmid": task_vmid,
+                "type": task_type,
+                "type_label": _TASK_TYPE_LABELS.get(task_type, task_type),
+                "status": t.get("status", ""),
+                "pve_user": t.get("user", ""),
+                "starttime": start_ts,
+                "endtime": end_ts,
+                "duration_seconds": duration,
+                "start_iso": datetime.fromtimestamp(start_ts, tz=UTC).isoformat() if start_ts else None,
+                "end_iso": datetime.fromtimestamp(end_ts, tz=UTC).isoformat() if end_ts else None,
+                "paws": paws_info,
+            }
+        )
 
     return {"tasks": enriched, "total": len(enriched)}
 
@@ -264,18 +262,14 @@ async def admin_task_detail(
         log_lines = []
 
     # Build log text from line dicts
-    log_text = "\n".join(
-        line.get("t", "") for line in sorted(log_lines, key=lambda l: l.get("n", 0))
-    )
+    log_text = "\n".join(line.get("t", "") for line in sorted(log_lines, key=lambda entry: entry.get("n", 0)))
 
     # PAWS attribution
     parsed = _parse_upid(upid)
     task_vmid = int(parsed.get("vmid")) if parsed.get("vmid", "").isdigit() else None
     paws_info = None
     if task_vmid:
-        result = await db.execute(
-            select(Resource).where(Resource.proxmox_vmid == task_vmid)
-        )
+        result = await db.execute(select(Resource).where(Resource.proxmox_vmid == task_vmid))
         res = result.scalar_one_or_none()
         if res:
             user_result = await db.execute(select(User).where(User.id == res.owner_id))
@@ -305,8 +299,8 @@ async def admin_task_detail(
         "starttime": start_ts,
         "endtime": end_ts,
         "duration_seconds": duration,
-        "start_iso": datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat() if start_ts else None,
-        "end_iso": datetime.fromtimestamp(end_ts, tz=timezone.utc).isoformat() if end_ts else None,
+        "start_iso": datetime.fromtimestamp(start_ts, tz=UTC).isoformat() if start_ts else None,
+        "end_iso": datetime.fromtimestamp(end_ts, tz=UTC).isoformat() if end_ts else None,
         "log": log_text,
         "paws": paws_info,
     }

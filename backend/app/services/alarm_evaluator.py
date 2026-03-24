@@ -28,9 +28,7 @@ COMPARISONS = {
 
 async def evaluate_alarms(db: AsyncSession) -> dict:
     """Evaluate all active alarms and update states."""
-    result = await db.execute(
-        select(Alarm).where(Alarm.is_active.is_(True))
-    )
+    result = await db.execute(select(Alarm).where(Alarm.is_active.is_(True)))
     alarms = result.scalars().all()
 
     stats = {"evaluated": 0, "triggered": 0, "resolved": 0, "errors": 0}
@@ -66,7 +64,11 @@ async def evaluate_alarms(db: AsyncSession) -> dict:
                     stats["triggered"] += 1
                     logger.info(
                         "Alarm %s triggered: %s %s %s (value: %s)",
-                        alarm.name, alarm.metric, alarm.comparison, alarm.threshold, metric_value,
+                        alarm.name,
+                        alarm.metric,
+                        alarm.comparison,
+                        alarm.threshold,
+                        metric_value,
                     )
                 else:
                     stats["resolved"] += 1

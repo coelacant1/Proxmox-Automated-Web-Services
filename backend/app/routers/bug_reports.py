@@ -1,12 +1,11 @@
 """Bug report endpoints - users submit, admins manage."""
 
-import shutil
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -24,6 +23,7 @@ def _ensure_upload_dir():
 
 
 # ---- User endpoints ----
+
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_bug_report(
@@ -79,6 +79,7 @@ async def list_my_reports(
 
 # ---- Admin endpoints ----
 
+
 @router.get("/")
 async def list_all_reports(
     status_filter: str | None = None,
@@ -98,15 +99,11 @@ async def report_stats(
     _: User = Depends(require_admin),
 ):
     total = (await db.execute(select(func.count(BugReport.id)))).scalar() or 0
-    open_count = (await db.execute(
-        select(func.count(BugReport.id)).where(BugReport.status == "open")
-    )).scalar() or 0
-    in_progress = (await db.execute(
-        select(func.count(BugReport.id)).where(BugReport.status == "in_progress")
-    )).scalar() or 0
-    resolved = (await db.execute(
-        select(func.count(BugReport.id)).where(BugReport.status == "resolved")
-    )).scalar() or 0
+    open_count = (await db.execute(select(func.count(BugReport.id)).where(BugReport.status == "open"))).scalar() or 0
+    in_progress = (
+        await db.execute(select(func.count(BugReport.id)).where(BugReport.status == "in_progress"))
+    ).scalar() or 0
+    resolved = (await db.execute(select(func.count(BugReport.id)).where(BugReport.status == "resolved"))).scalar() or 0
     return {"total": total, "open": open_count, "in_progress": in_progress, "resolved": resolved}
 
 

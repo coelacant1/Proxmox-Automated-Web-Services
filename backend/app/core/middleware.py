@@ -26,6 +26,7 @@ class AnalyticsMiddleware(BaseHTTPMiddleware):
         # Fire-and-forget analytics recording
         try:
             from app.services.rate_limiter import get_redis
+
             r = await get_redis()
             now = time.time()
             hour_bucket = int(now // 3600) * 3600

@@ -42,9 +42,7 @@ async def get_storage_quota(
 ):
     """Return current user's storage quota and usage."""
     quota = await _get_storage_quota(db, user.id)
-    count_result = await db.execute(
-        select(func.count(StorageBucket.id)).where(StorageBucket.owner_id == user.id)
-    )
+    count_result = await db.execute(select(func.count(StorageBucket.id)).where(StorageBucket.owner_id == user.id))
     size_result = await db.execute(
         select(func.coalesce(func.sum(StorageBucket.size_bytes), 0)).where(StorageBucket.owner_id == user.id)
     )
@@ -87,9 +85,7 @@ async def list_buckets(
     user: User = Depends(get_current_active_user),
 ):
     result = await db.execute(
-        select(StorageBucket)
-        .where(StorageBucket.owner_id == user.id)
-        .order_by(StorageBucket.created_at.desc())
+        select(StorageBucket).where(StorageBucket.owner_id == user.id).order_by(StorageBucket.created_at.desc())
     )
     buckets = result.scalars().all()
     return [
@@ -116,9 +112,7 @@ async def create_bucket(
     user: User = Depends(get_current_active_user),
 ):
     quota = await _get_storage_quota(db, user.id)
-    count = await db.execute(
-        select(func.count(StorageBucket.id)).where(StorageBucket.owner_id == user.id)
-    )
+    count = await db.execute(select(func.count(StorageBucket.id)).where(StorageBucket.owner_id == user.id))
     current_count = count.scalar() or 0
     if current_count >= quota["max_buckets"]:
         raise HTTPException(status_code=403, detail=f"Bucket quota exceeded ({quota['max_buckets']} max)")
@@ -372,9 +366,7 @@ async def generate_presigned_url(
 ):
     """Generate a presigned URL for temporary object access."""
     bucket = await _get_user_bucket(db, user.id, bucket_id)
-    url = await storage_service.generate_presigned_url(
-        bucket.name, body.key, body.expires_in, body.method
-    )
+    url = await storage_service.generate_presigned_url(bucket.name, body.key, body.expires_in, body.method)
     return {"url": url, "method": body.method, "expires_in": body.expires_in}
 
 
@@ -394,10 +386,12 @@ async def set_bucket_policy(
 ):
     """Set a bucket access policy."""
     bucket = await _get_user_bucket(db, user.id, bucket_id)
-    bucket.tags = json.dumps({
-        **json.loads(bucket.tags or "{}"),
-        "__policy": json.dumps(body.policy),
-    })
+    bucket.tags = json.dumps(
+        {
+            **json.loads(bucket.tags or "{}"),
+            "__policy": json.dumps(body.policy),
+        }
+    )
     await db.commit()
     return {"status": "policy_set"}
 
@@ -723,12 +717,14 @@ async def list_shared_buckets(
         tags = json.loads(b.tags) if b.tags else {}
         shares = json.loads(tags.get("__shares", "{}"))
         if user_id_str in shares:
-            shared.append({
-                "id": str(b.id),
-                "name": b.name,
-                "owner_id": str(b.owner_id),
-                "permission": shares[user_id_str],
-            })
+            shared.append(
+                {
+                    "id": str(b.id),
+                    "name": b.name,
+                    "owner_id": str(b.owner_id),
+                    "permission": shares[user_id_str],
+                }
+            )
     return shared
 
 

@@ -15,9 +15,13 @@ async def get_effective_lifecycle(db: AsyncSession, user: User) -> dict:
     """
     result = await db.execute(
         select(SystemSetting).where(
-            SystemSetting.key.in_([
-                "idle_shutdown_days", "idle_destroy_days", "account_inactive_days",
-            ])
+            SystemSetting.key.in_(
+                [
+                    "idle_shutdown_days",
+                    "idle_destroy_days",
+                    "account_inactive_days",
+                ]
+            )
         )
     )
     defaults = {s.key: int(s.value or "0") for s in result.scalars().all()}

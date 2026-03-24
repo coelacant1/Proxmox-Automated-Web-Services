@@ -3,13 +3,13 @@
 import pytest
 
 from app.core.validators import (
+    sanitize_display_name,
     validate_cidr,
     validate_hostname,
     validate_port,
     validate_subdomain,
     validate_vmid,
     validate_webhook_url,
-    sanitize_display_name,
 )
 from app.services.event_publisher import (
     configure_action,
@@ -22,7 +22,6 @@ from app.services.retention_engine import (
     get_user_retention,
     set_user_retention,
 )
-
 
 # --- Validators ----------------------------------------------------------
 

@@ -8,7 +8,6 @@ import pytest
 from app.models.models import Resource
 from tests.conftest import TEST_USER_ID
 
-
 # --- Helpers -------------------------------------------------------------
 
 

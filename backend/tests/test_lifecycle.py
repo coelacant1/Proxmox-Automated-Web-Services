@@ -10,7 +10,6 @@ from app.core.lifecycle import (
     validate_transition,
 )
 
-
 # --- State Machine -----------------------------------------------------
 
 

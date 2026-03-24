@@ -8,9 +8,8 @@ from alembic import context
 from app.core.config import settings
 from app.core.database import Base
 from app.models.models import *  # noqa: F401, F403 - import all models for autogenerate
-from app.services.api_key_service import APIKey  # noqa: F401 - ensure api_keys table in metadata
-
 from app.models.models import GUID  # noqa: F401
+from app.services.api_key_service import APIKey  # noqa: F401 - ensure api_keys table in metadata
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

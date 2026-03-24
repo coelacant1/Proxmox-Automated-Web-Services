@@ -75,10 +75,7 @@ async def security_dashboard(
 
     # Recent security events (last 10)
     recent_security = await db.execute(
-        select(AuditLog)
-        .where(AuditLog.action.like("auth.%"))
-        .order_by(AuditLog.created_at.desc())
-        .limit(10)
+        select(AuditLog).where(AuditLog.action.like("auth.%")).order_by(AuditLog.created_at.desc()).limit(10)
     )
 
     return {

@@ -65,18 +65,13 @@ class StorageService:
             resp = await s3.list_buckets()
             return [{"name": b["Name"]} for b in resp.get("Buckets", [])]
 
-    async def list_objects(
-        self, bucket_name: str, prefix: str = ""
-    ) -> list[dict[str, Any]]:
+    async def list_objects(self, bucket_name: str, prefix: str = "") -> list[dict[str, Any]]:
         async with self._client() as s3:
             params: dict[str, Any] = {"Bucket": bucket_name}
             if prefix:
                 params["Prefix"] = prefix
             resp = await s3.list_objects_v2(**params)
-            return [
-                {"key": obj["Key"], "size": obj.get("Size", 0)}
-                for obj in resp.get("Contents", [])
-            ]
+            return [{"key": obj["Key"], "size": obj.get("Size", 0)} for obj in resp.get("Contents", [])]
 
     async def get_bucket_size(self, bucket_name: str) -> int:
         objects = await self.list_objects(bucket_name)
@@ -90,9 +85,7 @@ class StorageService:
         content_type: str = "application/octet-stream",
     ) -> dict[str, Any]:
         async with self._client() as s3:
-            await s3.put_object(
-                Bucket=bucket_name, Key=key, Body=data, ContentType=content_type
-            )
+            await s3.put_object(Bucket=bucket_name, Key=key, Body=data, ContentType=content_type)
             return {"key": key, "size": len(data), "status": "uploaded"}
 
     async def download_object(self, bucket_name: str, key: str) -> bytes:

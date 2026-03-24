@@ -36,12 +36,8 @@ async def list_projects(
 ):
     """List projects the current user is a member of."""
     member_q = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
-    base = select(Project).where(
-        (Project.owner_id == user.id) | (Project.id.in_(member_q))
-    )
-    count_q = select(Project.id).where(
-        (Project.owner_id == user.id) | (Project.id.in_(member_q))
-    )
+    base = select(Project).where((Project.owner_id == user.id) | (Project.id.in_(member_q)))
+    count_q = select(Project.id).where((Project.owner_id == user.id) | (Project.id.in_(member_q)))
     total_result = await db.execute(count_q)
     total = len(total_result.all())
 
@@ -131,9 +127,7 @@ async def list_members(
     user: User = Depends(get_current_active_user),
 ):
     await _get_project_with_access(project_id, user, db)
-    result = await db.execute(
-        select(ProjectMember).where(ProjectMember.project_id == project_id)
-    )
+    result = await db.execute(select(ProjectMember).where(ProjectMember.project_id == project_id))
     return result.scalars().all()
 
 
@@ -203,9 +197,7 @@ async def _get_project_with_access(
     db: AsyncSession,
     min_role: str | None = None,
 ) -> Project:
-    result = await db.execute(
-        select(Project).options(selectinload(Project.members)).where(Project.id == project_id)
-    )
+    result = await db.execute(select(Project).options(selectinload(Project.members)).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

@@ -56,29 +56,27 @@ def _rule_to_dict(r: SystemRule) -> dict:
 
 # --- User endpoint (active rules only) ---
 
+
 @router.get("/system/rules")
 async def list_active_rules(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_active_user),
 ):
     result = await db.execute(
-        select(SystemRule)
-        .where(SystemRule.is_active == True)
-        .order_by(SystemRule.category, SystemRule.sort_order)
+        select(SystemRule).where(SystemRule.is_active.is_(True)).order_by(SystemRule.category, SystemRule.sort_order)
     )
     return [_rule_to_dict(r) for r in result.scalars().all()]
 
 
 # --- Admin endpoints ---
 
+
 @router.get("/admin/rules")
 async def admin_list_rules(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    result = await db.execute(
-        select(SystemRule).order_by(SystemRule.category, SystemRule.sort_order)
-    )
+    result = await db.execute(select(SystemRule).order_by(SystemRule.category, SystemRule.sort_order))
     return [_rule_to_dict(r) for r in result.scalars().all()]
 
 
@@ -157,8 +155,6 @@ async def reorder_rules(
     _: User = Depends(require_admin),
 ):
     for item in items:
-        await db.execute(
-            update(SystemRule).where(SystemRule.id == item.id).values(sort_order=item.sort_order)
-        )
+        await db.execute(update(SystemRule).where(SystemRule.id == item.id).values(sort_order=item.sort_order))
     await db.commit()
     return {"updated": len(items)}

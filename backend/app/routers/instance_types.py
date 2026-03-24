@@ -19,8 +19,10 @@ async def list_instance_types(
     _: None = Depends(get_current_active_user),
 ):
     """List active instance types (user-facing)."""
-    q = select(InstanceType).where(InstanceType.is_active == True).order_by(  # noqa: E712
-        InstanceType.category, InstanceType.sort_order, InstanceType.vcpus
+    q = (
+        select(InstanceType)
+        .where(InstanceType.is_active.is_(True))
+        .order_by(InstanceType.category, InstanceType.sort_order, InstanceType.vcpus)
     )
     if category:
         q = q.where(InstanceType.category == category)

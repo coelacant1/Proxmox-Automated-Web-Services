@@ -698,7 +698,7 @@ export default function InstanceDetail() {
             console.log('[noVNC] Credentials required, sending VNC ticket');
             rfb.sendCredentials({ password: vncTicket });
           });
-          cleanup = () => { rfbRef.current = null; try { rfb.disconnect(); } catch {} };
+          cleanup = () => { rfbRef.current = null; try { rfb.disconnect(); } catch { /* disconnect may throw if already closed */ } };
         } catch (err) {
           console.error('[noVNC] Init error:', err);
           if (el) el.innerHTML = '<p class="text-paws-text-dim p-4">Failed to connect to VNC console.</p>';
@@ -765,7 +765,7 @@ export default function InstanceDetail() {
           clearInterval(pingInterval);
           termWsRef.current = null;
           termFitRef.current = null;
-          try { ws.close(); term.dispose(); } catch {}
+          try { ws.close(); term.dispose(); } catch { /* cleanup may throw if already disposed */ }
         };
       });
     }

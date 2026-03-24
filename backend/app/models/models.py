@@ -337,9 +337,7 @@ class SecurityGroup(Base):
     rules: Mapped[list["SecurityGroupRule"]] = relationship(
         back_populates="security_group", cascade="all, delete-orphan"
     )
-    resource_associations: Mapped[list["ResourceSecurityGroup"]] = relationship(
-        cascade="all, delete-orphan"
-    )
+    resource_associations: Mapped[list["ResourceSecurityGroup"]] = relationship(cascade="all, delete-orphan")
     owner: Mapped["User"] = relationship()
 
 
@@ -368,7 +366,9 @@ class ResourceSecurityGroup(Base):
     __tablename__ = "resource_security_groups"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id", ondelete="CASCADE"), nullable=False, index=True)
+    resource_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("resources.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     security_group_id: Mapped[uuid.UUID] = mapped_column(
         GUID(), ForeignKey("security_groups.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -453,9 +453,7 @@ class Subnet(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     vpc: Mapped["VPC"] = relationship(back_populates="subnets")
-    ip_reservations: Mapped[list["IPReservation"]] = relationship(
-        back_populates="subnet", cascade="all, delete-orphan"
-    )
+    ip_reservations: Mapped[list["IPReservation"]] = relationship(back_populates="subnet", cascade="all, delete-orphan")
 
 
 class IPReservation(Base):
@@ -739,7 +737,9 @@ class UserGroup(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), onupdate=func.now())
 
     owner: Mapped["User"] = relationship(lazy="selectin")
-    members: Mapped[list["UserGroupMember"]] = relationship(back_populates="group", cascade="all, delete-orphan", lazy="selectin")
+    members: Mapped[list["UserGroupMember"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan", lazy="selectin"
+    )
     shared_resources: Mapped[list["GroupResourceShare"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
@@ -776,9 +776,7 @@ class GroupResourceShare(Base):
     shared_by: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (
-        UniqueConstraint("group_id", "entity_type", "entity_id", name="uq_group_entity"),
-    )
+    __table_args__ = (UniqueConstraint("group_id", "entity_type", "entity_id", name="uq_group_entity"),)
 
     group: Mapped["UserGroup"] = relationship(back_populates="shared_resources")
     resource: Mapped["Resource | None"] = relationship(lazy="selectin")

@@ -253,7 +253,13 @@ class MockProxmoxClient:
     def set_firewall_options(self, node: str, vmid: int, vmtype: str = "qemu", **kw: Any) -> None:
         pass
 
-    def clear_firewall_rules_by_comment(self, node: str, vmid: int, vmtype: str = "qemu", comment_prefix: str = "") -> int:
+    def clear_firewall_rules_by_comment(
+        self,
+        node: str,
+        vmid: int,
+        vmtype: str = "qemu",
+        comment_prefix: str = "",
+    ) -> int:
         return 0
 
     def get_vnc_ticket(self, node: str, vmid: int, vmtype: str = "qemu") -> dict[str, Any]:
@@ -302,7 +308,13 @@ class MockStorageService:
     async def delete_object(self, bucket_name: str, key: str) -> dict[str, Any]:
         return {"key": key, "status": "deleted"}
 
-    async def generate_presigned_url(self, bucket_name: str, key: str, expires_in: int = 3600, method: str = "GET") -> str:
+    async def generate_presigned_url(
+        self,
+        bucket_name: str,
+        key: str,
+        expires_in: int = 3600,
+        method: str = "GET",
+    ) -> str:
         return f"http://s3-mock/{bucket_name}/{key}?signature=mock&expires={expires_in}"
 
 

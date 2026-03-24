@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 from celery import shared_task
 
@@ -21,15 +21,14 @@ def _run_async(coro):
 async def _enforce_lifecycle():
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
+
     from app.core.database import async_session_factory
     from app.models.models import Resource, SystemSetting, User
     from app.services.proxmox_client import proxmox_client
 
     async with async_session_factory() as db:
         result = await db.execute(
-            select(SystemSetting).where(
-                SystemSetting.key.in_(["idle_shutdown_days", "idle_destroy_days"])
-            )
+            select(SystemSetting).where(SystemSetting.key.in_(["idle_shutdown_days", "idle_destroy_days"]))
         )
         settings = {s.key: s.value for s in result.scalars().all()}
         default_shutdown = int(settings.get("idle_shutdown_days", "14") or "0")
@@ -39,7 +38,7 @@ async def _enforce_lifecycle():
             log.info("Resource lifecycle policies disabled globally, skipping")
             return {"shutdown": 0, "destroyed": 0}
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         shutdown_count = 0
         destroy_count = 0
 
@@ -77,7 +76,9 @@ async def _enforce_lifecycle():
                             shutdown_count += 1
                             log.info(
                                 "Idle shutdown: %s (VMID %s) - last accessed %s",
-                                r.display_name, r.proxmox_vmid, last_access,
+                                r.display_name,
+                                r.proxmox_vmid,
+                                last_access,
                             )
                     except Exception:
                         log.exception("Failed to shutdown idle resource %s", r.id)
@@ -115,7 +116,9 @@ async def _enforce_lifecycle():
                         destroy_count += 1
                         log.info(
                             "Idle destroy: %s (VMID %s) - last accessed %s",
-                            r.display_name, r.proxmox_vmid, last_access,
+                            r.display_name,
+                            r.proxmox_vmid,
+                            last_access,
                         )
                     except Exception:
                         log.exception("Failed to destroy idle resource %s", r.id)
@@ -127,14 +130,13 @@ async def _enforce_lifecycle():
 async def _enforce_account_lifecycle():
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
+
     from app.core.database import async_session_factory
-    from app.models.models import User, SystemSetting
+    from app.models.models import SystemSetting, User
     from app.services.user_cleanup import purge_user
 
     async with async_session_factory() as db:
-        result = await db.execute(
-            select(SystemSetting).where(SystemSetting.key == "account_inactive_days")
-        )
+        result = await db.execute(select(SystemSetting).where(SystemSetting.key == "account_inactive_days"))
         setting = result.scalar_one_or_none()
         default_inactive = int(setting.value if setting else "0")
 
@@ -142,11 +144,13 @@ async def _enforce_account_lifecycle():
             log.info("Account inactivity policy disabled, skipping")
             return {"purged": 0}
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         purged = 0
 
         result = await db.execute(
-            select(User).options(selectinload(User.tier)).where(
+            select(User)
+            .options(selectinload(User.tier))
+            .where(
                 User.is_superuser.is_(False),
                 User.is_active.is_(True),
             )
@@ -166,7 +170,9 @@ async def _enforce_account_lifecycle():
                 try:
                     log.info(
                         "Purging inactive account: %s (%s) - last login %s",
-                        u.username, u.email, last_activity,
+                        u.username,
+                        u.email,
+                        last_activity,
                     )
                     await purge_user(db, u.id)
                     purged += 1
@@ -179,7 +185,9 @@ async def _enforce_account_lifecycle():
 async def _enforce_quota():
     """Shut down running instances for users who exceed their quota."""
     import json as _json
-    from sqlalchemy import select, func
+
+    from sqlalchemy import select
+
     from app.core.database import async_session_factory
     from app.models.models import Resource, User, UserQuota
     from app.services.proxmox_client import proxmox_client
@@ -187,10 +195,12 @@ async def _enforce_quota():
     async with async_session_factory() as db:
         # Get all users with running resources
         result = await db.execute(
-            select(Resource.owner_id).where(
+            select(Resource.owner_id)
+            .where(
                 Resource.resource_type.in_(["vm", "lxc"]),
                 Resource.status == "running",
-            ).distinct()
+            )
+            .distinct()
         )
         owner_ids = [row[0] for row in result.all()]
         shutdown_count = 0
@@ -244,15 +254,24 @@ async def _enforce_quota():
             username = user.username if user else str(owner_id)
 
             log.warning(
-                "User %s over quota (VMs: %d/%d, CTs: %d/%d, vCPUs: %d/%d, RAM: %d/%dMB, Disk: %d/%dGB) - shutting down running instances",
-                username, vm_count, quota.max_vms, ct_count, quota.max_containers,
-                total_vcpus, quota.max_vcpus, total_ram_mb, quota.max_ram_mb,
-                total_disk_gb, quota.max_disk_gb,
+                "User %s over quota (VMs: %d/%d, CTs: %d/%d, vCPUs: %d/%d,"
+                " RAM: %d/%dMB, Disk: %d/%dGB) - shutting down running instances",
+                username,
+                vm_count,
+                quota.max_vms,
+                ct_count,
+                quota.max_containers,
+                total_vcpus,
+                quota.max_vcpus,
+                total_ram_mb,
+                quota.max_ram_mb,
+                total_disk_gb,
+                quota.max_disk_gb,
             )
 
             # Shut down running instances (newest first) until under quota
             running = [r for r in resources if r.status == "running" and not r.termination_protected]
-            running.sort(key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            running.sort(key=lambda r: r.created_at or datetime.min.replace(tzinfo=UTC), reverse=True)
 
             for r in running:
                 try:
@@ -267,13 +286,18 @@ async def _enforce_quota():
 
                     # Create a notification event
                     from app.models.models import Event
+
                     event = Event(
                         event_type="quota_exceeded",
                         source="system",
                         resource_id=r.id,
                         user_id=owner_id,
                         severity="warning",
-                        message=f"Instance '{r.display_name}' was shut down because your resource usage exceeds your quota. Please reduce usage or request a quota increase.",
+                        message=(
+                            f"Instance '{r.display_name}' was shut down because your resource"
+                            " usage exceeds your quota. Please reduce usage or request a"
+                            " quota increase."
+                        ),
                     )
                     db.add(event)
                 except Exception:

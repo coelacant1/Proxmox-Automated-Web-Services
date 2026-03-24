@@ -58,9 +58,7 @@ async def test_resources_paginated(auth_client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_audit_logs_paginated_with_filter(
-    admin_client: AsyncClient, db_session: AsyncSession, test_user: User
-):
+async def test_audit_logs_paginated_with_filter(admin_client: AsyncClient, db_session: AsyncSession, test_user: User):
     """Audit logs support pagination + filtering together."""
     for i in range(3):
         db_session.add(AuditLog(user_id=test_user.id, action="test_action", resource_type="vm"))

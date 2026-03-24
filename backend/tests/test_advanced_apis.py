@@ -3,7 +3,6 @@ metrics keys, VPC instances, webhook delivery, and health detail."""
 
 import pytest
 
-
 # --- Global Search --------------------------------------------------------
 
 
@@ -152,7 +151,6 @@ async def test_admin_mfa_status(admin_client):
 async def test_vpc_instances_empty(auth_client, db_session):
     """Create a VPC and verify instance listing returns empty."""
     from app.models.models import VPC
-
     from tests.conftest import TEST_USER_ID
 
     vpc = VPC(owner_id=TEST_USER_ID, name="inst-vpc", cidr="10.10.0.0/16")

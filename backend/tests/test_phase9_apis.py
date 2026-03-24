@@ -1,6 +1,5 @@
 """Tests for Phase 9 API endpoints: templates, quota requests, settings, admin enhancements."""
 
-
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -207,9 +206,7 @@ async def test_list_my_quota_requests(auth_client: AsyncClient, db_session: Asyn
 @pytest.mark.asyncio
 async def test_admin_list_quota_requests(admin_client: AsyncClient, db_session: AsyncSession, test_user: User):
     db_session.add(
-        QuotaRequest(
-            user_id=test_user.id, request_type="max_vms", current_value=5, requested_value=20, reason="Test"
-        )
+        QuotaRequest(user_id=test_user.id, request_type="max_vms", current_value=5, requested_value=20, reason="Test")
     )
     await db_session.commit()
 
@@ -221,9 +218,7 @@ async def test_admin_list_quota_requests(admin_client: AsyncClient, db_session: 
 @pytest.mark.asyncio
 async def test_admin_pending_count(admin_client: AsyncClient, db_session: AsyncSession, test_user: User):
     db_session.add(
-        QuotaRequest(
-            user_id=test_user.id, request_type="max_vms", current_value=5, requested_value=10, reason="Test"
-        )
+        QuotaRequest(user_id=test_user.id, request_type="max_vms", current_value=5, requested_value=10, reason="Test")
     )
     await db_session.commit()
 
@@ -284,9 +279,7 @@ async def test_admin_cannot_re_review(admin_client: AsyncClient, db_session: Asy
     await db_session.commit()
     await db_session.refresh(qr)
 
-    resp = await admin_client.patch(
-        f"/api/admin/quota-requests/{qr.id}", json={"status": "denied"}
-    )
+    resp = await admin_client.patch(f"/api/admin/quota-requests/{qr.id}", json={"status": "denied"})
     assert resp.status_code == 400
 
 
@@ -345,9 +338,7 @@ async def test_settings_require_admin(auth_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_admin_list_audit_logs(admin_client: AsyncClient, db_session: AsyncSession, test_user: User):
-    db_session.add(
-        AuditLog(user_id=test_user.id, action="create_vm", resource_type="vm", details='{"vmid": 100}')
-    )
+    db_session.add(AuditLog(user_id=test_user.id, action="create_vm", resource_type="vm", details='{"vmid": 100}'))
     await db_session.commit()
 
     resp = await admin_client.get("/api/admin/audit-logs/")
@@ -427,9 +418,7 @@ async def test_admin_dashboard_has_pending_quota_count(
     admin_client: AsyncClient, db_session: AsyncSession, test_user: User
 ):
     db_session.add(
-        QuotaRequest(
-            user_id=test_user.id, request_type="max_vms", current_value=5, requested_value=10, reason="Test"
-        )
+        QuotaRequest(user_id=test_user.id, request_type="max_vms", current_value=5, requested_value=10, reason="Test")
     )
     await db_session.commit()
 
