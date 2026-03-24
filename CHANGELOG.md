@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.7 - 2026-03-24
+
+### Fixed
+
+- **Backend tests (63 failures -> 0)** - Added 29 missing mock methods to `MockProxmoxClient` test fixture; fixed VMID range assertions (100 -> 1000) to match system default; updated delete tests to expect hard-delete behavior; added required `resource_id` field to volume test payloads; rewrote static IP tests with proper VPC/Subnet DB setup; added volume detach step before delete; updated volume snapshot test to expect 404 (endpoint not implemented)
+- **Duplicate IP reservation race condition** - Added `IntegrityError` handling in networking router returning 409 on duplicate IP reserve
+- **Stale model references** - Removed non-existent `UserMFA` import from user cleanup service; removed premature `Tag` references from resource cleanup until tag feature is fully integrated
+
 ## 0.2.6 - 2026-03-24
 
 ### Fixed

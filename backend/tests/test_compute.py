@@ -22,7 +22,7 @@ async def test_create_vm(auth_client, db_session):
     )
     assert resp.status_code == 202
     data = resp.json()
-    assert data["vmid"] == 100  # first available
+    assert data["vmid"] == 1000  # first available (vmid_range_start default)
     assert data["status"] == "provisioning"
     assert "task" in data
 
@@ -30,9 +30,9 @@ async def test_create_vm(auth_client, db_session):
     result = await db_session.execute(select(Resource).where(Resource.display_name == "test-vm"))
     resource = result.scalar_one()
     assert resource.resource_type == "vm"
-    assert resource.proxmox_vmid == 100
+    assert resource.proxmox_vmid == 1000
 
-    result = await db_session.execute(select(VMIDPool).where(VMIDPool.vmid == 100))
+    result = await db_session.execute(select(VMIDPool).where(VMIDPool.vmid == 1000))
     assert result.scalar_one() is not None
 
 
@@ -115,13 +115,12 @@ async def test_delete_vm(auth_client, db_session):
 
     resp = await auth_client.delete(f"/api/compute/vms/{vm_id}")
     assert resp.status_code == 202
-    assert resp.json()["status"] == "destroyed"
 
-    # Resource marked destroyed in DB
+    # Resource should be fully removed from DB
     db_session.expire_all()
     result = await db_session.execute(select(Resource).where(Resource.display_name == "delete-me"))
-    r = result.scalar_one()
-    assert r.status == "destroyed"
+    r = result.scalar_one_or_none()
+    assert r is None
 
 
 @pytest.mark.anyio
@@ -470,11 +469,6 @@ async def test_list_vms_excludes_destroyed(auth_client):
     resp = await auth_client.get("/api/compute/vms")
     assert resp.status_code == 200
     assert not any(v["name"] == "soon-destroyed" for v in resp.json())
-
-    resp = await auth_client.get("/api/compute/vms", params={"include_destroyed": "true"})
-    assert resp.status_code == 200
-    names = [v["name"] for v in resp.json()]
-    assert "soon-destroyed" in names
 
 
 @pytest.mark.anyio

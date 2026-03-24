@@ -1,5 +1,7 @@
 # pAWS - Proxmox Automated Web Services
 
+[![CI](https://github.com/coelacant1/Proxmox-Automated-Web-Services/actions/workflows/ci.yml/badge.svg)](https://github.com/coelacant1/Proxmox-Automated-Web-Services/actions/workflows/ci.yml)
+
 A self-hosted, AWS-like infrastructure platform built on Proxmox VE. Provides multi-tenant compute, networking, storage, backups, monitoring, and billing through a web UI and REST API.
 
 > [!WARNING]

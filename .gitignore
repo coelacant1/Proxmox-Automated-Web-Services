@@ -12,6 +12,7 @@ venv/
 */.pytest_cache/
 .ruff_cache/
 */.ruff_cache/
+backend/.coverage
 
 # Node
 node_modules/

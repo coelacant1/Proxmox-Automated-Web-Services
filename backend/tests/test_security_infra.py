@@ -22,6 +22,7 @@ from app.services.retention_engine import (
     get_user_retention,
     set_user_retention,
 )
+from tests.conftest import TEST_USER_ID
 
 # --- Validators ----------------------------------------------------------
 
@@ -161,56 +162,101 @@ async def test_user_retention_override():
 
 
 @pytest.mark.anyio
-async def test_reserve_static_ip(auth_client):
+async def test_reserve_static_ip(auth_client, db_session):
+    from app.models.models import VPC, Subnet
+
+    vpc = VPC(owner_id=TEST_USER_ID, name="ip-test-vpc", proxmox_vnet="ipvn1", proxmox_zone="paws", cidr="10.0.0.0/16")
+    db_session.add(vpc)
+    await db_session.flush()
+    subnet = Subnet(vpc_id=vpc.id, name="test-subnet", cidr="10.0.1.0/24", gateway="10.0.1.1")
+    db_session.add(subnet)
+    await db_session.commit()
+
     r = await auth_client.post(
-        "/api/networking/vpcs/test-vpc/ips",
-        json={"subnet_cidr": "10.0.1.0/24", "ip_address": "10.0.1.50"},
+        f"/api/networking/vpcs/{vpc.id}/ips",
+        json={"subnet_id": str(subnet.id), "ip_address": "10.0.1.50"},
     )
     assert r.status_code == 200
-    assert r.json()["ip"] == "10.0.1.50"
+    assert r.json()["ip_address"] == "10.0.1.50"
 
 
 @pytest.mark.anyio
-async def test_reserve_static_ip_auto(auth_client):
+async def test_reserve_static_ip_auto(auth_client, db_session):
+    from app.models.models import VPC, Subnet
+
+    vpc = VPC(owner_id=TEST_USER_ID, name="ip-auto-vpc", proxmox_vnet="ipvn2", proxmox_zone="paws", cidr="10.0.0.0/16")
+    db_session.add(vpc)
+    await db_session.flush()
+    subnet = Subnet(vpc_id=vpc.id, name="test-subnet", cidr="10.0.2.0/24", gateway="10.0.2.1")
+    db_session.add(subnet)
+    await db_session.commit()
+
     r = await auth_client.post(
-        "/api/networking/vpcs/test-vpc-auto/ips",
-        json={"subnet_cidr": "10.0.2.0/24"},
+        f"/api/networking/vpcs/{vpc.id}/ips",
+        json={"subnet_id": str(subnet.id)},
     )
     assert r.status_code == 200
-    assert r.json()["ip"].startswith("10.0.2.")
+    assert r.json()["ip_address"].startswith("10.0.2.")
 
 
 @pytest.mark.anyio
-async def test_list_static_ips(auth_client):
+async def test_list_static_ips(auth_client, db_session):
+    from app.models.models import VPC, Subnet
+
+    vpc = VPC(owner_id=TEST_USER_ID, name="ip-list-vpc", proxmox_vnet="ipvn3", proxmox_zone="paws", cidr="10.0.0.0/16")
+    db_session.add(vpc)
+    await db_session.flush()
+    subnet = Subnet(vpc_id=vpc.id, name="test-subnet", cidr="10.0.3.0/24", gateway="10.0.3.1")
+    db_session.add(subnet)
+    await db_session.commit()
+
     await auth_client.post(
-        "/api/networking/vpcs/test-vpc-list/ips",
-        json={"subnet_cidr": "10.0.3.0/24", "ip_address": "10.0.3.10"},
+        f"/api/networking/vpcs/{vpc.id}/ips",
+        json={"subnet_id": str(subnet.id), "ip_address": "10.0.3.10"},
     )
-    r = await auth_client.get("/api/networking/vpcs/test-vpc-list/ips")
+    r = await auth_client.get(f"/api/networking/vpcs/{vpc.id}/ips")
     assert r.status_code == 200
     assert len(r.json()) >= 1
 
 
 @pytest.mark.anyio
-async def test_release_static_ip(auth_client):
-    await auth_client.post(
-        "/api/networking/vpcs/test-vpc-rel/ips",
-        json={"subnet_cidr": "10.0.4.0/24", "ip_address": "10.0.4.20"},
+async def test_release_static_ip(auth_client, db_session):
+    from app.models.models import VPC, Subnet
+
+    vpc = VPC(owner_id=TEST_USER_ID, name="ip-rel-vpc", proxmox_vnet="ipvn4", proxmox_zone="paws", cidr="10.0.0.0/16")
+    db_session.add(vpc)
+    await db_session.flush()
+    subnet = Subnet(vpc_id=vpc.id, name="test-subnet", cidr="10.0.4.0/24", gateway="10.0.4.1")
+    db_session.add(subnet)
+    await db_session.commit()
+
+    create = await auth_client.post(
+        f"/api/networking/vpcs/{vpc.id}/ips",
+        json={"subnet_id": str(subnet.id), "ip_address": "10.0.4.20"},
     )
-    r = await auth_client.delete("/api/networking/vpcs/test-vpc-rel/ips/10.0.4.20")
-    assert r.status_code == 200
-    assert r.json()["status"] == "released"
+    ip_id = create.json()["id"]
+    r = await auth_client.delete(f"/api/networking/vpcs/{vpc.id}/ips/{ip_id}")
+    assert r.status_code == 204
 
 
 @pytest.mark.anyio
-async def test_reserve_duplicate_ip(auth_client):
+async def test_reserve_duplicate_ip(auth_client, db_session):
+    from app.models.models import VPC, Subnet
+
+    vpc = VPC(owner_id=TEST_USER_ID, name="ip-dup-vpc", proxmox_vnet="ipvn5", proxmox_zone="paws", cidr="10.0.0.0/16")
+    db_session.add(vpc)
+    await db_session.flush()
+    subnet = Subnet(vpc_id=vpc.id, name="test-subnet", cidr="10.0.5.0/24", gateway="10.0.5.1")
+    db_session.add(subnet)
+    await db_session.commit()
+
     await auth_client.post(
-        "/api/networking/vpcs/test-vpc-dup/ips",
-        json={"subnet_cidr": "10.0.5.0/24", "ip_address": "10.0.5.10"},
+        f"/api/networking/vpcs/{vpc.id}/ips",
+        json={"subnet_id": str(subnet.id), "ip_address": "10.0.5.10"},
     )
     r = await auth_client.post(
-        "/api/networking/vpcs/test-vpc-dup/ips",
-        json={"subnet_cidr": "10.0.5.0/24", "ip_address": "10.0.5.10"},
+        f"/api/networking/vpcs/{vpc.id}/ips",
+        json={"subnet_id": str(subnet.id), "ip_address": "10.0.5.10"},
     )
     assert r.status_code == 409
 

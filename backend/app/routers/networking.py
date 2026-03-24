@@ -6,6 +6,7 @@ import uuid as _uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -197,7 +198,11 @@ async def reserve_static_ip(
         owner_id=user.id,
     )
     db.add(reservation)
-    await db.commit()
+    try:
+        await db.commit()
+    except SAIntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="IP already reserved")
     await db.refresh(reservation)
     await log_action(db, user.id, "ip_reserve", "network", details={"ip": ip, "subnet_id": body.subnet_id})
     return reservation

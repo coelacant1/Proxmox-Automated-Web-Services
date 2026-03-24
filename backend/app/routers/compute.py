@@ -2487,7 +2487,6 @@ async def _cleanup_resource_children(db: AsyncSession, resource_id: uuid.UUID) -
         IPReservation,
         LifecyclePolicy,
         ServiceEndpoint,
-        Tag,
         TemplateRequest,
     )
 
@@ -2499,7 +2498,6 @@ async def _cleanup_resource_children(db: AsyncSession, resource_id: uuid.UUID) -
         Alarm,
         HealthCheck,
         LifecyclePolicy,
-        Tag,
         TemplateRequest,
     ):
         await db.execute(delete(model).where(model.resource_id == resource_id))

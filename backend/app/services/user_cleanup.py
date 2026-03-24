@@ -26,13 +26,11 @@ from app.models.models import (
     ServiceEndpoint,
     SSHKeyPair,
     StorageBucket,
-    Tag,
     TemplateRequest,
     TierRequest,
     User,
     UserGroup,
     UserGroupMember,
-    UserMFA,
     UserQuota,
     Volume,
 )
@@ -154,10 +152,6 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
     r = await db.execute(delete(SSHKeyPair).where(SSHKeyPair.owner_id == user_id))
     summary["ssh_keys"] = r.rowcount
 
-    # Tags
-    r = await db.execute(delete(Tag).where(Tag.owner_id == user_id))
-    summary["tags"] = r.rowcount
-
     # Projects (members cascade via ORM)
     projects_result = await db.execute(select(Project).where(Project.owner_id == user_id))
     for p in projects_result.scalars().all():
@@ -180,10 +174,6 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
     from sqlalchemy import text
 
     await db.execute(text("DELETE FROM api_keys WHERE user_id = :uid"), {"uid": str(user_id)})
-
-    # MFA
-    r = await db.execute(delete(UserMFA).where(UserMFA.user_id == user_id))
-    summary["mfa"] = r.rowcount
 
     # Bug reports
     r = await db.execute(delete(BugReport).where(BugReport.user_id == user_id))

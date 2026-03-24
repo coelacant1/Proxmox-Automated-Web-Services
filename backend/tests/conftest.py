@@ -280,6 +280,90 @@ class MockProxmoxClient:
     def get_agent_info(self, node: str, vmid: int) -> dict[str, Any]:
         return {"version": "5.2.0", "supported_commands": ["guest-info", "guest-exec"]}
 
+    def find_vm_node(self, vmid: int) -> str | None:
+        return "pve1"
+
+    def get_resource_type(self, vmid: int) -> str | None:
+        return "qemu"
+
+    def get_container_disk_storage(self, node: str, vmid: int) -> str:
+        return "local-lvm"
+
+    def get_vm_disk_storage(self, node: str, vmid: int) -> str:
+        return "local-lvm"
+
+    def is_storage_shared(self, storage: str) -> bool:
+        return True
+
+    def clone_container(self, node: str, source_vmid: int, new_vmid: int, **kw: Any) -> str:
+        return f"UPID:{node}:00001234:00AB12CD:clonect:{new_vmid}:user@pam:"
+
+    def wait_for_task(self, node: str, upid: str, timeout: int = 300) -> dict[str, Any]:
+        return {"status": "OK", "exitstatus": "OK"}
+
+    def set_container_config(self, node: str, vmid: int, **kw: Any) -> None:
+        pass
+
+    def regenerate_cloudinit(self, node: str, vmid: int) -> None:
+        pass
+
+    def get_agent_network_interfaces(self, node: str, vmid: int) -> list[dict[str, Any]]:
+        return []
+
+    def migrate_vm(self, node: str, vmid: int, target: str, online: bool = False) -> str:
+        return f"UPID:{node}:migratevm:{vmid}"
+
+    def migrate_container(self, node: str, vmid: int, target: str, online: bool = False) -> str:
+        return f"UPID:{node}:migratect:{vmid}"
+
+    def get_session_ticket(self) -> tuple[str, str]:
+        return ("user@pam", "PVE:ticket:mock")
+
+    def get_container_config(self, node: str, vmid: int) -> dict[str, Any]:
+        return {"cores": 1, "memory": 512, "hostname": f"ct-{vmid}"}
+
+    def create_pool(self, pool_name: str) -> None:
+        pass
+
+    def pool_exists(self, pool_name: str) -> bool:
+        return True
+
+    def add_to_pool(self, pool_name: str, vmid: int) -> None:
+        pass
+
+    def remove_from_pool(self, pool_name: str, vmid: int) -> None:
+        pass
+
+    def delete_pool(self, pool_name: str) -> None:
+        pass
+
+    def get_pool_name_for_user(self, username: str) -> str:
+        return f"paws-{username}"
+
+    def update_container_config(self, node: str, vmid: int, **kw: Any) -> None:
+        pass
+
+    def delete_volume(self, node: str, storage: str, volume: str) -> None:
+        pass
+
+    def delete_storage_content(self, node: str, storage: str, volume: str) -> None:
+        pass
+
+    def list_backup_files(self, node: str, storage: str, vmid: int | None = None) -> list[dict[str, Any]]:
+        return []
+
+    def download_backup_file(self, node: str, storage: str, volume: str) -> bytes:
+        return b"mock-backup-data"
+
+    def restore_vm_backup(self, node: str, storage: str, archive: str, vmid: int, **kw: Any) -> str:
+        return f"UPID:{node}:restore:{vmid}"
+
+    def restore_ct_backup(self, node: str, storage: str, archive: str, vmid: int, **kw: Any) -> str:
+        return f"UPID:{node}:restore:{vmid}"
+
+    def get_task_log(self, node: str, upid: str) -> list[dict[str, Any]]:
+        return [{"t": "Task completed", "n": 1}]
+
 
 class MockStorageService:
     """Fake S3 storage service."""
@@ -431,6 +515,11 @@ async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncC
     import app.routers.storage as storage_mod
 
     monkeypatch.setattr(storage_mod, "storage_service", mock_storage)
+
+    # Patch volumes router so it uses the mock Proxmox client
+    import app.routers.volumes as vol_mod
+
+    monkeypatch.setattr(vol_mod, "_get_proxmox", lambda: mock_proxmox)
 
     from app.main import app
 
