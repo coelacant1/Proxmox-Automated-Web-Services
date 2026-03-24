@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { HardDrive, BookOpen, ChevronDown, ChevronRight, Terminal, Code2, Copy, Check, ExternalLink } from 'lucide-react';
 import api from '../api/client';
-import { Button, Card, CardContent, CardHeader, CardTitle, Input, Badge, QuotaBar } from '@/components/ui';
+import { Button, Card, CardContent, CardHeader, CardTitle, Input, Badge, QuotaBar, useToast, useConfirm } from '@/components/ui';
 
 interface Bucket {
   id: string;
@@ -54,6 +54,8 @@ function CodeBlock({ children, copyText }: { children: string; copyText?: string
 
 export default function Storage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -94,9 +96,10 @@ export default function Storage() {
 
   const deleteBucket = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm('Delete this bucket and all its contents?')) return;
+    if (!await confirm({ title: 'Delete Bucket', message: 'Delete this bucket and all its contents? This action cannot be undone.' })) return;
     try {
       await api.delete(`/api/storage/buckets/${id}?force=true`);
+      toast('Bucket deleted successfully', 'success');
     } catch {
       setError('Failed to delete bucket');
     }
@@ -214,7 +217,7 @@ files without exposing your credentials.
 
 From the File Browser:
   1. Navigate to a file in your bucket
-  2. Click the link icon (🔗) on the file row
+  2. Click the link icon on the file row
   3. A shareable URL is generated (valid for 1 hour)
   4. Copy and share - anyone with the link can download
 

@@ -329,7 +329,7 @@ export default function BucketDetail() {
                   <div key={rule.id} className="flex items-center justify-between py-2 border-b border-paws-border-subtle last:border-0">
                     <div>
                       <p className="text-sm text-paws-text">
-                        <span className="font-mono">{rule.prefix || '*'}</span> -> {rule.action} after {rule.days} days
+                        <span className="font-mono">{rule.prefix || '*'}</span> {'->'} {rule.action} after {rule.days} days
                       </p>
                     </div>
                     <div className="flex items-center gap-2">

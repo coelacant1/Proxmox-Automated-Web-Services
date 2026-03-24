@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
+import { useToast, useConfirm } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 
 interface Container {
@@ -22,6 +23,8 @@ interface Container {
 export default function Containers() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [containers, setContainers] = useState<Container[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -37,9 +40,15 @@ export default function Containers() {
   };
 
   const deleteContainer = async (id: string) => {
-    if (!confirm('Are you sure you want to destroy this container?')) return;
-    await api.delete(`/api/compute/containers/${id}`);
-    fetch();
+    if (!await confirm({ title: 'Destroy Container', message: 'Are you sure you want to destroy this container? This action cannot be undone.' })) return;
+    try {
+      await api.delete(`/api/compute/containers/${id}`);
+      toast('Container destroyed successfully', 'success');
+      fetch();
+    } catch (e: any) {
+      const d = e?.response?.data?.detail;
+      toast(typeof d === 'string' ? d : 'Failed to destroy container', 'error');
+    }
   };
 
   const keepAlive = async (id: string) => {

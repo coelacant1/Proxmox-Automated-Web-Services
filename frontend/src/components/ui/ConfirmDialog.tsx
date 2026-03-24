@@ -1,5 +1,60 @@
+import { createContext, useContext, useState, useCallback, useRef } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { Button } from './Button';
+
+interface ConfirmOptions {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  variant?: 'danger' | 'primary';
+}
+
+interface ConfirmContextType {
+  confirm: (options: ConfirmOptions) => Promise<boolean>;
+}
+
+const ConfirmContext = createContext<ConfirmContextType>({
+  confirm: () => Promise.resolve(false),
+});
+
+export function useConfirm() {
+  return useContext(ConfirmContext);
+}
+
+export function ConfirmProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<(ConfirmOptions & { open: boolean }) | null>(null);
+  const resolveRef = useRef<((value: boolean) => void) | null>(null);
+
+  const confirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
+    return new Promise((resolve) => {
+      resolveRef.current = resolve;
+      setState({ ...options, open: true });
+    });
+  }, []);
+
+  const handleClose = useCallback((result: boolean) => {
+    setState(null);
+    resolveRef.current?.(result);
+    resolveRef.current = null;
+  }, []);
+
+  return (
+    <ConfirmContext.Provider value={{ confirm }}>
+      {children}
+      {state?.open && (
+        <ConfirmDialog
+          open
+          title={state.title}
+          message={state.message}
+          confirmLabel={state.confirmLabel}
+          variant={state.variant}
+          onConfirm={() => handleClose(true)}
+          onCancel={() => handleClose(false)}
+        />
+      )}
+    </ConfirmContext.Provider>
+  );
+}
 
 interface ConfirmDialogProps {
   open: boolean;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client';
-import { Button, Card, Input } from '@/components/ui';
+import { Button, Card, Input, useConfirm, useToast } from '@/components/ui';
 
 interface Snapshot {
   name: string;
@@ -17,6 +17,8 @@ interface ResourceItem {
 }
 
 export default function Backups() {
+  const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [resources, setResources] = useState<ResourceItem[]>([]);
   const [selectedResource, setSelectedResource] = useState<string>('');
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -48,23 +50,38 @@ export default function Backups() {
   const createSnapshot = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedResource || !snapName) return;
-    await api.post(`/api/backups/${selectedResource}/snapshots`, {
-      name: snapName, description: snapDesc,
-    });
-    setSnapName('');
-    setSnapDesc('');
-    fetchSnapshots(selectedResource);
+    try {
+      await api.post(`/api/backups/${selectedResource}/snapshots`, {
+        name: snapName, description: snapDesc,
+      });
+      toast('Snapshot created successfully', 'success');
+      setSnapName('');
+      setSnapDesc('');
+      fetchSnapshots(selectedResource);
+    } catch {
+      toast('Failed to create snapshot', 'error');
+    }
   };
 
   const rollback = async (snapName: string) => {
-    if (!confirm(`Rollback to snapshot "${snapName}"?`)) return;
-    await api.post(`/api/backups/${selectedResource}/snapshots/${snapName}/rollback`);
+    if (!await confirm({ title: 'Rollback Snapshot', message: `Rollback to snapshot "${snapName}"? The current state will be overwritten.` })) return;
+    try {
+      await api.post(`/api/backups/${selectedResource}/snapshots/${snapName}/rollback`);
+      toast('Snapshot rollback started', 'success');
+    } catch {
+      toast('Failed to rollback snapshot', 'error');
+    }
   };
 
   const deleteSnap = async (name: string) => {
-    if (!confirm(`Delete snapshot "${name}"?`)) return;
-    await api.delete(`/api/backups/${selectedResource}/snapshots/${name}`);
-    fetchSnapshots(selectedResource);
+    if (!await confirm({ title: 'Delete Snapshot', message: `Permanently delete snapshot "${name}"?` })) return;
+    try {
+      await api.delete(`/api/backups/${selectedResource}/snapshots/${name}`);
+      toast('Snapshot deleted', 'success');
+      fetchSnapshots(selectedResource);
+    } catch {
+      toast('Failed to delete snapshot', 'error');
+    }
   };
 
   return (

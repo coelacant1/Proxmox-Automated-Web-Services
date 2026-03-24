@@ -4,7 +4,7 @@ import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
   Input, Modal, Badge, EmptyState, StatusBadge, Tabs,
-  useToast,
+  useToast, useConfirm,
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
 
@@ -54,6 +54,7 @@ interface VPCInstance {
 
 export default function VPCs() {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [vpcs, setVpcs] = useState<VPC[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<VPC | null>(null);
@@ -102,10 +103,11 @@ export default function VPCs() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this network and all its subnets?')) return;
+    if (!await confirm({ title: 'Delete Network', message: 'Delete this network and all its subnets?' })) return;
     try {
       await api.delete(`/api/vpcs/${id}`);
       if (selected?.id === id) setSelected(null);
+      toast('Network deleted', 'success');
       fetchVPCs();
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Failed to delete network', 'error');
@@ -121,18 +123,28 @@ export default function VPCs() {
     if (subnetForm.cidr) payload.cidr = subnetForm.cidr;
     if (subnetForm.gateway) payload.gateway = subnetForm.gateway;
     if (subnetForm.dns_server) payload.dns_server = subnetForm.dns_server;
-    await api.post(`/api/vpcs/${selected.id}/subnets`, payload);
-    setShowSubnet(false);
-    setSubnetForm({
-      name: '', cidr: '', gateway: '', snat_enabled: true, dns_server: '',
-    });
-    fetchVPCs();
+    try {
+      await api.post(`/api/vpcs/${selected.id}/subnets`, payload);
+      toast('Subnet created', 'success');
+      setShowSubnet(false);
+      setSubnetForm({
+        name: '', cidr: '', gateway: '', snat_enabled: true, dns_server: '',
+      });
+      fetchVPCs();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to create subnet', 'error');
+    }
   };
 
   const handleDeleteSubnet = async (subnetId: string) => {
     if (!selected) return;
-    await api.delete(`/api/vpcs/${selected.id}/subnets/${subnetId}`);
-    fetchVPCs();
+    try {
+      await api.delete(`/api/vpcs/${selected.id}/subnets/${subnetId}`);
+      toast('Subnet deleted', 'success');
+      fetchVPCs();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to delete subnet', 'error');
+    }
   };
 
   const handleChangeIp = async () => {
@@ -144,7 +156,7 @@ export default function VPCs() {
       api.get(`/api/vpcs/${selected.id}/instances`).then((res) => setInstances(res.data)).catch(() => {});
     } catch (e: any) {
       const d = e?.response?.data?.detail;
-      alert(typeof d === 'string' ? d : 'Failed to change IP');
+      toast(typeof d === 'string' ? d : 'Failed to change IP', 'error');
     }
   };
 

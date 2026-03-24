@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Image, Plus, Trash2 } from 'lucide-react';
 import api from '../api/client';
 import {
-  Button, DataTable, Input, Modal, Select, Badge, EmptyState, type Column,
+  Button, DataTable, Input, Modal, Select, Badge, EmptyState, useConfirm, useToast, type Column,
 } from '@/components/ui';
 
 interface CustomImage {
@@ -18,6 +18,8 @@ interface CustomImage {
 }
 
 export default function CustomImages() {
+  const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [images, setImages] = useState<CustomImage[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -33,16 +35,26 @@ export default function CustomImages() {
   useEffect(fetchImages, []);
 
   const handleCreate = async () => {
-    await api.post('/api/admin/images', form);
-    setShowCreate(false);
-    setForm({ name: '', os_type: 'linux', format: 'qcow2', source_url: '' });
-    fetchImages();
+    try {
+      await api.post('/api/admin/images', form);
+      toast('Image created successfully', 'success');
+      setShowCreate(false);
+      setForm({ name: '', os_type: 'linux', format: 'qcow2', source_url: '' });
+      fetchImages();
+    } catch {
+      toast('Failed to create image', 'error');
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this image?')) return;
-    await api.delete(`/api/admin/images/${id}`);
-    fetchImages();
+    if (!await confirm({ title: 'Delete Image', message: 'Delete this custom image?' })) return;
+    try {
+      await api.delete(`/api/admin/images/${id}`);
+      toast('Image deleted', 'success');
+      fetchImages();
+    } catch {
+      toast('Failed to delete image', 'error');
+    }
   };
 
   const columns: Column<CustomImage>[] = [

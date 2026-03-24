@@ -4,7 +4,7 @@ import { ArrowLeft, Play, Trash2 } from 'lucide-react';
 import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
-  Badge, StatusBadge, Tabs,
+  Badge, StatusBadge, Tabs, useConfirm, useToast,
 } from '@/components/ui';
 
 interface BackupInfo {
@@ -33,6 +33,8 @@ interface BackupHistory {
 export default function BackupDetail() {
   const { backupId } = useParams<{ backupId: string }>();
   const navigate = useNavigate();
+  const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [backup, setBackup] = useState<BackupInfo | null>(null);
   const [history, setHistory] = useState<BackupHistory[]>([]);
   const [tab, setTab] = useState('info');
@@ -51,14 +53,26 @@ export default function BackupDetail() {
   }, [backupId]);
 
   const handleRestore = async () => {
-    if (!backupId || !confirm('Restore this backup? The current state will be replaced.')) return;
-    await api.post(`/api/backups/${backupId}/restore`);
+    if (!backupId) return;
+    if (!await confirm({ title: 'Restore Backup', message: 'Restore this backup? The current state will be replaced.' })) return;
+    try {
+      await api.post(`/api/backups/${backupId}/restore`);
+      toast('Backup restore started', 'success');
+    } catch {
+      toast('Failed to restore backup', 'error');
+    }
   };
 
   const handleDelete = async () => {
-    if (!backupId || !confirm('Permanently delete this backup?')) return;
-    await api.delete(`/api/backups/${backupId}`);
-    navigate('/backups');
+    if (!backupId) return;
+    if (!await confirm({ title: 'Delete Backup', message: 'Permanently delete this backup? This action cannot be undone.' })) return;
+    try {
+      await api.delete(`/api/backups/${backupId}`);
+      toast('Backup deleted', 'success');
+      navigate('/backups');
+    } catch {
+      toast('Failed to delete backup', 'error');
+    }
   };
 
   if (loading) return <p className="text-paws-text-muted p-8">Loading...</p>;

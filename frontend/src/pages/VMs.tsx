@@ -6,7 +6,7 @@ import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
 import { cn } from '@/lib/utils';
-import { useToast } from '@/components/ui';
+import { useToast, useConfirm } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 
 interface VM {
@@ -33,6 +33,7 @@ export default function VMs() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [vms, setVms] = useState<VM[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -53,9 +54,10 @@ export default function VMs() {
   };
 
   const deleteVM = async (id: string) => {
-    if (!confirm('Are you sure you want to destroy this VM?')) return;
+    if (!await confirm({ title: 'Destroy VM', message: 'Are you sure you want to destroy this VM? This action cannot be undone.' })) return;
     try {
       await api.delete(`/api/compute/vms/${id}`);
+      toast('VM destroyed successfully', 'success');
       fetchVMs();
     } catch (e: any) {
       const d = e?.response?.data?.detail;

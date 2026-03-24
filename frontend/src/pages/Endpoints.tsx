@@ -3,7 +3,7 @@ import { Globe, Plus, Trash2, Copy, Check, Power } from 'lucide-react';
 import api from '../api/client';
 import {
   Button, DataTable, Input, Modal,
-  Select, Badge, StatusBadge, EmptyState, type Column,
+  Select, Badge, StatusBadge, EmptyState, useConfirm, useToast, type Column,
 } from '@/components/ui';
 
 interface Endpoint {
@@ -28,6 +28,8 @@ interface QuotaInfo {
 }
 
 export default function Endpoints() {
+  const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
@@ -46,21 +48,36 @@ export default function Endpoints() {
   useEffect(fetchData, []);
 
   const handleCreate = async () => {
-    await api.post('/api/endpoints/', form);
-    setShowCreate(false);
-    setForm({ resource_id: '', name: '', protocol: 'http', internal_port: 8080, subdomain: '', tls_enabled: true, auth_required: false });
-    fetchData();
+    try {
+      await api.post('/api/endpoints/', form);
+      toast('Endpoint created', 'success');
+      setShowCreate(false);
+      setForm({ resource_id: '', name: '', protocol: 'http', internal_port: 8080, subdomain: '', tls_enabled: true, auth_required: false });
+      fetchData();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to create endpoint', 'error');
+    }
   };
 
   const handleToggle = async (id: string, active: boolean) => {
-    await api.patch(`/api/endpoints/${id}`, { is_active: !active });
-    fetchData();
+    try {
+      await api.patch(`/api/endpoints/${id}`, { is_active: !active });
+      toast(`Endpoint ${active ? 'disabled' : 'enabled'}`, 'success');
+      fetchData();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to toggle endpoint', 'error');
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this endpoint?')) return;
-    await api.delete(`/api/endpoints/${id}`);
-    fetchData();
+    if (!await confirm({ title: 'Delete Endpoint', message: 'Delete this endpoint?' })) return;
+    try {
+      await api.delete(`/api/endpoints/${id}`);
+      toast('Endpoint deleted', 'success');
+      fetchData();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to delete endpoint', 'error');
+    }
   };
 
   const copyUrl = (fqdn: string) => {

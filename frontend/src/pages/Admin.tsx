@@ -10,7 +10,7 @@ import { StatusBadge } from '@/components/ui/StatusBadge';
 import { DataTable } from '@/components/ui/DataTable';
 import type { Column } from '@/components/ui/DataTable';
 import { MetricCard } from '@/components/ui/MetricCard';
-import { Textarea, Modal, Select, useToast, Tabs, ConfirmDialog } from '@/components/ui';
+import { Textarea, Modal, Select, useToast, Tabs, ConfirmDialog, useConfirm } from '@/components/ui';
 import { QuotaBar } from '@/components/ui/QuotaBar';
 import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, ChevronDown, ChevronRight, Search, Eye, Network } from 'lucide-react';
 import {
@@ -455,7 +455,7 @@ function AnalyticsTab() {
 function AdminResourcesTab({ category }: { category: string }) {
   const navigate = useNavigate();
   const { startImpersonating } = useAuth();
-  const toast = useToast();
+  const { toast } = useToast();
   const [items, setItems] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -488,7 +488,7 @@ function AdminResourcesTab({ category }: { category: string }) {
         await startImpersonating(res.data.access_token);
         navigate(`/${route}/${row.id}`);
       } catch {
-        toast.toast('Failed to open resource', 'error');
+        toast('Failed to open resource', 'error');
       }
       return;
     }
@@ -498,7 +498,7 @@ function AdminResourcesTab({ category }: { category: string }) {
         await startImpersonating(res.data.access_token);
         navigate(`/backups/${row.id}`);
       } catch {
-        toast.toast('Failed to open backup', 'error');
+        toast('Failed to open backup', 'error');
       }
       return;
     }
@@ -508,7 +508,7 @@ function AdminResourcesTab({ category }: { category: string }) {
         await startImpersonating(res.data.access_token);
         navigate(`/storage/${row.name}/detail`);
       } catch {
-        toast.toast('Failed to open bucket', 'error');
+        toast('Failed to open bucket', 'error');
       }
       return;
     }
@@ -529,7 +529,7 @@ function AdminResourcesTab({ category }: { category: string }) {
         await startImpersonating(res.data.access_token);
         navigate(route);
       } catch {
-        toast.toast('Failed to open as user', 'error');
+        toast('Failed to open as user', 'error');
       }
     }
   };
@@ -702,7 +702,8 @@ function UsersTab() {
   const [auditTotal, setAuditTotal] = useState(0);
   const [auditFilter, setAuditFilter] = useState('');
   const [auditTypeFilter, setAuditTypeFilter] = useState('');
-  const toast = useToast();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const navigate = useNavigate();
   const { startImpersonating } = useAuth();
 
@@ -713,7 +714,7 @@ function UsersTab() {
       navigate('/');
     } catch (e: any) {
       const d = e.response?.data?.detail;
-      toast.toast(typeof d === 'string' ? d : 'Failed to start audit mode', 'error');
+      toast(typeof d === 'string' ? d : 'Failed to start audit mode', 'error');
     }
   };
 
@@ -766,7 +767,7 @@ function UsersTab() {
     fetchUsers();
   };
   const deleteUser = async (id: string) => {
-    if (!confirm('Delete this user and all their resources?')) return;
+    if (!await confirm({ title: 'Delete User', message: 'Delete this user and all their resources?' })) return;
     await api.delete(`/api/admin/users/${id}`);
     setSelectedUser(null);
     fetchUsers();
@@ -776,20 +777,20 @@ function UsersTab() {
     if (!transferTarget) return;
     try {
       await api.post(`/api/admin/users/resources/${resourceId}/transfer`, { target_user_id: transferTarget });
-      toast.toast('Resource transferred', 'success');
+      toast('Resource transferred', 'success');
       setShowTransfer(null);
       setTransferTarget('');
       if (selectedUser) selectUser(selectedUser);
     } catch (e: any) {
       const d = e.response?.data?.detail;
-      toast.toast(typeof d === 'string' ? d : 'Transfer failed', 'error');
+      toast(typeof d === 'string' ? d : 'Transfer failed', 'error');
     }
   };
 
   const removeResource = async (resourceId: string) => {
-    if (!selectedUser || !confirm('Remove this resource from user? The VM will remain on Proxmox but won\'t be tracked.')) return;
+    if (!selectedUser || !await confirm({ title: 'Remove Resource', message: 'Remove this resource from user? The VM will remain on Proxmox but won\'t be tracked.' })) return;
     await api.post(`/api/admin/users/${selectedUser}/remove-resource/${resourceId}`);
-    toast.toast('Resource removed', 'success');
+    toast('Resource removed', 'success');
     selectUser(selectedUser);
   };
 
@@ -809,14 +810,14 @@ function UsersTab() {
         target_user_id: selectedUser,
         display_name: importName || null,
       });
-      toast.toast('VM imported successfully', 'success');
+      toast('VM imported successfully', 'success');
       setShowImport(false);
       setImportVmid(null);
       setImportName('');
       selectUser(selectedUser);
     } catch (e: any) {
       const d = e.response?.data?.detail;
-      toast.toast(typeof d === 'string' ? d : 'Import failed', 'error');
+      toast(typeof d === 'string' ? d : 'Import failed', 'error');
     }
   };
 
@@ -957,9 +958,9 @@ function UsersTab() {
                     <div className="flex items-center gap-1.5">
                       <Button variant="outline" size="sm" title="Reset idle timer to now" onClick={() => {
                         api.patch(`/api/admin/users/${selectedUser}/resources/${r.id}/lifecycle`).then(() => {
-                          toast.toast('Idle timer reset', 'success');
+                          toast('Idle timer reset', 'success');
                           api.get(`/api/admin/users/${selectedUser}/resources`).then((res) => setUserResources(res.data)).catch(() => {});
-                        }).catch(() => toast.toast('Failed to reset timer', 'error'));
+                        }).catch(() => toast('Failed to reset timer', 'error'));
                       }}>
                         Reset Timer
                       </Button>
@@ -1247,7 +1248,7 @@ function UsersTab() {
 // --- Templates Tab -------------------------------------------------------
 
 function GroupsTab() {
-  const toast = useToast();
+  const { toast } = useToast();
   const [groups, setGroups] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -1265,7 +1266,7 @@ function GroupsTab() {
       setGroups(res.data.items || []);
       setTotalPages(res.data.pages || 1);
     } catch {
-      toast.toast('Failed to load groups', 'error');
+      toast('Failed to load groups', 'error');
     } finally {
       setLoading(false);
     }
@@ -1278,7 +1279,7 @@ function GroupsTab() {
       const res = await api.get(`/api/admin/groups/${groupId}`);
       setGroupDetail(res.data);
     } catch {
-      toast.toast('Failed to load group details', 'error');
+      toast('Failed to load group details', 'error');
     }
   };
 
@@ -1286,14 +1287,14 @@ function GroupsTab() {
     if (!deleteTarget) return;
     try {
       await api.delete(`/api/admin/groups/${deleteTarget.id}`);
-      toast.toast('Group deleted', 'success');
+      toast('Group deleted', 'success');
       setShowDeleteConfirm(false);
       setDeleteTarget(null);
       setSelectedGroup(null);
       setGroupDetail(null);
       fetchGroups();
     } catch {
-      toast.toast('Failed to delete group', 'error');
+      toast('Failed to delete group', 'error');
     }
   };
 
@@ -1439,6 +1440,7 @@ function TemplatesTab() {
   const [showPicker, setShowPicker] = useState(false);
   const [selected, setSelected] = useState<any | null>(null);
   const [form, setForm] = useState({ name: '', description: '', min_cpu: 1, min_ram_mb: 512, min_disk_gb: 10 });
+  const { confirm } = useConfirm();
 
   const fetchTemplates = () => api.get('/api/admin/templates/?include_inactive=true').then(r => setTemplates(r.data)).catch(() => {});
   const fetchAvailable = () => api.get('/api/admin/templates/proxmox-available').then(r => setAvailable(r.data)).catch(() => {});
@@ -1484,7 +1486,7 @@ function TemplatesTab() {
     fetchTemplates();
   };
   const deleteTemplate = async (id: string) => {
-    if (!confirm('Remove this template from catalog?')) return;
+    if (!await confirm({ title: 'Remove Template', message: 'Remove this template from catalog?' })) return;
     await api.delete(`/api/admin/templates/${id}`);
     fetchTemplates();
   };
@@ -1614,7 +1616,7 @@ function TemplateRequestsSection() {
   const [requests, setRequests] = useState<TemplateRequestData[]>([]);
   const [selected, setSelected] = useState<TemplateRequestData | null>(null);
   const [notes, setNotes] = useState('');
-  const toast = useToast();
+  const { toast } = useToast();
 
   const fetchReqs = () => api.get('/api/templates/requests').then(r => setRequests(r.data)).catch(() => {});
   useEffect(() => { fetchReqs(); }, []);
@@ -1622,12 +1624,12 @@ function TemplateRequestsSection() {
   const review = async (id: string, status: string) => {
     try {
       await api.patch(`/api/templates/requests/${id}`, { status, admin_notes: notes || null });
-      toast.toast(`Request ${status}`, 'success');
+      toast(`Request ${status}`, 'success');
       setSelected(null);
       setNotes('');
       fetchReqs();
     } catch (e: any) {
-      const _d = e.response?.data?.detail; toast.toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
+      const _d = e.response?.data?.detail; toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
     }
   };
 
@@ -1737,7 +1739,7 @@ function QuotaRequestsTab() {
             <Card key={qr.id}>
               <CardContent>
                 <div className="flex justify-between mb-2">
-                  <span className="text-paws-text"><strong>{qr.request_type}</strong>: {qr.current_value} -> {qr.requested_value}</span>
+                  <span className="text-paws-text"><strong>{qr.request_type}</strong>: {qr.current_value} {'->'} {qr.requested_value}</span>
                   <StatusBadge status={qr.status} />
                 </div>
                 <p className="text-sm text-paws-text-muted">{qr.reason}</p>
@@ -2221,16 +2223,16 @@ function SettingsTab() {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const toggleGroup = (group: string) => setExpandedGroups(prev => ({ ...prev, [group]: !prev[group] }));
 
-  const toast = useToast();
+  const { toast } = useToast();
   const [syncing, setSyncing] = useState(false);
 
   const syncMetadata = async () => {
     setSyncing(true);
     try {
       const res = await api.post('/api/compute/admin/sync-metadata');
-      toast.toast(`Synced ${res.data.synced} resources (${res.data.failed} failed)`, 'success');
+      toast(`Synced ${res.data.synced} resources (${res.data.failed} failed)`, 'success');
     } catch {
-      toast.toast('Failed to sync metadata', 'error');
+      toast('Failed to sync metadata', 'error');
     } finally {
       setSyncing(false);
     }
@@ -2375,7 +2377,8 @@ function TiersTab() {
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<TierData | null>(null);
   const [form, setForm] = useState({ name: '', description: '', capabilities: [] as string[], is_default: false, idle_shutdown_days: '' as string, idle_destroy_days: '' as string, account_inactive_days: '' as string, max_subnet_prefix: '' as string, bandwidth_limit_mbps: '100' as string });
-  const toast = useToast();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
 
   const fetch = () => { api.get('/api/admin/tiers/').then(r => setTiers(r.data)).catch(() => {}); };
   useEffect(() => { fetch(); }, []);
@@ -2399,22 +2402,22 @@ function TiersTab() {
     try {
       if (editing) {
         await api.patch(`/api/admin/tiers/${editing.id}`, payload);
-        toast.toast('Tier updated', 'success');
+        toast('Tier updated', 'success');
       } else {
         await api.post('/api/admin/tiers/', payload);
-        toast.toast('Tier created', 'success');
+        toast('Tier created', 'success');
       }
       setShowModal(false);
       fetch();
     } catch (e: any) {
-      const _d = e.response?.data?.detail; toast.toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
+      const _d = e.response?.data?.detail; toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
     }
   };
 
   const remove = async (id: string) => {
-    if (!confirm('Delete this tier? Users on it will be unassigned.')) return;
+    if (!await confirm({ title: 'Delete Tier', message: 'Delete this tier? Users on it will be unassigned.' })) return;
     await api.delete(`/api/admin/tiers/${id}`);
-    toast.toast('Tier deleted', 'success');
+    toast('Tier deleted', 'success');
     fetch();
   };
 
@@ -2527,7 +2530,7 @@ function TierRequestsSection() {
   const [requests, setRequests] = useState<any[]>([]);
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [reviewNotes, setReviewNotes] = useState('');
-  const toast = useToast();
+  const { toast } = useToast();
 
   const fetchReqs = () => { api.get('/api/admin/tiers/requests').then(r => setRequests(r.data || [])).catch(() => {}); };
   useEffect(() => { fetchReqs(); }, []);
@@ -2535,13 +2538,13 @@ function TierRequestsSection() {
   const review = async (id: string, status: string) => {
     try {
       await api.patch(`/api/admin/tiers/requests/${id}`, { status, admin_notes: reviewNotes || null });
-      toast.toast(`Request ${status}`, 'success');
+      toast(`Request ${status}`, 'success');
       setReviewId(null);
       setReviewNotes('');
       fetchReqs();
     } catch (e: any) {
       const d = e.response?.data?.detail;
-      toast.toast(typeof d === 'string' ? d : 'Failed', 'error');
+      toast(typeof d === 'string' ? d : 'Failed', 'error');
     }
   };
 
@@ -2614,7 +2617,8 @@ function RulesTab() {
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<SystemRuleData | null>(null);
   const [form, setForm] = useState({ category: 'General', title: '', description: '', severity: 'info', sort_order: 0, is_active: true });
-  const toast = useToast();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
 
   const fetch = () => { api.get('/api/admin/rules').then(r => setRules(r.data)).catch(() => {}); };
   useEffect(() => { fetch(); }, []);
@@ -2626,24 +2630,24 @@ function RulesTab() {
     try {
       if (editing) {
         await api.patch(`/api/admin/rules/${editing.id}`, form);
-        toast.toast('Rule updated', 'success');
+        toast('Rule updated', 'success');
       } else {
         await api.post('/api/admin/rules', form);
-        toast.toast('Rule created', 'success');
+        toast('Rule created', 'success');
       }
       setShowModal(false);
       fetch();
     } catch (e: any) {
       const d = e.response?.data?.detail;
       const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map((v: any) => v.msg).join(', ') : 'Failed';
-      toast.toast(msg, 'error');
+      toast(msg, 'error');
     }
   };
 
   const remove = async (id: string) => {
-    if (!confirm('Delete this rule?')) return;
+    if (!await confirm({ title: 'Delete Rule', message: 'Delete this rule?' })) return;
     await api.delete(`/api/admin/rules/${id}`);
-    toast.toast('Rule deleted', 'success');
+    toast('Rule deleted', 'success');
     fetch();
   };
 
@@ -2742,7 +2746,7 @@ function SDNTab() {
   const [networks, setNetworks] = useState<SDNNetwork[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<SDNNetwork | null>(null);
-  const toast = useToast();
+  const { toast } = useToast();
 
   const fetchData = () => {
     setLoading(true);
@@ -2758,15 +2762,15 @@ function SDNTab() {
     if (!deleteTarget) return;
     try {
       const r = await api.delete(`/api/admin/sdn/networks/${deleteTarget.id}`);
-      toast.toast(r.data.detail || 'VPC deleted', 'success');
+      toast(r.data.detail || 'VPC deleted', 'success');
       if (r.data.proxmox_warning) {
-        toast.toast(`Proxmox warning: ${r.data.proxmox_warning}`, 'warning');
+        toast(`Proxmox warning: ${r.data.proxmox_warning}`, 'warning');
       }
       setDeleteTarget(null);
       fetchData();
     } catch (e: any) {
       const _d = e.response?.data?.detail;
-      toast.toast(typeof _d === 'string' ? _d : 'Delete failed', 'error');
+      toast(typeof _d === 'string' ? _d : 'Delete failed', 'error');
     }
   };
 
@@ -2932,7 +2936,8 @@ function ClusterTab() {
   const [showHaForm, setShowHaForm] = useState(false);
   const [editingHa, setEditingHa] = useState<any | null>(null);
   const [haForm, setHaForm] = useState({ name: '', description: '', pve_group_name: '', nodes: '', restricted: false, nofailback: false, max_relocate: 1, max_restart: 1 });
-  const toast = useToast();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
 
   const fetchStatus = () => {
     api.get('/api/cluster/status').then(r => setStatus(r.data)).catch(() => {});
@@ -2971,36 +2976,36 @@ function ClusterTab() {
       const payload = { ...haForm, nodes: haForm.nodes.split(',').map(n => n.trim()).filter(Boolean) };
       if (editingHa) {
         await api.patch(`/api/admin/ha/groups/${editingHa.id}`, payload);
-        toast.toast('HA group updated', 'success');
+        toast('HA group updated', 'success');
       } else {
         await api.post('/api/admin/ha/groups', payload);
-        toast.toast('HA group created', 'success');
+        toast('HA group created', 'success');
       }
       setShowHaForm(false);
       fetchHaGroups();
     } catch (e: any) {
-      const _d = e.response?.data?.detail; toast.toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
+      const _d = e.response?.data?.detail; toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
     }
   };
 
   const deleteHaGroup = async (id: string) => {
-    if (!confirm('Delete this HA group? This will also remove it from PVE.')) return;
+    if (!await confirm({ title: 'Delete HA Group', message: 'Delete this HA group? This will also remove it from PVE.' })) return;
     try {
       await api.delete(`/api/admin/ha/groups/${id}`);
-      toast.toast('HA group deleted', 'success');
+      toast('HA group deleted', 'success');
       fetchHaGroups();
     } catch (e: any) {
-      const _d = e.response?.data?.detail; toast.toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
+      const _d = e.response?.data?.detail; toast(typeof _d === 'string' ? _d : Array.isArray(_d) ? _d.map((v: any) => v.msg).join(', ') : 'Failed', 'error');
     }
   };
 
   const syncHaGroups = async () => {
     try {
       const r = await api.post('/api/admin/ha/groups/sync');
-      toast.toast(r.data.detail, 'success');
+      toast(r.data.detail, 'success');
       fetchHaGroups();
     } catch (e: any) {
-      toast.toast(e.response?.data?.detail || 'Failed to sync', 'error');
+      toast(e.response?.data?.detail || 'Failed to sync', 'error');
     }
   };
 

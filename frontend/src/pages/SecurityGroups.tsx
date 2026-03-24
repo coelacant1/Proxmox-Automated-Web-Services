@@ -3,7 +3,7 @@ import { Shield, Plus, Trash2, ArrowDown, ArrowUp, Eye } from 'lucide-react';
 import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
-  DataTable, Input, Modal, Select, Badge, EmptyState, Tabs, type Column,
+  DataTable, Input, Modal, Select, Badge, EmptyState, Tabs, useConfirm, useToast, type Column,
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
 
@@ -43,6 +43,8 @@ const SERVICE_PRESETS = [
 ];
 
 export default function SecurityGroups() {
+  const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [groups, setGroups] = useState<SecurityGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -70,44 +72,69 @@ export default function SecurityGroups() {
   useEffect(fetchGroups, []);
 
   const handleCreate = async () => {
-    await api.post('/api/security-groups/', form);
-    setShowCreate(false);
-    setForm({ name: '', description: '' });
-    fetchGroups();
+    try {
+      await api.post('/api/security-groups/', form);
+      toast('Firewall group created', 'success');
+      setShowCreate(false);
+      setForm({ name: '', description: '' });
+      fetchGroups();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to create firewall group', 'error');
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this security group?')) return;
-    await api.delete(`/api/security-groups/${id}`);
-    if (selected?.id === id) setSelected(null);
-    fetchGroups();
+    if (!await confirm({ title: 'Delete Firewall', message: 'Delete this firewall rule group and all its rules?' })) return;
+    try {
+      await api.delete(`/api/security-groups/${id}`);
+      if (selected?.id === id) setSelected(null);
+      toast('Firewall group deleted', 'success');
+      fetchGroups();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to delete firewall group', 'error');
+    }
   };
 
   const handleAddRule = async () => {
     if (!selected) return;
-    await api.post(`/api/security-groups/${selected.id}/rules`, ruleForm);
-    setShowAddRule(false);
-    setRuleForm({ direction: 'inbound', action: 'allow', protocol: 'tcp', port_range: '', source: '0.0.0.0/0' });
-    fetchGroups();
+    try {
+      await api.post(`/api/security-groups/${selected.id}/rules`, ruleForm);
+      toast('Rule added', 'success');
+      setShowAddRule(false);
+      setRuleForm({ direction: 'inbound', action: 'allow', protocol: 'tcp', port_range: '', source: '0.0.0.0/0' });
+      fetchGroups();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to add rule', 'error');
+    }
   };
 
   const handleDeleteRule = async (ruleId: string) => {
     if (!selected) return;
-    await api.delete(`/api/security-groups/${selected.id}/rules/${ruleId}`);
-    fetchGroups();
+    try {
+      await api.delete(`/api/security-groups/${selected.id}/rules/${ruleId}`);
+      toast('Rule deleted', 'success');
+      fetchGroups();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to delete rule', 'error');
+    }
   };
 
   const handleQuickAdd = async (preset: typeof SERVICE_PRESETS[0], direction: string) => {
     if (!selected) return;
-    await api.post(`/api/security-groups/${selected.id}/rules`, {
-      direction,
-      action: 'allow',
-      protocol: preset.protocol,
-      port_range: preset.port,
-      source: '0.0.0.0/0',
-      description: preset.label,
-    });
-    fetchGroups();
+    try {
+      await api.post(`/api/security-groups/${selected.id}/rules`, {
+        direction,
+        action: 'allow',
+        protocol: preset.protocol,
+        port_range: preset.port,
+        source: '0.0.0.0/0',
+        description: preset.label,
+      });
+      toast(`${preset.label} rule added`, 'success');
+      fetchGroups();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to add rule', 'error');
+    }
   };
 
   const ruleColumns: Column<Rule>[] = [

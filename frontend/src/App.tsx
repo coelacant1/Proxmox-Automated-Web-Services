@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './components/ui';
+import { ConfirmProvider } from './components/ui';
 import Admin from './pages/Admin';
 import AdminDashboard from './pages/AdminDashboard';
 import APIDocs from './pages/APIDocs';
@@ -42,6 +43,7 @@ function App() {
   return (
     <BrowserRouter>
       <ToastProvider>
+      <ConfirmProvider>
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
@@ -87,6 +89,7 @@ function App() {
           </Route>
         </Routes>
       </AuthProvider>
+      </ConfirmProvider>
       </ToastProvider>
     </BrowserRouter>
   );

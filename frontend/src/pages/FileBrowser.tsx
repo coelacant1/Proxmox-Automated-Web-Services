@@ -9,6 +9,7 @@ import api from '../api/client';
 import {
   Button, Card, CardContent,
   Input, Modal, Badge, EmptyState,
+  useToast, useConfirm,
 } from '@/components/ui';
 
 interface S3Object {
@@ -53,6 +54,8 @@ function isPreviewable(key: string): 'text' | 'image' | null {
 export default function FileBrowser() {
   const { bucketName } = useParams<{ bucketName: string }>();
   const navigate = useNavigate();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [objects, setObjects] = useState<S3Object[]>([]);
   const [bucket, setBucket] = useState<BucketInfo | null>(null);
   const [prefix, setPrefix] = useState('');
@@ -124,10 +127,13 @@ export default function FileBrowser() {
           },
         );
         setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, progress: 100, status: 'done' } : u));
-      } catch {
+      } catch (e: any) {
         setUploads((prev) => prev.map((u) => u.name === file.name ? { ...u, status: 'error' } : u));
+        toast(e?.response?.data?.detail || `Failed to upload ${file.name}`, 'error');
       }
     }
+    const succeeded = files.length - uploads.filter((u) => u.status === 'error').length;
+    if (succeeded > 0) toast(`${files.length} file(s) uploaded`, 'success');
     setTimeout(() => {
       setUploads([]);
       fetchObjects();
@@ -171,10 +177,15 @@ export default function FileBrowser() {
   }, [bucketName, prefix]);
 
   const handleDelete = async (key: string) => {
-    if (!confirm(`Delete "${key}"?`)) return;
+    if (!await confirm({ title: 'Delete File', message: `Delete "${key}"?` })) return;
     if (!bucketName) return;
-    await api.delete(`/api/storage/buckets/${bucketName}/objects/${key}`);
-    fetchObjects();
+    try {
+      await api.delete(`/api/storage/buckets/${bucketName}/objects/${key}`);
+      toast('File deleted', 'success');
+      fetchObjects();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to delete file', 'error');
+    }
   };
 
   // Bulk operations
@@ -194,10 +205,15 @@ export default function FileBrowser() {
 
   const handleBulkDelete = async () => {
     if (selectedKeys.size === 0) return;
-    if (!confirm(`Delete ${selectedKeys.size} selected file(s)?`)) return;
+    if (!await confirm({ title: 'Delete Files', message: `Delete ${selectedKeys.size} selected file(s)?` })) return;
     if (!bucketName) return;
-    for (const key of selectedKeys) {
-      await api.delete(`/api/storage/buckets/${bucketName}/objects/${key}`).catch(() => {});
+    try {
+      for (const key of selectedKeys) {
+        await api.delete(`/api/storage/buckets/${bucketName}/objects/${key}`);
+      }
+      toast(`${selectedKeys.size} file(s) deleted`, 'success');
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to delete some files', 'error');
     }
     setSelectedKeys(new Set());
     setBulkMode(false);

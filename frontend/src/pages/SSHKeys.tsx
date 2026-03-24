@@ -3,7 +3,7 @@ import { Key, Plus, Trash2, Copy, Check } from 'lucide-react';
 import api from '../api/client';
 import {
   Button, DataTable, Input, Modal,
-  Textarea, EmptyState, type Column,
+  Textarea, EmptyState, useConfirm, useToast, type Column,
 } from '@/components/ui';
 
 interface SSHKey {
@@ -16,6 +16,8 @@ interface SSHKey {
 }
 
 export default function SSHKeys() {
+  const { confirm } = useConfirm();
+  const { toast } = useToast();
   const [keys, setKeys] = useState<SSHKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -32,16 +34,26 @@ export default function SSHKeys() {
   useEffect(fetchKeys, []);
 
   const handleCreate = async () => {
-    await api.post('/api/ssh-keys/', form);
-    setShowCreate(false);
-    setForm({ name: '', public_key: '' });
-    fetchKeys();
+    try {
+      await api.post('/api/ssh-keys/', form);
+      toast('SSH key added', 'success');
+      setShowCreate(false);
+      setForm({ name: '', public_key: '' });
+      fetchKeys();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to add SSH key', 'error');
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this SSH key?')) return;
-    await api.delete(`/api/ssh-keys/${id}`);
-    fetchKeys();
+    if (!await confirm({ title: 'Delete SSH Key', message: 'Delete this SSH key?' })) return;
+    try {
+      await api.delete(`/api/ssh-keys/${id}`);
+      toast('SSH key deleted', 'success');
+      fetchKeys();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail || 'Failed to delete SSH key', 'error');
+    }
   };
 
   const copyFingerprint = (fp: string) => {

@@ -1,7 +1,7 @@
 export { Button } from './Button';
 export { Badge } from './Badge';
 export { Card, CardHeader, CardTitle, CardDescription, CardContent } from './Card';
-export { ConfirmDialog } from './ConfirmDialog';
+export { ConfirmDialog, ConfirmProvider, useConfirm } from './ConfirmDialog';
 export { DataTable } from './DataTable';
 export type { Column } from './DataTable';
 export { EmptyState } from './EmptyState';

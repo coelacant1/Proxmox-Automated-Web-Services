@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.5 - 2026-03-24
+
+### Added
+
+- **Custom Confirm Dialog** - Promise-based `useConfirm` hook and `ConfirmProvider` replacing all native `confirm()` dialogs with a styled modal (danger icon, cancel/confirm buttons, dark overlay)
+- **Toast Notifications** - Added success and error toasts to all destructive and create operations across VPCs, VMs, Containers, Storage, FileBrowser, SSH Keys, Firewalls, Endpoints, Backups, BackupDetail, CustomImages, and Admin
+- **ESLint Configuration** - Added `eslint.config.js` for ESLint v9 with TypeScript and React plugins
+
+### Changed
+
+- All 20 native `confirm()` calls replaced with `useConfirm` hook across 13 pages
+- Native `alert()` call in VPCs.tsx replaced with error toast
+- Normalized `useToast` destructuring in Admin.tsx (11 instances of `toast.toast()` simplified to `toast()`)
+- S3 quota labels added to QuotaRequests.tsx for `max_buckets` and `max_storage_gb`
+
+### Fixed
+
+- **Frontend build** - JSX parse error from bare `->` in BucketDetail.tsx and Admin.tsx (escaped as `{'->'}`
+- **Backend CI** - `bcrypt` missing from `pyproject.toml` dependencies causing import failure
+- **Dashboard bucket count** - Was querying `resources` table instead of `storage_buckets` table, always showing 0
+
 ## 0.2.4 - 2026-03-20
 
 ### Added
