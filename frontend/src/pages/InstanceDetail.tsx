@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, Monitor, Terminal, Maximize, Minimize, Cloud, RotateCcw,
-  Play, Square, Power, Trash2, Clock, Shield, Globe,
+  Play, Square, Power, Trash2, Clock, Shield, Globe, FileText,
   Plus, X, Camera, HardDrive, Network, MousePointer,
 } from 'lucide-react';
 import {
@@ -10,12 +10,15 @@ import {
   ResponsiveContainer, Area, AreaChart,
 } from 'recharts';
 import api from '../api/client';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
   Input, Modal, Badge, StatusBadge, Tabs, Select, ConfirmDialog,
   useToast,
 } from '@/components/ui';
 import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
+import MarkdownEditor from '@/components/ui/MarkdownEditor';
 import { useAuth } from '@/context/AuthContext';
 
 interface Instance {
@@ -126,6 +129,12 @@ export default function InstanceDetail() {
   const [showAddNic, setShowAddNic] = useState(false);
   const [addNicVpc, setAddNicVpc] = useState('');
 
+  // Notes
+  const [notes, setNotes] = useState('');
+  const [notesDraft, setNotesDraft] = useState('');
+  const [notesEditing, setNotesEditing] = useState(false);
+  const [notesSaving, setNotesSaving] = useState(false);
+
   // Generic confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string; message: string; confirmLabel?: string;
@@ -181,6 +190,7 @@ export default function InstanceDetail() {
     api.get(`/api/volumes/?resource_id=${id}`).then((r) => setVolumes(r.data || [])).catch(() => {});
     api.get(`/api/compute/instances/${id}/ha`).then((r) => setHaStatus(r.data)).catch(() => setHaStatus(null));
     api.get('/api/ha/groups').then((r) => setHaGroups(r.data || [])).catch(() => {});
+    api.get(`/api/resources/${id}/notes`).then((r) => { setNotes(r.data?.notes || ''); setNotesDraft(r.data?.notes || ''); }).catch(() => {});
   };
 
   // Targeted refresh helpers to avoid re-fetching everything
@@ -800,6 +810,7 @@ export default function InstanceDetail() {
     { id: 'tasks', label: 'Tasks', count: taskHistory.length },
     { id: 'console', label: 'Console' },
     { id: 'lifecycle', label: 'Lifecycle' },
+    { id: 'notes', label: 'Notes' },
   ];
 
   return (
@@ -1623,6 +1634,55 @@ export default function InstanceDetail() {
             </Card>
           )}
         </div>
+      )}
+
+      {tab === 'notes' && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2"><FileText className="h-4 w-4" /> Notes</CardTitle>
+              {!notesEditing ? (
+                <Button variant="outline" size="sm" onClick={() => { setNotesDraft(notes); setNotesEditing(true); }}>
+                  Edit
+                </Button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => { setNotesEditing(false); setNotesDraft(notes); }}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" disabled={notesSaving} onClick={async () => {
+                    setNotesSaving(true);
+                    try {
+                      await api.put(`/api/resources/${id}/notes`, { notes: notesDraft });
+                      setNotes(notesDraft);
+                      setNotesEditing(false);
+                      toast('Notes saved', 'success');
+                    } catch { toast('Failed to save notes', 'error'); }
+                    finally { setNotesSaving(false); }
+                  }}>
+                    {notesSaving ? 'Saving...' : 'Save'}
+                  </Button>
+                </div>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            {notesEditing ? (
+              <MarkdownEditor
+                value={notesDraft}
+                onChange={setNotesDraft}
+                placeholder="Add notes about this instance..."
+                minHeight="300px"
+              />
+            ) : notes ? (
+              <div className="prose prose-invert max-w-none markdown-preview">
+                <Markdown remarkPlugins={[remarkGfm]}>{notes}</Markdown>
+              </div>
+            ) : (
+              <p className="text-paws-muted italic text-sm">No notes yet. Click Edit to add some.</p>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Resize Modal */}

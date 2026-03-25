@@ -280,6 +280,9 @@ class MockProxmoxClient:
     def get_agent_info(self, node: str, vmid: int) -> dict[str, Any]:
         return {"version": "5.2.0", "supported_commands": ["guest-info", "guest-exec"]}
 
+    def set_vm_description(self, node: str, vmid: int, description: str) -> None:
+        pass
+
     def find_vm_node(self, vmid: int) -> str | None:
         return "pve1"
 

@@ -265,17 +265,10 @@ def _apply_paws_metadata(
     resource: Resource,
 ) -> None:
     """Stamp PAWS ownership tags and description on a Proxmox VM/container."""
+    from app.routers.resources import _build_paws_description
+
     tags = "paws-managed"
-    description = (
-        f"PAWS Managed Resource\n\n"
-        f"Owner: {user.username} ({user.email or 'N/A'})\n\n"
-        f"User ID: {user.id}\n\n"
-        f"Resource ID: {resource.id}\n\n"
-        f"Name: {resource.display_name}\n\n"
-        f"Created: {resource.created_at or 'N/A'}\n\n"
-        f"---\n\n"
-        f"This instance is managed by PAWS. Do not modify tags or description manually."
-    )
+    description = _build_paws_description(resource, user, resource.notes or "")
     try:
         if vmtype == "lxc":
             proxmox_client.set_container_config(node, vmid, tags=tags, description=description)

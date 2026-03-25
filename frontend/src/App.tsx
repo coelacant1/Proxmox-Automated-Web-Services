@@ -19,6 +19,7 @@ import SystemRules from './pages/SystemRules';
 import CreateInstance from './pages/CreateInstance';
 import CustomImages from './pages/CustomImages';
 import Dashboard from './pages/Dashboard';
+import Documentation from './pages/Documentation';
 import Endpoints from './pages/Endpoints';
 import FileBrowser from './pages/FileBrowser';
 import ImportExport from './pages/ImportExport';
@@ -79,6 +80,7 @@ function App() {
             <Route path="api-docs" element={<APIDocs />} />
             <Route path="import-export" element={<ImportExport />} />
             <Route path="bug-reports" element={<BugReports />} />
+            <Route path="docs" element={<Documentation />} />
             <Route path="groups" element={<Groups />} />
             <Route path="keys" element={<APIKeys />} />
             <Route path="system-rules" element={<SystemRules />} />

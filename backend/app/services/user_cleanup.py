@@ -15,6 +15,7 @@ from app.models.models import (
     BugReport,
     CustomMetric,
     DNSRecord,
+    DocPage,
     Event,
     GroupResourceShare,
     LifecyclePolicy,
@@ -151,6 +152,10 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
     # SSH keys
     r = await db.execute(delete(SSHKeyPair).where(SSHKeyPair.owner_id == user_id))
     summary["ssh_keys"] = r.rowcount
+
+    # Doc pages
+    r = await db.execute(delete(DocPage).where(DocPage.owner_id == user_id))
+    summary["doc_pages"] = r.rowcount
 
     # Projects (members cascade via ORM)
     projects_result = await db.execute(select(Project).where(Project.owner_id == user_id))

@@ -191,6 +191,7 @@ class Resource(Base):
     status: Mapped[str] = mapped_column(String(50), default="pending")  # pending, creating, running, stopped, error
     specs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON blob for flexible metadata
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array of tag strings
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)  # Markdown notes
     termination_protected: Mapped[bool] = mapped_column(Boolean, default=False)
     network_mode: Mapped[str] = mapped_column(String(20), default="private")  # published, private, isolated
     bandwidth_limit_mbps: Mapped[int | None] = mapped_column(Integer, nullable=True)  # null = use tier default
@@ -866,3 +867,28 @@ class GroupAPIKey(Base):
 
     group: Mapped["UserGroup"] = relationship(lazy="selectin")
     creator: Mapped["User"] = relationship(lazy="selectin")
+
+
+class DocPage(Base):
+    """User-created markdown documentation page with visibility controls."""
+
+    __tablename__ = "doc_pages"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="private")  # private, group, public
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True
+    )
+    locked_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    owner: Mapped["User"] = relationship(lazy="selectin")
+    group: Mapped["UserGroup | None"] = relationship(lazy="selectin")

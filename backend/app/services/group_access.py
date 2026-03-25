@@ -22,10 +22,14 @@ async def get_group_permission(
 ) -> str | None:
     """Return the highest permission a user has on an entity via any group share.
 
+    Group admins/owners automatically get 'admin' permission on all shared
+    resources regardless of the share's permission field.
+
     Returns 'read', 'operate', 'admin', or None if no group access.
     """
+    # Find all group shares for this entity where the user is a member or owner
     result = await db.execute(
-        select(GroupResourceShare.permission)
+        select(GroupResourceShare.permission, UserGroupMember.role)
         .join(
             UserGroupMember,
             UserGroupMember.group_id == GroupResourceShare.group_id,
@@ -35,14 +39,20 @@ async def get_group_permission(
             GroupResourceShare.entity_id == entity_id,
             or_(
                 UserGroupMember.user_id == user_id,
-                # Also check if user is the group owner
                 GroupResourceShare.group_id.in_(select(UserGroup.id).where(UserGroup.owner_id == user_id)),
             ),
         )
     )
-    perms = [r[0] for r in result.all()]
-    if not perms:
+    rows = result.all()
+    if not rows:
         return None
+
+    # Group admins/owners get full admin access on shared resources
+    for share_perm, member_role in rows:
+        if member_role == "admin":
+            return "admin"
+
+    perms = [r[0] for r in rows]
     return max(perms, key=lambda p: PERM_LEVEL.get(p, -1))
 
 

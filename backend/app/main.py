@@ -29,6 +29,7 @@ from app.routers import (
     console,
     dashboard,
     dns,
+    docs,
     endpoints,
     events,
     groups,
@@ -350,3 +351,4 @@ app.include_router(admin_groups.router)
 app.include_router(system_rules.router)
 app.include_router(groups.router)
 app.include_router(template_requests.router)
+app.include_router(docs.router)

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.8 - 2026-03-25
+
+### Added
+
+- **Per-resource markdown notes (Issue #9)** - Notes tab on instance detail page with markdown editor and live preview; notes sync to Proxmox VM/LXC description alongside PAWS metadata
+- **Shared documentation pages (Issue #10)** - Full documentation system with create, edit, and delete; visibility controls (private, group, public); edit locking to prevent conflicts; accessible from sidebar
+- **Markdown editor component** - Reusable write/preview editor with GitHub Flavored Markdown support (tables, task lists, strikethrough)
+- **Markdown preview styling** - Dark-theme CSS for headings, code blocks, tables, blockquotes, lists, and links
+- **Database migration** - Added `notes` column to resources table and `doc_pages` table with indexes
+
+### Fixed
+
+- **Group member access to resource notes** - Notes endpoints now check group-level access (read to view, operate to edit) instead of owner-only; group admins get full access to shared resources
+- **Group document viewing** - Fixed 403 error when group members tried to open shared documents; `_can_view` now checks group membership
+- **Group admin permission elevation** - Group admins now automatically get admin-level access to all resources shared with their group regardless of the share's permission level
+- **PAWS metadata preservation** - Saving notes no longer overwrites Proxmox VM description; notes are appended below the PAWS metadata block with a separator
+- **Consistent metadata format** - Both resource notes sync and VM creation now use the same `_build_paws_description` helper for Proxmox descriptions
+- **Missing resize modal tag** - Restored accidentally removed `<Modal>` opening tag for the resize dialog in InstanceDetail
+- **Documentation page API patterns** - Fixed toast/confirm hook usage and API import paths in Documentation page
+
+### Changed
+
+- Group name badge shown on shared document cards in the documentation list
+- Documentation link added to sidebar navigation under Account section
+
 ## 0.2.7 - 2026-03-24
 
 ### Fixed

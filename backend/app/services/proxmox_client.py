@@ -166,6 +166,13 @@ class ProxmoxClient:
     def get_vm_config(self, node: str, vmid: int) -> dict[str, Any]:
         return self.api.nodes(node).qemu(vmid).config.get()
 
+    def set_vm_description(self, node: str, vmid: int, description: str) -> None:
+        """Set the description/notes field on a VM or LXC."""
+        try:
+            self.api.nodes(node).qemu(vmid).config.put(description=description)
+        except Exception:
+            self.api.nodes(node).lxc(vmid).config.put(description=description)
+
     def start_vm(self, node: str, vmid: int) -> str:
         return self.api.nodes(node).qemu(vmid).status.start.post()
 

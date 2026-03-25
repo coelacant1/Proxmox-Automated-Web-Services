@@ -46,3 +46,23 @@
     text-decoration: none;
   }
 }
+
+/* Markdown preview styles */
+.markdown-preview h1 { font-size: 1.75rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+.markdown-preview h2 { font-size: 1.375rem; font-weight: 600; margin: 1rem 0 0.5rem; }
+.markdown-preview h3 { font-size: 1.125rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+.markdown-preview p { margin: 0.5rem 0; line-height: 1.7; }
+.markdown-preview ul, .markdown-preview ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.markdown-preview li { margin: 0.25rem 0; }
+.markdown-preview ul { list-style-type: disc; }
+.markdown-preview ol { list-style-type: decimal; }
+.markdown-preview code { background: rgba(255,255,255,0.08); padding: 0.15rem 0.35rem; border-radius: 0.25rem; font-size: 0.875em; }
+.markdown-preview pre { background: rgba(255,255,255,0.06); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin: 0.75rem 0; }
+.markdown-preview pre code { background: none; padding: 0; }
+.markdown-preview blockquote { border-left: 3px solid var(--color-paws-primary); padding-left: 1rem; margin: 0.75rem 0; color: var(--color-paws-text-dim); }
+.markdown-preview table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; }
+.markdown-preview th, .markdown-preview td { border: 1px solid var(--color-paws-border); padding: 0.5rem 0.75rem; text-align: left; }
+.markdown-preview th { background: rgba(255,255,255,0.04); font-weight: 600; }
+.markdown-preview a { color: var(--color-paws-primary); text-decoration: underline; }
+.markdown-preview hr { border: none; border-top: 1px solid var(--color-paws-border); margin: 1rem 0; }
+.markdown-preview img { max-width: 100%; border-radius: 0.5rem; }
