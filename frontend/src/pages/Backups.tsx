@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../api/client';
 import { Button, Card, Input, useConfirm, useToast } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 
 interface Snapshot {
   name: string;
@@ -115,7 +116,7 @@ export default function Backups() {
           </form>
 
           {/* Snapshots list */}
-          {loading ? <p className="text-paws-text-muted">Loading...</p> : snapshots.length === 0 ? (
+          {loading ? <LoadingSpinner message="Loading snapshots..." /> : snapshots.length === 0 ? (
             <p className="text-paws-text-dim">No snapshots found.</p>
           ) : (
             <div className="flex flex-col gap-3">

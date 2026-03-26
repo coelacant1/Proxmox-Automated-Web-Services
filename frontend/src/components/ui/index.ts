@@ -7,6 +7,7 @@ export type { Column } from './DataTable';
 export { EmptyState } from './EmptyState';
 export { Input } from './Input';
 export { LifecycleCountdown } from './LifecycleCountdown';
+export { LoadingSpinner } from './LoadingSpinner';
 export { MetricCard } from './MetricCard';
 export { Modal } from './Modal';
 export { QuotaBar } from './QuotaBar';

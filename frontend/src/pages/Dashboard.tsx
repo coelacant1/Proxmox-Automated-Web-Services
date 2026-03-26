@@ -3,6 +3,7 @@ import { Monitor, Box, Network, HardDrive, AlertTriangle, Clock } from 'lucide-r
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { MetricCard, QuotaBar, Card, CardHeader, CardTitle, CardContent, Badge, Button } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/context/AuthContext';
 
@@ -52,11 +53,13 @@ export default function Dashboard() {
   const [health, setHealth] = useState<{ status: string } | null>(null);
   const [cluster, setCluster] = useState<ClusterStatus | null>(null);
   const [backupQuota, setBackupQuota] = useState<BackupQuota | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [clusterLoading, setClusterLoading] = useState(true);
 
   useEffect(() => {
     api.get('/health').then((res) => setHealth(res.data)).catch(() => {});
-    api.get('/api/dashboard/summary').then((res) => setData(res.data)).catch(() => {});
-    api.get('/api/cluster/status').then((res) => setCluster(res.data)).catch(() => {});
+    api.get('/api/dashboard/summary').then((res) => setData(res.data)).catch(() => {}).finally(() => setSummaryLoading(false));
+    api.get('/api/cluster/status').then((res) => setCluster(res.data)).catch(() => {}).finally(() => setClusterLoading(false));
     api.get('/api/backups/quota-summary').then((res) => setBackupQuota(res.data)).catch(() => {});
   }, []);
 
@@ -83,6 +86,9 @@ export default function Dashboard() {
               API: {health.status}
             </span>
           </div>
+        )}
+        {!cluster && clusterLoading && (
+          <span className="text-xs text-paws-text-muted">Loading cluster status...</span>
         )}
         {cluster && (
           <Badge variant={clusterVariant(cluster)}>
@@ -137,7 +143,9 @@ export default function Dashboard() {
         );
       })()}
 
-      {data && (
+      {summaryLoading ? (
+        <LoadingSpinner message="Loading dashboard..." />
+      ) : data && (
         <>
           {/* Over-quota warning banner */}
           {(() => {

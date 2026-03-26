@@ -10,8 +10,9 @@ import { Modal, Textarea, Select, useToast } from '@/components/ui';
 import {
   Users, Plus, Trash2, Share2, ArrowLeft, Play, Square,
   RotateCcw, HardDrive, Network, Key, Shield, Globe, Database,
-  Bell, Server, Terminal, Archive, ExternalLink, KeyRound, Copy, RefreshCw, AlertTriangle,
+  Bell, Server, Terminal, Archive, ExternalLink, KeyRound, Copy, AlertTriangle,
 } from 'lucide-react';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 
 interface Group {
   id: string; name: string; description: string | null;
@@ -420,10 +421,7 @@ export default function Groups() {
 
         {loadingGroups ? (
           <Card><CardContent>
-            <div className="text-center py-8">
-              <RefreshCw className="w-8 h-8 text-paws-text-muted mx-auto mb-3 animate-spin" />
-              <p className="text-paws-text-muted">Loading groups...</p>
-            </div>
+            <LoadingSpinner message="Loading groups..." />
           </CardContent></Card>
         ) : groups.length === 0 ? (
           <Card><CardContent>

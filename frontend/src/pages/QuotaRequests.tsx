@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Monitor, Box, Cpu, MemoryStick, HardDrive, Camera, Archive, Database, ArrowUpRight, Network, AlertTriangle } from 'lucide-react';
 import api from '../api/client';
 import { Button, Card, CardHeader, CardTitle, CardContent, Input, QuotaBar, StatusBadge, Tabs } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 
 interface QuotaRequest {
   id: string; request_type: string; current_value: number; requested_value: number;
@@ -54,14 +55,18 @@ export default function QuotaRequests() {
   const [requests, setRequests] = useState<QuotaRequest[]>([]);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [backupQuota, setBackupQuota] = useState<BackupQuota | null>(null);
+  const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ request_type: 'max_vms', requested_value: 0, reason: '' });
   const [error, setError] = useState('');
 
   const fetchData = () => {
-    api.get('/api/quota-requests/').then(r => setRequests(r.data.items ?? r.data)).catch(() => {});
-    api.get('/api/dashboard/summary').then(r => setSummary(r.data)).catch(() => {});
-    api.get('/api/backups/quota-summary').then(r => setBackupQuota(r.data)).catch(() => {});
+    setLoading(true);
+    Promise.all([
+      api.get('/api/quota-requests/').then(r => setRequests(r.data.items ?? r.data)).catch(() => {}),
+      api.get('/api/dashboard/summary').then(r => setSummary(r.data)).catch(() => {}),
+      api.get('/api/backups/quota-summary').then(r => setBackupQuota(r.data)).catch(() => {}),
+    ]).finally(() => setLoading(false));
   };
   useEffect(fetchData, []);
 
@@ -100,6 +105,10 @@ export default function QuotaRequests() {
 
       <Tabs tabs={tabs} activeTab={tab} onChange={setTab} />
 
+      {loading ? (
+        <LoadingSpinner message="Loading quota data..." />
+      ) : (
+      <>
       {/* Over-quota warning */}
       {summary && (() => {
         const overItems: string[] = [];
@@ -376,6 +385,8 @@ export default function QuotaRequests() {
             )}
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

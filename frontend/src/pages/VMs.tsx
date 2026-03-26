@@ -7,6 +7,7 @@ import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
 import { cn } from '@/lib/utils';
 import { useToast, useConfirm } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useAuth } from '@/context/AuthContext';
 
 interface VM {
@@ -80,7 +81,7 @@ export default function VMs() {
         <Button variant="primary" onClick={() => navigate('/create-instance')}>+ Create Instance</Button>
       </div>
       {loading ? (
-        <p className="text-paws-text-muted">Loading...</p>
+        <LoadingSpinner message="Loading instances..." />
       ) : vms.length === 0 ? (
         <p className="text-paws-text-dim">No instances yet. Create one from a template.</p>
       ) : (

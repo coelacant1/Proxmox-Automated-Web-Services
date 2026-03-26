@@ -5,6 +5,7 @@ import { Card, CardContent } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal, useToast } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { KeyRound, Plus, Copy, Trash2, AlertTriangle } from 'lucide-react';
 
 interface APIKey {
@@ -18,6 +19,7 @@ interface APIKey {
 
 export default function APIKeys() {
   const [keys, setKeys] = useState<APIKey[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [tokenName, setTokenName] = useState('');
   const [newTokenRaw, setNewTokenRaw] = useState<string | null>(null);
@@ -25,7 +27,10 @@ export default function APIKeys() {
   const [revokeTarget, setRevokeTarget] = useState<APIKey | null>(null);
   const toast = useToast();
 
-  const fetchKeys = () => api.get('/api/keys/').then(r => setKeys(r.data)).catch(() => {});
+  const fetchKeys = () => {
+    setLoading(true);
+    api.get('/api/keys/').then(r => setKeys(r.data)).catch(() => {}).finally(() => setLoading(false));
+  };
   useEffect(() => { fetchKeys(); }, []);
 
   const createKey = async () => {
@@ -72,7 +77,9 @@ export default function APIKeys() {
       </div>
 
       {/* Active Keys */}
-      {activeKeys.length === 0 && revokedKeys.length === 0 ? (
+      {loading ? (
+        <LoadingSpinner message="Loading API keys..." />
+      ) : activeKeys.length === 0 && revokedKeys.length === 0 ? (
         <Card><CardContent>
           <div className="text-center py-8">
             <KeyRound className="w-12 h-12 text-paws-text-muted mx-auto mb-3" />

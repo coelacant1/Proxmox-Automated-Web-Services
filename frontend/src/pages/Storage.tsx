@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { HardDrive, BookOpen, ChevronDown, ChevronRight, Terminal, Code2, Copy, Check, ExternalLink } from 'lucide-react';
 import api from '../api/client';
 import { Button, Card, CardContent, CardHeader, CardTitle, Input, Badge, QuotaBar, useToast, useConfirm } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 
 interface Bucket {
   id: string;
@@ -317,7 +318,7 @@ From Python:
       </div>
 
       {loading ? (
-        <p className="text-paws-text-muted">Loading...</p>
+        <LoadingSpinner message="Loading buckets..." />
       ) : buckets.length === 0 ? (
         <Card className="border-dashed">
           <CardContent className="py-12 text-center">

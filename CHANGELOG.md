@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.9
+
+### Added
+
+- **Unified loading spinners (Issue #43)** - Shared LoadingSpinner component with Loader2 animation replaces plain text "Loading..." across all pages
+- **Async dashboard loading** - Dashboard sections load independently with per-section spinners instead of blocking until all data arrives
+- **Loading states for API Keys and Quotas pages** - Added loading indicators where previously none existed
+
+### Fixed
+
+- **HA group sync on migrated clusters (Issue #36)** - Sync endpoint now detects PVE 8.2+ clusters where HA groups have been migrated to rules and falls back to the rules API; create/update/delete operations tolerate the migration gracefully
+- **Admin loading patterns** - Replaced 5 plain-text loading messages in admin panel (Overview, Resources, Groups, SDN, Cluster) with consistent spinners
+- **DataTable loading state** - Table loading indicator now shows animated spinner instead of static text
+
 ## 0.2.8 - 2026-03-25
 
 ### Added

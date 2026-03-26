@@ -1,5 +1,5 @@
 import { cn } from '@/lib/utils';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { Button } from './Button';
 
 export interface Column<T> {
@@ -60,7 +60,10 @@ export function DataTable<T extends Record<string, unknown>>({
             {loading ? (
               <tr>
                 <td colSpan={columns.length} className="px-4 py-8 text-center text-paws-text-muted">
-                  Loading...
+                  <div className="flex flex-col items-center gap-2">
+                    <Loader2 className="h-6 w-6 animate-spin" />
+                    <span>Loading...</span>
+                  </div>
                 </td>
               </tr>
             ) : data.length === 0 ? (

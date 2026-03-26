@@ -11,6 +11,7 @@ import { DataTable } from '@/components/ui/DataTable';
 import type { Column } from '@/components/ui/DataTable';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { Textarea, Modal, Select, useToast, Tabs, ConfirmDialog, useConfirm } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { QuotaBar } from '@/components/ui/QuotaBar';
 import { Bug, Paperclip, Download, Users, Activity, LogIn, Globe, RefreshCw, Filter, Shield, Plus, Trash2, Pencil, ChevronLeft, ChevronDown, ChevronRight, Search, Eye, Network } from 'lucide-react';
 import {
@@ -219,7 +220,7 @@ export default function Admin() {
 function OverviewTab() {
   const [data, setData] = useState<AdminOverview | null>(null);
   useEffect(() => { api.get('/api/dashboard/admin/overview').then(r => setData(r.data)).catch(() => {}); }, []);
-  if (!data) return <p className="text-paws-text-muted">Loading...</p>;
+  if (!data) return <LoadingSpinner message="Loading overview..." />;
 
   const stats: { label: string; value: number; variant: 'default' | 'success' | 'warning' | 'danger' }[] = [
     { label: 'Total Users', value: data.total_users, variant: 'default' },
@@ -556,7 +557,7 @@ function AdminResourcesTab({ category }: { category: string }) {
 
       {/* Table */}
       {loading ? (
-        <p className="text-paws-text-muted py-8 text-center">Loading...</p>
+        <LoadingSpinner message="Loading resources..." />
       ) : items.length === 0 ? (
         <p className="text-paws-text-dim py-8 text-center">No items found.</p>
       ) : (
@@ -1398,7 +1399,7 @@ function GroupsTab() {
       </div>
 
       {loading ? (
-        <div className="text-center text-gray-400 py-8">Loading groups...</div>
+        <div className="text-center py-8"><LoadingSpinner message="Loading groups..." /></div>
       ) : groups.length === 0 ? (
         <div className="text-center text-gray-400 py-8">No groups found</div>
       ) : (
@@ -2774,7 +2775,7 @@ function SDNTab() {
     }
   };
 
-  if (loading && !overview) return <p className="text-paws-text-muted">Loading...</p>;
+  if (loading && !overview) return <LoadingSpinner message="Loading SDN..." />;
 
   const vniPct = overview ? Math.round((overview.vni_used / overview.vni_total) * 100) : 0;
 
@@ -3050,7 +3051,7 @@ function ClusterTab() {
   const nodeNames = status?.nodes.map(n => n.name) ?? [];
   const typeOptions = [...new Set(tasks.map(t => t.type))].sort();
 
-  if (!status) return <p className="text-paws-text-muted">Loading...</p>;
+  if (!status) return <LoadingSpinner message="Loading cluster..." />;
 
   return (
     <div className="space-y-6">

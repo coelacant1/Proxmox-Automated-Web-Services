@@ -4,6 +4,7 @@ import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent, Badge,
 } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 
 interface ServiceStatus {
   name: string;
@@ -76,7 +77,7 @@ export default function StatusPage() {
       <Card className="mb-6">
         <CardContent className="py-8 text-center">
           {loading ? (
-            <p className="text-sm text-paws-text-dim">Checking services...</p>
+            <LoadingSpinner message="Checking services..." size="sm" />
           ) : (
             <>
               <div className="flex items-center justify-center gap-3 mb-2">
@@ -96,7 +97,7 @@ export default function StatusPage() {
         <CardHeader><CardTitle>Services</CardTitle></CardHeader>
         <CardContent className="p-0">
           {loading ? (
-            <p className="text-sm text-paws-text-dim px-4 py-6 text-center">Loading...</p>
+            <LoadingSpinner message="Loading services..." />
           ) : (
           <div className="divide-y divide-paws-border-subtle">
             {services.map((svc) => (

@@ -649,6 +649,10 @@ class ProxmoxClient:
         """Get HA manager status (current HA resource states)."""
         return self.api.cluster.ha.status.current.get()
 
+    def get_ha_rules(self) -> list[dict[str, Any]]:
+        """Get HA rules (PVE 8.2+ replacement for HA groups)."""
+        return self.api.cluster.ha.rules.get()
+
     # --- Pool Management ---
 
     def create_pool(self, poolid: str, comment: str = "") -> None:

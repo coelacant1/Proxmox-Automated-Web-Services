@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/Card';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { LifecycleCountdown } from '@/components/ui/LifecycleCountdown';
 import { useToast, useConfirm } from '@/components/ui';
+import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useAuth } from '@/context/AuthContext';
 
 interface Container {
@@ -65,7 +66,7 @@ export default function Containers() {
         <h1 className="text-2xl font-bold text-paws-text">Containers</h1>
         <Button variant="primary" onClick={() => navigate('/create-instance')}>+ Create Container</Button>
       </div>
-      {loading ? <p className="text-paws-text-muted">Loading...</p> : containers.length === 0 ? (
+      {loading ? <LoadingSpinner message="Loading containers..." /> : containers.length === 0 ? (
         <p className="text-paws-text-dim">No containers yet.</p>
       ) : (
         <div className="flex flex-col gap-3">
