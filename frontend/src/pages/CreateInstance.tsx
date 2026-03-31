@@ -17,6 +17,7 @@ interface Template {
   min_ram_mb: number;
   min_disk_gb: number;
   proxmox_vmid: number;
+  cluster_id?: string;
 }
 
 interface InstanceType {
@@ -40,6 +41,7 @@ export default function CreateInstance() {
   const [vpcs, setVpcs] = useState<Array<{ id: string; name: string; cidr: string }>>([]);
   const [sshKeys, setSshKeys] = useState<Array<{ id: string; name: string }>>([]);
   const [storagePools, setStoragePools] = useState<string[]>([]);
+  const [clusters, setClusters] = useState<Array<{ name: string }>>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -51,6 +53,7 @@ export default function CreateInstance() {
     template_vmid: 0,
     selectedTemplate: null as Template | null,
     instance_type: '',
+    cluster_id: '',
     cores: 2,
     memory_mb: 2048,
     disk_gb: 32,
@@ -93,6 +96,12 @@ export default function CreateInstance() {
       setVpcs(data);
     }).catch(() => {});
     api.get('/api/ssh-keys/').then((res) => setSshKeys(res.data)).catch(() => {});
+    api.get('/api/cluster/list').then((res) => {
+      setClusters(res.data);
+      if (res.data.length === 1) {
+        setForm((prev) => ({ ...prev, cluster_id: res.data[0].name }));
+      }
+    }).catch(() => {});
     api.get('/api/storage-pools/').then((res) => {
       setStoragePools(res.data.pools || []);
       if (res.data.default) {
@@ -141,6 +150,7 @@ export default function CreateInstance() {
         memory_mb: form.memory_mb,
         disk_gb: form.disk_gb,
         storage: form.storage,
+        cluster_id: form.cluster_id || undefined,
         vpc_id: form.vpc_id || undefined,
         network_mode: form.network_mode,
         hostname: form.hostname || undefined,
@@ -310,6 +320,11 @@ export default function CreateInstance() {
         <div className="space-y-4">
           <Input label="Instance Name" value={form.name} placeholder="my-instance"
             onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          {clusters.length > 1 && (
+            <Select label="Cluster" value={form.cluster_id}
+              options={clusters.map((c) => ({ value: c.name, label: c.name }))}
+              onChange={(e) => setForm({ ...form, cluster_id: e.target.value })} />
+          )}
           <Input label="Hostname" value={form.hostname} placeholder="Optional hostname"
             onChange={(e) => setForm({ ...form, hostname: e.target.value })} />
           <div className="grid grid-cols-2 gap-4">
@@ -356,6 +371,7 @@ export default function CreateInstance() {
           <CardContent className="space-y-3">
             <ReviewRow label="Template" value={form.selectedTemplate?.name || '-'} />
             <ReviewRow label="Name" value={form.name} />
+            {clusters.length > 1 && <ReviewRow label="Cluster" value={form.cluster_id || 'Default'} />}
             <ReviewRow label="Size" value={`${form.cores} vCPU · ${form.memory_mb} MB RAM · ${form.disk_gb} GB Disk`} />
             <ReviewRow label="Storage" value={form.storage} />
             <ReviewRow label="VPC" value={vpcs.find((v) => v.id === form.vpc_id)?.name || 'None'} />

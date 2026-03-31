@@ -29,6 +29,7 @@ interface Instance {
   live_status?: string;
   proxmox_vmid: number;
   proxmox_node: string;
+  cluster_id?: string;
   specs: Record<string, unknown>;
   created_at: string;
   [key: string]: unknown;
@@ -908,6 +909,9 @@ export default function InstanceDetail() {
                 <Stat label="Created" value={new Date(inst.created_at).toLocaleString()} />
                 <Stat label="VMID" value={String(inst.proxmox_vmid)} />
                 <Stat label="Node" value={inst.proxmox_node} />
+                {inst.cluster_id && inst.cluster_id !== 'default' && (
+                  <Stat label="Cluster" value={inst.cluster_id} />
+                )}
               </div>
             </CardContent>
           </Card>
@@ -1763,8 +1767,8 @@ export default function InstanceDetail() {
             </div>
             <p className="text-xs text-paws-text-dim">
               {inst?.resource_type === 'lxc'
-                ? 'LXC containers support hostname, password, DNS, and SSH keys.'
-                : 'VM changes are applied via cloud-init. A reboot may be required for changes to take effect.'}
+                ? 'SSH keys are set in the container config for root. If a username is set, PAWS will also inject keys for that user (container must be running).'
+                : 'VM changes are applied via cloud-init. SSH keys are injected for the configured username. A reboot may be required for changes to take effect.'}
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setShowConfig(false)}>Cancel</Button>

@@ -14,7 +14,7 @@ from app.core.pagination import PaginatedParams, PaginatedResponse
 from app.models.models import ProjectMember, Resource, User, UserQuota
 from app.schemas.schemas import QuotaRead, UsageResponse
 from app.services.group_access import check_group_access
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
 
@@ -76,15 +76,17 @@ async def list_my_resources(
     result = await db.execute(query)
     resources = list(result.scalars().all())
 
-    # Build VMID -> live info lookup from cluster resources (single API call)
+    # Build VMID -> live info lookup from cluster resources (single API call per cluster)
     cluster_lookup: dict[int, dict] = {}
-    try:
-        for cr in proxmox_client.get_cluster_resources("vm"):
-            vmid = cr.get("vmid")
-            if vmid is not None:
-                cluster_lookup[vmid] = cr
-    except Exception:
-        pass
+    cluster_ids = {r.cluster_id for r in resources if hasattr(r, "cluster_id")}
+    for cid in cluster_ids or {"default"}:
+        try:
+            for cr in get_pve(cid).get_cluster_resources("vm"):
+                vmid = cr.get("vmid")
+                if vmid is not None:
+                    cluster_lookup[vmid] = cr
+        except Exception:
+            pass
 
     items = []
     for r in resources:
@@ -221,7 +223,7 @@ async def update_resource_notes(
             owner_result = await db.execute(select(User).where(User.id == resource.owner_id))
             owner = owner_result.scalar_one_or_none()
             description = _build_paws_description(resource, owner, body.notes)
-            proxmox_client.set_vm_description(resource.proxmox_node, resource.proxmox_vmid, description)
+            get_pve(resource.cluster_id).set_vm_description(resource.proxmox_node, resource.proxmox_vmid, description)
         except Exception:
             pass  # best-effort sync
 

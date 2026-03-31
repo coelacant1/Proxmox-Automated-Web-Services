@@ -27,7 +27,7 @@ from app.models.models import (
     Volume,
 )
 from app.schemas.schemas import QuotaRead, UserRead
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 from app.services.sdn_service import VXLAN_TAG_MAX, VXLAN_TAG_MIN, sdn_service
 
 router = APIRouter(prefix="/api/admin/users", tags=["admin"])
@@ -319,10 +319,10 @@ async def get_user_stats(
     ]
 
     # Proxmox pool info
-    pool_name = proxmox_client.get_pool_name_for_user(user.username)
+    pool_name = get_pve().get_pool_name_for_user(user.username)
     pool_exists = False
     try:
-        pool_exists = proxmox_client.pool_exists(pool_name)
+        pool_exists = get_pve().pool_exists(pool_name)
     except Exception:
         pass
 
@@ -491,9 +491,9 @@ async def transfer_resource(
 
         # Remove from source pool
         if source_user:
-            src_pool = proxmox_client.get_pool_name_for_user(source_user.username)
+            src_pool = get_pve(resource.cluster_id).get_pool_name_for_user(source_user.username)
             try:
-                proxmox_client.remove_from_pool(src_pool, resource.proxmox_vmid)
+                get_pve(resource.cluster_id).remove_from_pool(src_pool, resource.proxmox_vmid)
             except Exception:
                 pass
             try:
@@ -537,6 +537,7 @@ class ImportResourceRequest(BaseModel):
 @router.post("/resources/import")
 async def import_unmanaged_resource(
     body: ImportResourceRequest,
+    cluster_id: str | None = Query(None, description="Target cluster"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
@@ -553,21 +554,21 @@ async def import_unmanaged_resource(
         raise HTTPException(status_code=404, detail="Target user not found")
 
     # Find on cluster
-    node = proxmox_client.find_vm_node(body.vmid)
+    node = get_pve(cluster_id).find_vm_node(body.vmid)
     if not node:
         raise HTTPException(status_code=404, detail=f"VMID {body.vmid} not found on any cluster node")
 
-    rtype = proxmox_client.get_resource_type(body.vmid) or "vm"
+    rtype = get_pve(cluster_id).get_resource_type(body.vmid) or "vm"
     resource_type = "lxc" if rtype == "lxc" else "vm"
 
     # Get specs from cluster
     try:
         if resource_type == "lxc":
-            config = proxmox_client.get_container_config(node, body.vmid)
+            config = get_pve(cluster_id).get_container_config(node, body.vmid)
             cores = config.get("cores", 1)
             memory = config.get("memory", 512)
         else:
-            config = proxmox_client.get_vm_config(node, body.vmid)
+            config = get_pve(cluster_id).get_vm_config(node, body.vmid)
             cores = config.get("cores", 1)
             memory = config.get("memory", 1024)
         name = body.display_name or config.get("name") or config.get("hostname") or f"{resource_type}-{body.vmid}"
@@ -582,6 +583,7 @@ async def import_unmanaged_resource(
         proxmox_node=node,
         status="running",
         specs=json.dumps({"cores": cores, "memory_mb": memory, "imported": True}),
+        cluster_id=cluster_id,
     )
     db.add(resource)
 
@@ -615,6 +617,7 @@ async def import_unmanaged_resource(
 
 @router.get("/unmanaged-vms")
 async def list_unmanaged_vms(
+    cluster_id: str | None = Query(None, description="Target cluster"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
@@ -623,7 +626,7 @@ async def list_unmanaged_vms(
     managed_vmids = {v for v in managed_result.scalars().all()}
 
     try:
-        cluster_resources = proxmox_client.get_cluster_resources("vm")
+        cluster_resources = get_pve(cluster_id).get_cluster_resources("vm")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to query Proxmox: {e}")
 
@@ -673,20 +676,21 @@ async def remove_resource_from_user(
 
         # Remove from Proxmox pool
         if user:
-            pool_name = proxmox_client.get_pool_name_for_user(user.username)
+            pool_name = get_pve(resource.cluster_id).get_pool_name_for_user(user.username)
             try:
-                proxmox_client.remove_from_pool(pool_name, old_vmid)
+                get_pve(resource.cluster_id).remove_from_pool(pool_name, old_vmid)
             except Exception:
                 pass
 
         # Remove PAWS tags and notes from Proxmox
         try:
-            node = resource.proxmox_node or proxmox_client.find_vm_node(old_vmid)
+            pve = get_pve(resource.cluster_id)
+            node = resource.proxmox_node or pve.find_vm_node(old_vmid)
             if node:
                 if resource.resource_type == "lxc":
-                    proxmox_client.set_container_config(node, old_vmid, tags="", description="")
+                    pve.set_container_config(node, old_vmid, tags="", description="")
                 else:
-                    proxmox_client.update_vm_config(node, old_vmid, tags="", description="")
+                    pve.update_vm_config(node, old_vmid, tags="", description="")
         except Exception:
             pass
 
@@ -804,10 +808,11 @@ async def get_user_resources(
     for r in resources:
         if r.proxmox_vmid and r.proxmox_node:
             try:
+                pve = get_pve(r.cluster_id)
                 if r.resource_type == "lxc":
-                    st = proxmox_client.get_container_status(r.proxmox_node, r.proxmox_vmid)
+                    st = pve.get_container_status(r.proxmox_node, r.proxmox_vmid)
                 else:
-                    st = proxmox_client.get_vm_status(r.proxmox_node, r.proxmox_vmid)
+                    st = pve.get_vm_status(r.proxmox_node, r.proxmox_vmid)
                 live_status = st.get("status", r.status)
                 if live_status != r.status:
                     r.status = live_status

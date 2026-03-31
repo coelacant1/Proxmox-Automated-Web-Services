@@ -3,7 +3,7 @@ import { Network, Plus, Trash2, Server, Globe, Map, Edit2, Shield } from 'lucide
 import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
-  Input, Modal, Badge, EmptyState, StatusBadge, Tabs,
+  Input, Modal, Badge, EmptyState, StatusBadge, Tabs, Select,
   useToast, useConfirm,
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
@@ -20,6 +20,7 @@ interface VPC {
   proxmox_vnet: string | null;
   dhcp_enabled: boolean;
   network_mode?: string;
+  cluster_id?: string;
   security_group_id?: string | null;
   subnets: Subnet[];
   created_at: string;
@@ -61,7 +62,8 @@ export default function VPCs() {
   const [showCreate, setShowCreate] = useState(false);
   const [showSubnet, setShowSubnet] = useState(false);
   const [instances, setInstances] = useState<VPCInstance[]>([]);
-  const [form, setForm] = useState({ name: '', network_mode: 'private' });
+  const [clusters, setClusters] = useState<{name: string}[]>([]);
+  const [form, setForm] = useState({ name: '', network_mode: 'private', cluster_id: '' });
   const [changingMode, setChangingMode] = useState(false);
   const [subnetForm, setSubnetForm] = useState({
     name: '', cidr: '', gateway: '', snat_enabled: true, dns_server: '',
@@ -86,6 +88,15 @@ export default function VPCs() {
   useEffect(fetchVPCs, []);
 
   useEffect(() => {
+    api.get('/api/cluster/list').then((res) => {
+      setClusters(res.data || []);
+      if (res.data?.length === 1) {
+        setForm((prev) => ({ ...prev, cluster_id: res.data![0].name }));
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     if (selected) {
       api.get(`/api/vpcs/${selected.id}/instances`).then((res) => setInstances(res.data)).catch(() => setInstances([]));
     }
@@ -93,9 +104,9 @@ export default function VPCs() {
 
   const handleCreate = async () => {
     try {
-      await api.post('/api/vpcs/', { name: form.name, network_mode: form.network_mode });
+      await api.post('/api/vpcs/', { name: form.name, network_mode: form.network_mode, cluster_id: form.cluster_id || undefined });
       setShowCreate(false);
-      setForm({ name: '', network_mode: 'private' });
+      setForm({ name: '', network_mode: 'private', cluster_id: clusters.length === 1 ? clusters[0]?.name ?? '' : '' });
       fetchVPCs();
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Failed to create network', 'error');
@@ -201,6 +212,7 @@ export default function VPCs() {
                         {(vpc.network_mode || 'private').charAt(0).toUpperCase() + (vpc.network_mode || 'private').slice(1)}
                       </Badge>
                       <StatusBadge status={vpc.status} />
+                      {clusters.length > 1 && vpc.cluster_id && <Badge variant="default">{vpc.cluster_id}</Badge>}
                     </div>
                   </div>
                 </CardContent>
@@ -578,6 +590,11 @@ export default function VPCs() {
             </div>
           </div>
           <p className="text-xs text-paws-text-dim">CIDR will be auto-allocated. IPs are assigned statically to instances.</p>
+          {clusters.length > 1 && (
+            <Select label="Cluster" value={form.cluster_id}
+              options={clusters.map((c) => ({ value: c.name, label: c.name }))}
+              onChange={(e) => setForm({ ...form, cluster_id: e.target.value })} />
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             <Button onClick={handleCreate} disabled={!form.name}>Create</Button>

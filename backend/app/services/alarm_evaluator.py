@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import Alarm, Resource
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +88,12 @@ async def evaluate_alarms(db: AsyncSession) -> dict:
 def _get_metric_value(resource: Resource, metric: str) -> float | None:
     """Fetch current metric value from Proxmox."""
     try:
+        pve = get_pve(resource.cluster_id)
         vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
         if vmtype == "lxc":
-            status_data = proxmox_client.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
+            status_data = pve.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
         else:
-            status_data = proxmox_client.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
+            status_data = pve.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
 
         if metric == "cpu":
             return status_data.get("cpu", 0) * 100  # Convert to percentage

@@ -19,7 +19,7 @@ from app.core.deps import get_current_active_user
 from app.core.pagination import MessageResponse
 from app.models.models import Resource, SystemSetting, User, Volume
 from app.schemas.schemas import VolumeAttachRequest, VolumeCreate
-from app.services.proxmox_client import ProxmoxClient
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
 log = logging.getLogger(__name__)
@@ -34,8 +34,8 @@ class VolumeResizeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _get_proxmox() -> ProxmoxClient:
-    return ProxmoxClient()
+def _get_proxmox(cluster_id: str = "default"):
+    return get_pve(cluster_id)
 
 
 def _next_scsi_slot(config: dict) -> str:
@@ -189,7 +189,7 @@ async def create_volume(
     if not resource.proxmox_vmid or not resource.proxmox_node:
         raise HTTPException(status_code=400, detail="VM has no Proxmox assignment yet")
 
-    pve = _get_proxmox()
+    pve = _get_proxmox(resource.cluster_id)
     node = resource.proxmox_node
     vmid = resource.proxmox_vmid
 
@@ -219,6 +219,7 @@ async def create_volume(
         proxmox_node=node,
         proxmox_volid=volid,
         proxmox_owner_vmid=vmid,
+        cluster_id=resource.cluster_id,
     )
     db.add(vol)
     await db.commit()
@@ -257,7 +258,7 @@ async def detach_volume(
     if not resource or not resource.proxmox_node or not resource.proxmox_vmid:
         raise HTTPException(status_code=400, detail="Cannot find the VM this volume is attached to")
 
-    pve = _get_proxmox()
+    pve = _get_proxmox(resource.cluster_id)
     node = resource.proxmox_node
     vmid = resource.proxmox_vmid
 
@@ -309,7 +310,7 @@ async def attach_volume(
     if not target.proxmox_vmid or not target.proxmox_node:
         raise HTTPException(status_code=400, detail="Target VM has no Proxmox assignment")
 
-    pve = _get_proxmox()
+    pve = _get_proxmox(target.cluster_id)
     target_node = target.proxmox_node
     target_vmid = target.proxmox_vmid
 
@@ -387,7 +388,7 @@ async def delete_volume(
 
     # Delete from Proxmox storage
     if vol.proxmox_volid and vol.proxmox_owner_vmid:
-        pve = _get_proxmox()
+        pve = _get_proxmox(vol.cluster_id if vol.cluster_id else "default")
         node = vol.proxmox_node
         vmid = vol.proxmox_owner_vmid
 
@@ -437,7 +438,7 @@ async def resize_volume(
         raise HTTPException(status_code=400, detail="Cannot find the VM this volume is attached to")
 
     grow_by = body.size_gib - vol.size_gib
-    pve = _get_proxmox()
+    pve = _get_proxmox(resource.cluster_id)
     try:
         pve.resize_vm_disk(resource.proxmox_node, resource.proxmox_vmid, vol.disk_slot, f"+{grow_by}G")
     except Exception as exc:

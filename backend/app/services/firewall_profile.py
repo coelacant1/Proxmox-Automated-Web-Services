@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +265,7 @@ class FirewallProfileService:
         own_subnet_cidr: str,
         lan_ranges: list[str] | None = None,
         upstream_ips: list[str] | None = None,
+        cluster_id: str | None = None,
     ) -> int:
         """Clear existing PAWS-MODE rules and apply new mode rules.
 
@@ -273,14 +274,15 @@ class FirewallProfileService:
         if mode not in VALID_MODES:
             raise ValueError(f"Invalid network mode '{mode}'. Must be one of {VALID_MODES}")
 
-        deleted = proxmox_client.clear_firewall_rules_by_comment(node, vmid, vmtype, COMMENT_PREFIX)
+        pve = get_pve(cluster_id)
+        deleted = pve.clear_firewall_rules_by_comment(node, vmid, vmtype, COMMENT_PREFIX)
         if deleted:
             logger.info("Cleared %d existing PAWS-MODE rules on %s/%s", deleted, node, vmid)
 
         rules = FirewallProfileService.get_rules_for_mode(mode, own_subnet_cidr, lan_ranges, upstream_ips=upstream_ips)
 
         for rule in rules:
-            proxmox_client.create_firewall_rule(node, vmid, vmtype, **rule)
+            pve.create_firewall_rule(node, vmid, vmtype, **rule)
 
         logger.info(
             "Applied %d firewall rules for mode '%s' on %s/%s",
@@ -296,9 +298,9 @@ class FirewallProfileService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def enable_firewall(node: str, vmid: int, vmtype: str) -> None:
+    def enable_firewall(node: str, vmid: int, vmtype: str, cluster_id: str | None = None) -> None:
         """Enable the Proxmox firewall on a VM or container."""
-        proxmox_client.set_firewall_options(node, vmid, vmtype, enable=1)
+        get_pve(cluster_id).set_firewall_options(node, vmid, vmtype, enable=1)
         logger.info("Enabled firewall on %s/%s (type=%s)", node, vmid, vmtype)
 
     @staticmethod
@@ -310,6 +312,7 @@ class FirewallProfileService:
         own_subnet_cidr: str,
         lan_ranges: list[str] | None = None,
         upstream_ips: list[str] | None = None,
+        cluster_id: str | None = None,
     ) -> int:
         """Re-apply current mode rules (e.g. after migration).
 
@@ -323,6 +326,7 @@ class FirewallProfileService:
             own_subnet_cidr,
             lan_ranges,
             upstream_ips=upstream_ips,
+            cluster_id=cluster_id,
         )
 
     # ------------------------------------------------------------------
@@ -330,7 +334,7 @@ class FirewallProfileService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def apply_bandwidth_limit(node: str, vmid: int, vmtype: str, rate_mbps: int) -> None:
+    def apply_bandwidth_limit(node: str, vmid: int, vmtype: str, rate_mbps: int, cluster_id: str | None = None) -> None:
         """Set NIC rate limit via Proxmox config (net0 rate parameter).
 
         The Proxmox ``rate`` parameter is in MB/s.
@@ -339,16 +343,17 @@ class FirewallProfileService:
         if rate_mbps < 0:
             raise ValueError("rate_mbps must be >= 0")
 
+        pve = get_pve(cluster_id)
         if vmtype == "lxc":
-            current = proxmox_client.get_container_config(node, vmid)
+            current = pve.get_container_config(node, vmid)
             net0_value = current.get("net0", "")
             net0_updated = _update_net0_rate(net0_value, rate_mbps)
-            proxmox_client.set_container_config(node, vmid, net0=net0_updated)
+            pve.set_container_config(node, vmid, net0=net0_updated)
         else:
-            current = proxmox_client.get_vm_config(node, vmid)
+            current = pve.get_vm_config(node, vmid)
             net0_value = current.get("net0", "")
             net0_updated = _update_net0_rate(net0_value, rate_mbps)
-            proxmox_client.update_vm_config(node, vmid, net0=net0_updated)
+            pve.update_vm_config(node, vmid, net0=net0_updated)
 
         if rate_mbps:
             logger.info("Set bandwidth limit to %d MB/s on %s/%s", rate_mbps, node, vmid)

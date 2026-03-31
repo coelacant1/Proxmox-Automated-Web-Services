@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import Backup, BackupPlan, Resource
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ async def _execute_backup(db: AsyncSession, plan: BackupPlan) -> Backup:
     storage = "local"
     mode = "snapshot" if plan.backup_type == "snapshot" else "stop"
 
-    upid = proxmox_client.create_backup(node, vmid, storage=storage, mode=mode)
+    upid = get_pve(resource.cluster_id).create_backup(node, vmid, storage=storage, mode=mode)
 
     backup = Backup(
         id=uuid.uuid4(),

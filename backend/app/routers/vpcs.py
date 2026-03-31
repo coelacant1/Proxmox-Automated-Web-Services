@@ -31,7 +31,7 @@ from app.schemas.schemas import SubnetCreate, SubnetRead, VPCCreate, VPCRead
 from app.services.audit_service import log_action
 from app.services.group_access import check_group_access
 from app.services.ipam_service import cidr_pool, ipam_service
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 from app.services.sdn_service import sdn_service
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ async def _ensure_published_sg(
     owner_id: _uuid.UUID,
     vpc_name: str,
     vpc_cidr: str,
+    cluster_id: str = "default",
 ) -> SecurityGroup:
     """Create a managed security group with bogon-blocking rules for a published network.
 
@@ -89,6 +90,7 @@ async def _ensure_published_sg(
             f"Auto-managed firewall for published network '{vpc_name}'."
             " Blocks bogon/RFC1918 traffic except own subnet and upstream proxies."
         ),
+        cluster_id=cluster_id,
     )
     db.add(sg)
     await db.flush()
@@ -255,7 +257,8 @@ async def create_vpc(
     gateway = body.gateway or cidr_pool.get_gateway(cidr)
 
     # VXLAN tag
-    tag = sdn_service.allocate_vxlan_tag()
+    cluster_id = body.cluster_id if hasattr(body, "cluster_id") else "default"
+    tag = sdn_service.allocate_vxlan_tag(cluster_id=cluster_id)
 
     # Persist VPC (flush to obtain id before generating vnet name)
     vpc = VPC(
@@ -268,6 +271,7 @@ async def create_vpc(
         vxlan_tag=tag,
         proxmox_zone="paws",
         status="creating",
+        cluster_id=cluster_id,
     )
     db.add(vpc)
     await db.flush()
@@ -276,7 +280,7 @@ async def create_vpc(
     vnet_name = sdn_service.generate_vnet_name(str(vpc.id))
     vpc.proxmox_vnet = vnet_name
     try:
-        sdn_service.create_vnet(vnet_name, tag, alias=body.name)
+        sdn_service.create_vnet(vnet_name, tag, alias=body.name, cluster_id=cluster_id)
         vpc.status = "active"
     except Exception:
         logger.exception("Failed to create Proxmox VNet for VPC %s", vpc.id)
@@ -284,7 +288,7 @@ async def create_vpc(
 
     # Auto-create managed security group for published networks
     if body.network_mode == "published":
-        sg = await _ensure_published_sg(db, user.id, body.name, cidr)
+        sg = await _ensure_published_sg(db, user.id, body.name, cidr, cluster_id=cluster_id)
         vpc.security_group_id = sg.id
 
     await db.commit()
@@ -340,7 +344,7 @@ async def delete_vpc(
     # Remove Proxmox VNet (cascades to SDN subnets)
     if vpc.proxmox_vnet:
         try:
-            sdn_service.delete_vnet(vpc.proxmox_vnet)
+            sdn_service.delete_vnet(vpc.proxmox_vnet, cluster_id=vpc.cluster_id)
         except Exception:
             logger.exception("Failed to delete Proxmox VNet %s", vpc.proxmox_vnet)
 
@@ -440,7 +444,7 @@ async def update_vpc_mode(
 
     # Manage security group for published mode
     if body.network_mode == "published" and not vpc.security_group_id:
-        sg = await _ensure_published_sg(db, user.id, vpc.name, vpc.cidr)
+        sg = await _ensure_published_sg(db, user.id, vpc.name, vpc.cidr, cluster_id=vpc.cluster_id)
         vpc.security_group_id = sg.id
     elif body.network_mode != "published" and vpc.security_group_id:
         # Unlink (but keep the SG so rules are preserved if user switches back)
@@ -584,6 +588,7 @@ async def create_subnet(
             cidr,
             gateway,
             snat=body.snat_enabled,
+            cluster_id=vpc.cluster_id,
         )
         sub_status = "active"
     except Exception:
@@ -648,7 +653,7 @@ async def delete_subnet(
     # Remove Proxmox SDN subnet
     if vpc.proxmox_vnet and subnet.proxmox_subnet_id:
         try:
-            sdn_service.delete_subnet(vpc.proxmox_vnet, subnet.proxmox_subnet_id)
+            sdn_service.delete_subnet(vpc.proxmox_vnet, subnet.proxmox_subnet_id, cluster_id=vpc.cluster_id)
         except Exception:
             logger.exception(
                 "Failed to delete Proxmox subnet %s on VNet %s",
@@ -715,14 +720,14 @@ async def list_vpc_instances(
             if r.proxmox_node and r.proxmox_vmid:
                 try:
                     if r.resource_type == "qemu":
-                        ifaces = proxmox_client.get_agent_network_interfaces(r.proxmox_node, r.proxmox_vmid)
+                        ifaces = get_pve(r.cluster_id).get_agent_network_interfaces(r.proxmox_node, r.proxmox_vmid)
                         for iface in ifaces:
                             for addr in iface.get("ip-addresses", []):
                                 ip = addr.get("ip-address", "")
                                 if addr.get("ip-address-type") == "ipv4" and not ip.startswith("127."):
                                     live_ips.append(ip)
                     elif r.resource_type == "lxc":
-                        config = proxmox_client.get_container_config(r.proxmox_node, r.proxmox_vmid)
+                        config = get_pve(r.cluster_id).get_container_config(r.proxmox_node, r.proxmox_vmid)
                         for key, val in config.items():
                             if key.startswith("net") and key[3:].isdigit() and isinstance(val, str):
                                 for part in val.split(","):
@@ -837,6 +842,7 @@ async def change_instance_ip(
             label=resource.display_name,
             is_gateway=False,
             owner_id=user.id,
+            cluster_id=vpc.cluster_id,
         )
     )
 

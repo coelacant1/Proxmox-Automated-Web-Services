@@ -17,6 +17,7 @@ router = APIRouter(prefix="/api/templates", tags=["templates"])
 @router.get("/", response_model=list[TemplateCatalogRead])
 async def list_templates(
     category: str | None = Query(None, pattern="^(vm|lxc)$"),
+    cluster_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_active_user),
 ):
@@ -24,6 +25,8 @@ async def list_templates(
     query = select(TemplateCatalog).where(TemplateCatalog.is_active.is_(True)).order_by(TemplateCatalog.name)
     if category:
         query = query.where(TemplateCatalog.category == category)
+    if cluster_id:
+        query = query.where(TemplateCatalog.cluster_id == cluster_id)
     result = await db.execute(query)
     templates = result.scalars().all()
 

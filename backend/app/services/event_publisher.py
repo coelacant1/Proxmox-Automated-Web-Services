@@ -2,9 +2,11 @@
 
 Supported action triggers:
 - vm.crashed -> auto-restart (if enabled)
-- backup.failed -> notify
+- backup.failed -> notify (email + in-app)
+- backup.completed -> notify (email)
 - alarm.triggered -> notify + webhook
-- quota.exceeded -> notify
+- quota.exceeded -> notify (email)
+- account.created -> welcome email
 """
 
 import logging
@@ -61,10 +63,17 @@ async def publish_event(
     if event_type == "backup.failed" and _action_config.get("backup.failed.notify"):
         event["actions_fired"].append("notify")
         logger.info("Backup failure notification for user %s", user_id)
+        _schedule_notification_email(user_id, "backup_complete", {"status": "failed", **(details or {})})
+
+    if event_type == "backup.completed":
+        _schedule_notification_email(user_id, "backup_complete", {"status": "completed", **(details or {})})
 
     if event_type == "alarm.triggered":
         if _action_config.get("alarm.triggered.notify"):
             event["actions_fired"].append("notify")
+            _schedule_notification_email(
+                user_id, "resource_alert", {"alert_type": "Alarm Triggered", **(details or {})}
+            )
         if _action_config.get("alarm.triggered.webhook"):
             event["actions_fired"].append("webhook")
         logger.info("Alarm triggered for resource %s", resource_id)
@@ -72,6 +81,10 @@ async def publish_event(
     if event_type == "quota.exceeded" and _action_config.get("quota.exceeded.notify"):
         event["actions_fired"].append("notify")
         logger.info("Quota exceeded notification for user %s", user_id)
+        _schedule_notification_email(user_id, "resource_alert", {"alert_type": "Quota Exceeded", **(details or {})})
+
+    if event_type == "account.created":
+        _schedule_notification_email(user_id, "welcome", details or {})
 
     # Store in ring buffer
     _event_log.append(event)
@@ -87,3 +100,19 @@ def get_recent_events(limit: int = 50, event_type: str | None = None) -> list[di
     if event_type:
         events = [e for e in events if e["type"] == event_type]
     return events[-limit:]
+
+
+def _schedule_notification_email(
+    user_id: str | None,
+    template_name: str,
+    context: dict[str, Any],
+) -> None:
+    """Schedule an email notification via the Celery task queue (best-effort)."""
+    if not user_id:
+        return
+    try:
+        from app.tasks.email_tasks import send_notification_email
+
+        send_notification_email.delay(user_id, template_name, context)
+    except Exception:
+        logger.debug("Could not schedule email task (worker may not be running)", exc_info=True)

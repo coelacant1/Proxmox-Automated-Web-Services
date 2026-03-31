@@ -114,15 +114,15 @@ export default function QuotaRequests() {
         const overItems: string[] = [];
         const r = summary.resources;
         const q = summary.quota;
-        if (r.vms >= q.max_vms) overItems.push('VMs');
-        if (r.containers >= q.max_containers) overItems.push('Containers');
-        if (r.vcpus_used >= q.max_vcpus) overItems.push('vCPUs');
-        if (r.ram_mb_used >= q.max_ram_mb) overItems.push('RAM');
-        if (r.disk_gb_used >= q.max_disk_gb) overItems.push('Disk');
-        if (r.networks >= (q.max_networks ?? Infinity)) overItems.push('Networks');
-        if (r.snapshots >= q.max_snapshots) overItems.push('Snapshots');
-        if (backupQuota && backupQuota.proxmox_backup_count >= backupQuota.max_backups) overItems.push('Backups');
-        if (backupQuota && backupQuota.total_backup_size >= backupQuota.max_backup_size_gb * 1073741824) overItems.push('Backup Storage');
+        if (r.vms > q.max_vms) overItems.push('VMs');
+        if (r.containers > q.max_containers) overItems.push('Containers');
+        if (r.vcpus_used > q.max_vcpus) overItems.push('vCPUs');
+        if (r.ram_mb_used > q.max_ram_mb) overItems.push('RAM');
+        if (r.disk_gb_used > q.max_disk_gb) overItems.push('Disk');
+        if (r.networks > (q.max_networks ?? Infinity)) overItems.push('Networks');
+        if (r.snapshots > q.max_snapshots) overItems.push('Snapshots');
+        if (backupQuota && backupQuota.proxmox_backup_count > backupQuota.max_backups) overItems.push('Backups');
+        if (backupQuota && backupQuota.total_backup_size > backupQuota.max_backup_size_gb * 1073741824) overItems.push('Backup Storage');
         return overItems.length > 0 ? (
           <Card className="border-paws-danger/30">
             <CardContent className="py-3">
@@ -277,9 +277,9 @@ export default function QuotaRequests() {
                       return (
                         <tr key={row.label} className="border-b border-paws-border/50">
                           <td className="py-2 pr-4">{row.label}</td>
-                          <td className={`text-right py-2 px-4 font-medium ${ratio >= 0.9 ? 'text-paws-danger' : ratio >= 0.7 ? 'text-paws-warning' : ''}`}>{row.used}</td>
+                          <td className={`text-right py-2 px-4 font-medium ${ratio > 1 ? 'text-paws-danger' : ratio >= 0.9 ? 'text-paws-warning' : ''}`}>{row.used}</td>
                           <td className="text-right py-2 px-4">{row.limit}</td>
-                          <td className={`text-right py-2 pl-4 font-medium ${avail === 0 ? 'text-paws-danger' : ''}`}>{avail}</td>
+                          <td className={`text-right py-2 pl-4 font-medium ${row.used > row.limit ? 'text-paws-danger' : avail === 0 ? 'text-paws-warning' : ''}`}>{avail}</td>
                         </tr>
                       );
                     })}

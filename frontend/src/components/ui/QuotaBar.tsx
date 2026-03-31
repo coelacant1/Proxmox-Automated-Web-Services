@@ -9,7 +9,7 @@ interface QuotaBarProps {
 }
 
 function getBarColor(ratio: number) {
-  if (ratio >= 0.9) return 'bg-paws-danger';
+  if (ratio > 1) return 'bg-paws-danger';
   if (ratio >= 0.7) return 'bg-paws-warning';
   return 'bg-paws-primary';
 }

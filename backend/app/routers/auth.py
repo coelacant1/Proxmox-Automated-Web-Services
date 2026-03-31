@@ -156,6 +156,7 @@ async def register(body: UserCreate, request: Request, db: AsyncSession = Depend
     await _create_default_security_group(db, user)
     await _create_default_vpc(db, user)
     await _provision_pbs_namespace(user)
+    _send_welcome_email(user)
     client_ip = request.client.host if request.client else "unknown"
     await log_auth_event(db, "auth.register", user_id=user.id, details={"ip": client_ip, "username": user.username})
     return user
@@ -286,7 +287,10 @@ async def revoke_all_sessions(
 
 @router.get("/oauth/login")
 async def oauth_login(request: Request, redirect_uri: str):
-    if not settings.oauth_enabled:
+    from app.core.config_resolver import get_config_value
+
+    oauth_on = await get_config_value("oauth_enabled", str(settings.oauth_enabled))
+    if oauth_on.lower() not in ("true", "1", "yes"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="OAuth login is disabled")
 
     await _check_auth_rate_limit(request, "oauth", 10, 60)
@@ -308,7 +312,10 @@ async def oauth_login(request: Request, redirect_uri: str):
 async def oauth_callback(
     code: str, redirect_uri: str, response: Response, state: str = "", db: AsyncSession = Depends(get_db)
 ):
-    if not settings.oauth_enabled:
+    from app.core.config_resolver import get_config_value
+
+    oauth_on = await get_config_value("oauth_enabled", str(settings.oauth_enabled))
+    if oauth_on.lower() not in ("true", "1", "yes"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="OAuth login is disabled")
 
     # Validate OAuth state to prevent CSRF
@@ -357,6 +364,7 @@ async def oauth_callback(
         await _create_default_security_group(db, user)
         await _create_default_vpc(db, user)
         await _provision_pbs_namespace(user)
+        _send_welcome_email(user)
 
     tokens = _make_tokens(user)
     _set_token_cookies(response, tokens)
@@ -379,6 +387,7 @@ async def get_me(request: Request, user: User = Depends(get_current_active_user)
         "role": user.role,
         "is_active": user.is_active,
         "auth_provider": user.auth_provider,
+        "email_notifications": user.email_notifications,
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
         "lifecycle_policy": lifecycle,
     }
@@ -386,6 +395,18 @@ async def get_me(request: Request, user: User = Depends(get_current_active_user)
     if impersonator:
         data["impersonated_by"] = impersonator
     return data
+
+
+@router.patch("/me/notifications")
+async def update_notification_preferences(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_active_user),
+    email_notifications: bool = True,
+):
+    """Toggle email notification preference for the current user."""
+    user.email_notifications = email_notifications
+    await db.commit()
+    return {"email_notifications": user.email_notifications}
 
 
 # --- Helpers ---
@@ -407,7 +428,7 @@ async def _create_personal_project(db: AsyncSession, user: User) -> None:
 
 async def _create_default_security_group(db: AsyncSession, user: User) -> None:
     """Create a default security group with sensible rules for a new user."""
-    sg = SecurityGroup(owner_id=user.id, name="default", description="Default security group")
+    sg = SecurityGroup(owner_id=user.id, name="default", description="Default security group", cluster_id="default")
     db.add(sg)
     await db.flush()
     # Allow all outbound
@@ -480,15 +501,31 @@ async def _create_default_vpc(db: AsyncSession, user: User) -> None:
 
 
 async def _provision_pbs_namespace(user: User) -> None:
-    """Create a PBS namespace for the user (best-effort, non-blocking)."""
+    """Create a PBS namespace for the user on all PBS clusters (best-effort)."""
     import logging
 
     logger = logging.getLogger(__name__)
     try:
-        from app.services.pbs_client import pbs_client
+        from app.services.cluster_registry import cluster_registry
 
         namespace = f"user-{user.username}"
-        pbs_client.create_namespace(namespace)
-        logger.info("Created PBS namespace %s for user %s", namespace, user.id)
+        for cid in cluster_registry.list_cluster_ids():
+            try:
+                pbs = cluster_registry.get_pbs(cid)
+                if pbs:
+                    await pbs.create_namespace(pbs.datastore, namespace)
+                    logger.info("Created PBS namespace %s on cluster %s", namespace, cid)
+            except Exception as e:
+                logger.debug("PBS namespace skipped on cluster %s: %s", cid, e)
     except Exception as e:
         logger.warning("PBS namespace provisioning failed for %s: %s", user.username, e)
+
+
+def _send_welcome_email(user: User) -> None:
+    """Schedule a welcome email for a new user (best-effort, non-blocking)."""
+    try:
+        from app.tasks.email_tasks import send_notification_email
+
+        send_notification_email.delay(str(user.id), "welcome", {"username": user.username, "email": user.email})
+    except Exception:
+        pass

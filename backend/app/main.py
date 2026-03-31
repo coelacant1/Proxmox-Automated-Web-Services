@@ -8,12 +8,19 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import async_session
-from app.core.middleware import AnalyticsMiddleware, RateLimitMiddleware, SecurityHeadersMiddleware
+from app.core.middleware import (
+    AnalyticsMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    SetupGuardMiddleware,
+)
 from app.core.security import hash_password
 from app.models.models import InstanceType, SystemSetting, User, UserQuota, UserRole
 from app.routers import (
     admin,
     admin_audit,
+    admin_clusters,
+    admin_connections,
     admin_groups,
     admin_ha,
     admin_quota_requests,
@@ -49,6 +56,7 @@ from app.routers import (
     resources,
     search,
     security_groups,
+    setup,
     ssh_keys,
     storage,
     storage_pools,
@@ -249,10 +257,14 @@ async def seed_instance_types() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.setup_state import check_initialized, is_initialized
+
     validate_security_settings()
-    await seed_default_admin()
-    await seed_system_settings()
-    await seed_instance_types()
+    await check_initialized()
+    if is_initialized():
+        await seed_default_admin()
+        await seed_system_settings()
+        await seed_instance_types()
     yield
 
 
@@ -294,6 +306,7 @@ app = FastAPI(
     ],
 )
 
+app.add_middleware(SetupGuardMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(AnalyticsMiddleware)
@@ -306,6 +319,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(setup.router)
 app.include_router(health_checks.router)
 app.include_router(events.router)
 app.include_router(lifecycle_policies.router)
@@ -348,6 +362,8 @@ app.include_router(admin_tiers.router)
 app.include_router(admin_tiers.user_router)
 app.include_router(admin_ha.router)
 app.include_router(admin_groups.router)
+app.include_router(admin_clusters.router)
+app.include_router(admin_connections.router)
 app.include_router(system_rules.router)
 app.include_router(groups.router)
 app.include_router(template_requests.router)

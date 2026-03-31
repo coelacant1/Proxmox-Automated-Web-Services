@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.models.models import Resource, User
 from app.services.audit_service import log_action
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/migration", tags=["migration"])
 
@@ -53,7 +53,8 @@ async def export_vm(
 
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        task = proxmox_client.create_backup(
+        pve = get_pve(resource.cluster_id)
+        task = pve.create_backup(
             resource.proxmox_node,
             resource.proxmox_vmid,
             storage=body.storage,
@@ -84,10 +85,11 @@ async def clone_vm(
     resource = await _get_user_resource(db, user.id, resource_id)
 
     target_node = body.target_node or resource.proxmox_node
-    new_vmid = proxmox_client.get_next_vmid()
+    pve = get_pve(resource.cluster_id)
+    new_vmid = pve.get_next_vmid()
 
     try:
-        task = proxmox_client.clone_vm(
+        task = pve.clone_vm(
             resource.proxmox_node,
             resource.proxmox_vmid,
             new_vmid,
@@ -134,7 +136,7 @@ async def convert_to_template(
         raise HTTPException(status_code=409, detail="VM must be stopped to convert to template")
 
     try:
-        proxmox_client.convert_to_template(resource.proxmox_node, resource.proxmox_vmid)
+        get_pve(resource.cluster_id).convert_to_template(resource.proxmox_node, resource.proxmox_vmid)
         resource.status = "template"
         await db.commit()
         await log_action(db, user.id, "vm_convert_template", resource.resource_type, resource.id)
@@ -154,7 +156,7 @@ async def get_export_status(
     resource = await _get_user_resource(db, user.id, resource_id)
 
     try:
-        status_data = proxmox_client.get_task_status(resource.proxmox_node, task_id)
+        status_data = get_pve(resource.cluster_id).get_task_status(resource.proxmox_node, task_id)
         return {
             "resource_id": str(resource.id),
             "task_id": task_id,

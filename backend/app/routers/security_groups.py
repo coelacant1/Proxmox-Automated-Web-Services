@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,12 +63,13 @@ SG_TEMPLATES = {
 @router.get("/", response_model=list[SecurityGroupRead])
 async def list_security_groups(
     resource_id: str | None = None,
+    cluster_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
     if resource_id:
         # List SGs attached to a specific resource
-        result = await db.execute(
+        query = (
             select(SecurityGroup)
             .join(ResourceSecurityGroup)
             .where(
@@ -77,13 +78,19 @@ async def list_security_groups(
             )
             .options(selectinload(SecurityGroup.rules))
         )
+        if cluster_id:
+            query = query.where(SecurityGroup.cluster_id == cluster_id)
+        result = await db.execute(query)
     else:
-        result = await db.execute(
+        query = (
             select(SecurityGroup)
             .where(SecurityGroup.owner_id == user.id)
             .options(selectinload(SecurityGroup.rules))
             .order_by(SecurityGroup.created_at.desc())
         )
+        if cluster_id:
+            query = query.where(SecurityGroup.cluster_id == cluster_id)
+        result = await db.execute(query)
     return list(result.scalars().all())
 
 
@@ -94,12 +101,16 @@ async def create_security_group(
     user: User = Depends(get_current_active_user),
 ):
     existing = await db.execute(
-        select(SecurityGroup).where(SecurityGroup.owner_id == user.id, SecurityGroup.name == body.name)
+        select(SecurityGroup).where(
+            SecurityGroup.owner_id == user.id,
+            SecurityGroup.name == body.name,
+            SecurityGroup.cluster_id == body.cluster_id,
+        )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Security group name already exists")
 
-    sg = SecurityGroup(owner_id=user.id, name=body.name, description=body.description)
+    sg = SecurityGroup(owner_id=user.id, name=body.name, description=body.description, cluster_id=body.cluster_id)
     db.add(sg)
     await db.commit()
 
@@ -122,9 +133,14 @@ async def list_templates():
     }
 
 
+class FromTemplateRequest(BaseModel):
+    cluster_id: str = "default"
+
+
 @router.post("/from-template/{template_id}", response_model=SecurityGroupRead, status_code=status.HTTP_201_CREATED)
 async def create_from_template(
     template_id: str,
+    body: FromTemplateRequest | None = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
@@ -132,15 +148,20 @@ async def create_from_template(
     if template_id not in SG_TEMPLATES:
         raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
 
+    cluster_id = body.cluster_id if body else "default"
     tpl = SG_TEMPLATES[template_id]
 
     existing = await db.execute(
-        select(SecurityGroup).where(SecurityGroup.owner_id == user.id, SecurityGroup.name == tpl["name"])
+        select(SecurityGroup).where(
+            SecurityGroup.owner_id == user.id,
+            SecurityGroup.name == tpl["name"],
+            SecurityGroup.cluster_id == cluster_id,
+        )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Security group '{tpl['name']}' already exists")
 
-    sg = SecurityGroup(owner_id=user.id, name=tpl["name"], description=tpl["description"])
+    sg = SecurityGroup(owner_id=user.id, name=tpl["name"], description=tpl["description"], cluster_id=cluster_id)
     db.add(sg)
     await db.flush()
 

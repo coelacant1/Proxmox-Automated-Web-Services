@@ -24,6 +24,7 @@ import {
 interface UserData {
   id: string; email: string; username: string; full_name: string | null;
   role: string; is_active: boolean; auth_provider: string; created_at: string;
+  tier_id: string | null;
 }
 interface Template {
   id: string; proxmox_vmid: number; name: string; description: string | null;
@@ -104,11 +105,11 @@ const ADMIN_SECTIONS = [
   },
   {
     label: 'System',
-    tabs: ['Settings', 'Rules', 'Bug Reports', 'Templates', 'Audit Log'] as const,
+    tabs: ['Settings', 'Auth', 'Rules', 'Bug Reports', 'Templates', 'Audit Log'] as const,
   },
   {
     label: 'Infrastructure',
-    tabs: ['Storage', 'Cluster', 'SDN'] as const,
+    tabs: ['Storage', 'Cluster', 'Connections', 'SDN'] as const,
   },
 ] as const;
 
@@ -207,9 +208,11 @@ export default function Admin() {
       {activeTab === 'Storage' && <StoragePoolsTab />}
       {activeTab === 'Rules' && <RulesTab />}
       {activeTab === 'Settings' && <SettingsTab />}
+      {activeTab === 'Auth' && <AuthConfigTab />}
       {activeTab === 'Audit Log' && <AuditLogTab />}
       {activeTab === 'API Keys' && <ApiKeysTab onSwitchTab={handleTabClick} />}
       {activeTab === 'Cluster' && <ClusterTab />}
+      {activeTab === 'Connections' && <ConnectionsTab />}
       {activeTab === 'SDN' && <SDNTab />}
     </div>
   );
@@ -856,7 +859,7 @@ function UsersTab() {
 
         <Tabs tabs={detailTabs} activeTab={detailTab} onChange={onTabChange} />
 
-        {/* ── Overview Tab ── */}
+        {/* -- Overview Tab -- */}
         {detailTab === 'overview' && (
           <div className="space-y-4">
             <div className="grid gap-3 grid-cols-2 sm:grid-cols-4 lg:grid-cols-6">
@@ -929,7 +932,7 @@ function UsersTab() {
           </div>
         )}
 
-        {/* ── Resources Tab ── */}
+        {/* -- Resources Tab -- */}
         {detailTab === 'resources' && (
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -980,7 +983,7 @@ function UsersTab() {
           </div>
         )}
 
-        {/* ── Audit Log Tab ── */}
+        {/* -- Audit Log Tab -- */}
         {detailTab === 'audit' && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -1056,7 +1059,7 @@ function UsersTab() {
           </div>
         )}
 
-        {/* ── Admin Actions Tab ── */}
+        {/* -- Admin Actions Tab -- */}
         {detailTab === 'admin' && (
           <div className="space-y-4">
             <Card><CardContent>
@@ -1078,7 +1081,7 @@ function UsersTab() {
                 <div>
                   <label className="text-xs text-paws-text-muted block mb-1">Tier</label>
                   <select
-                    value={(users.find(uu => uu.id === u.id) as any)?.tier_id || ''}
+                    value={u.tier_id || ''}
                     onChange={e => changeTier(u.id, e.target.value)}
                     className="w-full rounded border border-paws-border bg-paws-bg text-paws-text text-sm px-3 py-2"
                   >
@@ -1441,7 +1444,11 @@ function TemplatesTab() {
   const [showPicker, setShowPicker] = useState(false);
   const [selected, setSelected] = useState<any | null>(null);
   const [form, setForm] = useState({ name: '', description: '', min_cpu: 1, min_ram_mb: 512, min_disk_gb: 10 });
+  const [editTarget, setEditTarget] = useState<Template | null>(null);
+  const [editForm, setEditForm] = useState({ name: '', description: '', os_type: '', min_cpu: 1, min_ram_mb: 512, min_disk_gb: 10, icon_url: '', tags: '' });
+  const [editSaving, setEditSaving] = useState(false);
   const { confirm } = useConfirm();
+  const { toast } = useToast();
 
   const fetchTemplates = () => api.get('/api/admin/templates/?include_inactive=true').then(r => setTemplates(r.data)).catch(() => {});
   const fetchAvailable = () => api.get('/api/admin/templates/proxmox-available').then(r => setAvailable(r.data)).catch(() => {});
@@ -1490,6 +1497,45 @@ function TemplatesTab() {
     if (!await confirm({ title: 'Remove Template', message: 'Remove this template from catalog?' })) return;
     await api.delete(`/api/admin/templates/${id}`);
     fetchTemplates();
+  };
+
+  const openEdit = (t: Template) => {
+    setEditTarget(t);
+    setEditForm({
+      name: t.name,
+      description: t.description || '',
+      os_type: t.os_type || 'other',
+      min_cpu: t.min_cpu,
+      min_ram_mb: t.min_ram_mb,
+      min_disk_gb: t.min_disk_gb,
+      icon_url: t.icon_url || '',
+      tags: t.tags?.join(', ') || '',
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editTarget) return;
+    setEditSaving(true);
+    try {
+      const tagList = editForm.tags.split(',').map(s => s.trim()).filter(Boolean);
+      await api.patch(`/api/admin/templates/${editTarget.id}`, {
+        name: editForm.name,
+        description: editForm.description || null,
+        os_type: editForm.os_type || null,
+        min_cpu: editForm.min_cpu,
+        min_ram_mb: editForm.min_ram_mb,
+        min_disk_gb: editForm.min_disk_gb,
+        icon_url: editForm.icon_url || null,
+        tags: tagList.length > 0 ? tagList : null,
+      });
+      toast('Template updated', 'success');
+      setEditTarget(null);
+      fetchTemplates();
+    } catch {
+      toast('Failed to update template', 'error');
+    } finally {
+      setEditSaving(false);
+    }
   };
 
   const osLabel = (os: string) => {
@@ -1587,8 +1633,9 @@ function TemplatesTab() {
         {templates.map(t => (
           <Card key={t.id}>
             <CardContent className="flex items-center justify-between">
-              <div>
+              <div className="min-w-0 flex-1 mr-4">
                 <p className="font-bold text-paws-text">{t.name}</p>
+                {t.description && <p className="text-xs text-paws-text-muted truncate">{t.description}</p>}
                 <p className="text-sm text-paws-text-dim">
                   VMID {t.proxmox_vmid} · {t.min_cpu} vCPU · {t.min_ram_mb} MB · {t.min_disk_gb} GB
                 </p>
@@ -1597,6 +1644,9 @@ function TemplatesTab() {
                 <Badge variant={t.category === 'vm' ? 'info' : 'primary'}>{t.category.toUpperCase()}</Badge>
                 <span className="text-sm text-paws-text-muted">{t.os_type ? osLabel(t.os_type) : '-'}</span>
                 <StatusBadge status={t.is_active ? 'active' : 'stopped'} />
+                <Button variant="outline" size="sm" onClick={() => openEdit(t)}>
+                  <Pencil className="w-3.5 h-3.5 mr-1" />Edit
+                </Button>
                 <Button variant="outline" size="sm" onClick={() => toggleActive(t.id, !t.is_active)}>
                   {t.is_active ? 'Disable' : 'Enable'}
                 </Button>
@@ -1606,6 +1656,59 @@ function TemplatesTab() {
           </Card>
         ))}
       </div>
+
+      {/* Edit Template Modal */}
+      <Modal open={editTarget !== null} onClose={() => setEditTarget(null)} title="Edit Template" size="lg">
+        {editTarget && (
+          <div className="space-y-3">
+            <div className="text-xs text-paws-text-muted mb-1">
+              VMID {editTarget.proxmox_vmid} · {editTarget.category.toUpperCase()}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Display Name" value={editForm.name}
+                onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
+              <Select
+                    label="OS Type"
+                    value={editForm.os_type}
+                    onChange={e => setEditForm({ ...editForm, os_type: e.target.value })}
+                    options={[
+                      { value: 'linux', label: 'Linux' },
+                      { value: 'windows', label: 'Windows' },
+                      { value: 'bsd', label: 'BSD' },
+                      { value: 'other', label: 'Other' },
+                    ]}
+                  />
+              <Input label="Min vCPUs" type="number" value={editForm.min_cpu}
+                onChange={e => setEditForm({ ...editForm, min_cpu: parseInt(e.target.value) || 1 })} />
+              <Input label="Min RAM (MB)" type="number" value={editForm.min_ram_mb}
+                onChange={e => setEditForm({ ...editForm, min_ram_mb: parseInt(e.target.value) || 512 })} />
+              <Input label="Min Disk (GB)" type="number" value={editForm.min_disk_gb}
+                onChange={e => setEditForm({ ...editForm, min_disk_gb: parseInt(e.target.value) || 10 })} />
+              <Input label="Icon URL (optional)" value={editForm.icon_url}
+                onChange={e => setEditForm({ ...editForm, icon_url: e.target.value })} />
+              <div className="col-span-2">
+                <Input label="Tags (comma-separated)" value={editForm.tags}
+                  onChange={e => setEditForm({ ...editForm, tags: e.target.value })} />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-paws-text-muted mb-1">Description</label>
+                <Textarea
+                  rows={3}
+                  value={editForm.description}
+                  onChange={e => setEditForm({ ...editForm, description: e.target.value })}
+                  placeholder="Describe this template for users..."
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" onClick={() => setEditTarget(null)}>Cancel</Button>
+              <Button variant="primary" onClick={saveEdit} disabled={editSaving || !editForm.name.trim()}>
+                {editSaving ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* Template Requests from users */}
       <TemplateRequestsSection />
@@ -2206,9 +2309,11 @@ function SettingsTab() {
     'Resource Quotas': ['default_max_vms', 'default_max_containers', 'default_max_vcpus', 'default_max_ram_mb', 'default_max_disk_gb', 'default_max_networks', 'default_max_volumes', 'default_max_volume_size_gb', 'default_max_security_groups', 'default_max_sg_rules', 'default_max_backups', 'default_max_backup_size_gb', 'default_max_snapshots', 'default_max_buckets', 'default_max_storage_gb'],
     'Cluster Settings': ['cpu_overcommit_ratio', 'ram_overcommit_ratio', 'placement_strategy', 'vmid_range_start', 'vmid_range_end'],
     'SDN / Networking': ['sdn.default_max_subnet_prefix', 'sdn.lan_ranges', 'sdn.upstream_ips'],
-    'Authentication': ['registration_mode', 'session_timeout_minutes'],
+    'Authentication': ['registration_mode', 'session_timeout_minutes', 'oauth_enabled', 'oauth_provider_url', 'oauth_client_id', 'oauth_client_secret'],
     'Resource Lifecycle': ['idle_shutdown_days', 'idle_destroy_days'],
     'Account Lifecycle': ['account_inactive_days'],
+    'Email / SMTP': ['smtp_enabled', 'smtp_host', 'smtp_port', 'smtp_username', 'smtp_password', 'smtp_from_address', 'smtp_from_name', 'smtp_use_tls'],
+    'S3 Storage': ['s3_endpoint_url', 's3_access_key', 's3_secret_key', 's3_region'],
     'General': ['motd'],
   };
 
@@ -2262,6 +2367,7 @@ function SettingsTab() {
                   </div>
                   <Input
                     className="w-[200px]"
+                    type={['smtp_password', 'oauth_client_secret', 's3_secret_key'].includes(s.key) ? 'password' : 'text'}
                     value={editValues[s.key] || ''}
                     onChange={e => setEditValues({ ...editValues, [s.key]: e.target.value })}
                   />
@@ -2276,6 +2382,31 @@ function SettingsTab() {
                 </CardContent>
               </Card>
             ))}
+            {group === 'Email / SMTP' && (
+              <Card>
+                <CardContent className="flex gap-4 items-center">
+                  <div className="flex-1">
+                    <p className="font-bold text-sm text-paws-text">Send Test Email</p>
+                    <p className="text-xs text-paws-text-dim">Send a test email to your admin email to verify SMTP settings</p>
+                  </div>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        const res = await api.post('/api/admin/settings/smtp/test');
+                        toast(`Test email sent to ${res.data.sent_to}`, 'success');
+                      } catch (err: unknown) {
+                        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Failed to send test email';
+                        toast(detail, 'error');
+                      }
+                    }}
+                  >
+                    Send Test
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
             </div>
           )}
         </div>
@@ -2920,9 +3051,400 @@ function SDNTab() {
   );
 }
 
+// --- Connections Tab -----------------------------------------------------
+
+interface ConnectionData {
+  id: string; name: string; conn_type: string; host: string; port: number;
+  token_id: string | null; token_secret_masked: string | null;
+  password_set: boolean; fingerprint: string | null; verify_ssl: boolean;
+  is_active: boolean; extra_config: Record<string, string> | null;
+  created_at: string; updated_at: string;
+}
+
+function ConnectionsTab() {
+  const [connections, setConnections] = useState<ConnectionData[]>([]);
+  const [showModal, setShowModal] = useState(false);
+  const [editing, setEditing] = useState<ConnectionData | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
+  const [testing, setTesting] = useState<Record<string, boolean>>({});
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
+  const [form, setForm] = useState({
+    name: '', conn_type: 'pve', host: '', port: 8006,
+    token_id: '', token_secret: '', password: '', fingerprint: '',
+    verify_ssl: false, is_active: true, extra_config_str: '',
+  });
+
+  const fetchConnections = () => api.get('/api/admin/connections/').then(r => setConnections(r.data)).catch(() => {});
+  useEffect(() => { fetchConnections(); }, []);
+
+  const resetForm = () => setForm({
+    name: '', conn_type: 'pve', host: '', port: 8006,
+    token_id: '', token_secret: '', password: '', fingerprint: '',
+    verify_ssl: false, is_active: true, extra_config_str: '',
+  });
+
+  const openCreate = () => { resetForm(); setEditing(null); setShowModal(true); };
+  const openEdit = (c: ConnectionData) => {
+    setEditing(c);
+    setForm({
+      name: c.name, conn_type: c.conn_type, host: c.host, port: c.port,
+      token_id: c.token_id || '', token_secret: '', password: '', fingerprint: c.fingerprint || '',
+      verify_ssl: c.verify_ssl, is_active: c.is_active,
+      extra_config_str: c.extra_config ? JSON.stringify(c.extra_config, null, 2) : '',
+    });
+    setShowModal(true);
+  };
+
+  const handleSave = async () => {
+    try {
+      let extra: Record<string, string> | undefined;
+      if (form.extra_config_str.trim()) {
+        try { extra = JSON.parse(form.extra_config_str); } catch { toast('Invalid JSON in extra config', 'error'); return; }
+      }
+      const payload: Record<string, unknown> = {
+        name: form.name, host: form.host, port: form.port,
+        verify_ssl: form.verify_ssl, is_active: form.is_active,
+      };
+      if (form.token_id) payload.token_id = form.token_id;
+      if (form.token_secret) payload.token_secret = form.token_secret;
+      if (form.password) payload.password = form.password;
+      if (form.fingerprint) payload.fingerprint = form.fingerprint;
+      if (extra) payload.extra_config = extra;
+
+      if (editing) {
+        await api.patch(`/api/admin/connections/${editing.id}`, payload);
+        toast('Connection updated', 'success');
+      } else {
+        payload.conn_type = form.conn_type;
+        await api.post('/api/admin/connections/', payload);
+        toast('Connection created', 'success');
+      }
+      setShowModal(false);
+      fetchConnections();
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Failed to save';
+      toast(detail, 'error');
+    }
+  };
+
+  const handleDelete = async (c: ConnectionData) => {
+    const ok = await confirm({ title: 'Delete Connection', message: `Delete "${c.name}"? This cannot be undone.`, confirmLabel: 'Delete', variant: 'danger' });
+    if (!ok) return;
+    try {
+      await api.delete(`/api/admin/connections/${c.id}`);
+      toast('Connection deleted', 'success');
+      fetchConnections();
+    } catch { toast('Failed to delete', 'error'); }
+  };
+
+  const handleTest = async (c: ConnectionData) => {
+    setTesting(prev => ({ ...prev, [c.id]: true }));
+    try {
+      const res = await api.post(`/api/admin/connections/${c.id}/test`);
+      setTestResults(prev => ({ ...prev, [c.id]: res.data }));
+    } catch {
+      setTestResults(prev => ({ ...prev, [c.id]: { success: false, message: 'Request failed' } }));
+    } finally {
+      setTesting(prev => ({ ...prev, [c.id]: false }));
+    }
+  };
+
+  const typeLabel = (t: string) => ({ pve: 'Proxmox VE', pbs: 'Proxmox BS', s3: 'S3 Storage' }[t] || t);
+  const typeBadge = (t: string) => ({ pve: 'info', pbs: 'warning', s3: 'success' }[t] || 'default') as 'info' | 'warning' | 'success' | 'default';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-paws-text-muted">Manage PVE, PBS, and S3 connections. Secrets are encrypted at rest.</p>
+        <Button variant="primary" size="sm" onClick={openCreate}><Plus className="w-4 h-4 mr-1" /> Add Connection</Button>
+      </div>
+
+      {connections.length === 0 ? (
+        <Card><CardContent><p className="text-center text-paws-text-dim py-8">No connections configured. Add your first cluster connection above.</p></CardContent></Card>
+      ) : (
+        <div className="grid gap-3">
+          {connections.map(c => (
+            <Card key={c.id}>
+              <CardContent className="flex items-center gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-bold text-sm text-paws-text">{c.name}</span>
+                    <Badge variant={typeBadge(c.conn_type)}>{typeLabel(c.conn_type)}</Badge>
+                    {!c.is_active && <Badge variant="default">Disabled</Badge>}
+                  </div>
+                  <p className="text-xs text-paws-text-dim">
+                    {c.host}:{c.port}
+                    {c.token_id && <span className="ml-2">Token: {c.token_id}</span>}
+                    {c.token_secret_masked && <span className="ml-1">({c.token_secret_masked})</span>}
+                  </p>
+                  {testResults[c.id] && (
+                    <p className={`text-xs mt-1 ${testResults[c.id]?.success ? 'text-green-400' : 'text-red-400'}`}>
+                      {testResults[c.id]?.success ? '\u2713' : '\u2717'} {testResults[c.id]?.message}
+                    </p>
+                  )}
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => handleTest(c)} disabled={testing[c.id]}>
+                  {testing[c.id] ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => openEdit(c)}><Pencil className="w-4 h-4" /></Button>
+                <Button variant="ghost" size="sm" onClick={() => handleDelete(c)}><Trash2 className="w-4 h-4 text-red-400" /></Button>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      <Modal open={showModal} onClose={() => setShowModal(false)} title={editing ? 'Edit Connection' : 'New Connection'}>
+        <div className="flex flex-col gap-3">
+          {!editing && (
+            <Select
+              label="Type"
+              value={form.conn_type}
+              onChange={e => {
+                const v = e.target.value;
+                const port = v === 'pbs' ? 8007 : v === 's3' ? 7480 : 8006;
+                setForm(prev => ({ ...prev, conn_type: v, port }));
+              }}
+              options={[
+                { value: 'pve', label: 'Proxmox VE' },
+                { value: 'pbs', label: 'Proxmox Backup Server' },
+                { value: 's3', label: 'S3 Storage (Ceph/MinIO)' },
+              ]}
+            />
+          )}
+          <Input label="Name" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="e.g. prod-cluster-1" required />
+          <div className="grid grid-cols-3 gap-2">
+            <div className="col-span-2"><Input label="Host" value={form.host} onChange={e => setForm(p => ({ ...p, host: e.target.value }))} placeholder="192.168.1.100" required /></div>
+            <Input label="Port" type="number" value={String(form.port)} onChange={e => setForm(p => ({ ...p, port: parseInt(e.target.value) || 0 }))} />
+          </div>
+          <Input label="Token ID" value={form.token_id} onChange={e => setForm(p => ({ ...p, token_id: e.target.value }))} placeholder={form.conn_type === 's3' ? 'Access key' : 'user@realm!tokenid'} />
+          <Input label={form.conn_type === 's3' ? 'Secret Key' : 'Token Secret'} type="password" value={form.token_secret} onChange={e => setForm(p => ({ ...p, token_secret: e.target.value }))} placeholder={editing ? '(leave blank to keep current)' : ''} />
+          {form.conn_type !== 's3' && (
+            <>
+              <Input label="Password (alternative to token)" type="password" value={form.password} onChange={e => setForm(p => ({ ...p, password: e.target.value }))} placeholder={editing ? '(leave blank to keep current)' : 'Optional'} />
+              <Input label="Fingerprint (PBS)" value={form.fingerprint} onChange={e => setForm(p => ({ ...p, fingerprint: e.target.value }))} placeholder="Optional" />
+            </>
+          )}
+          <Textarea label="Extra Config (JSON)" value={form.extra_config_str} onChange={e => setForm(p => ({ ...p, extra_config_str: e.target.value }))} placeholder='{"datastore":"backups","pve_cluster":"prod"}' rows={3} />
+          <div className="flex items-center gap-4 text-sm text-paws-text">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={form.verify_ssl} onChange={e => setForm(p => ({ ...p, verify_ssl: e.target.checked }))} className="rounded" />
+              Verify SSL
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={form.is_active} onChange={e => setForm(p => ({ ...p, is_active: e.target.checked }))} className="rounded" />
+              Active
+            </label>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={() => setShowModal(false)}>Cancel</Button>
+            <Button variant="primary" onClick={handleSave}>{editing ? 'Update' : 'Create'}</Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+// --- Auth Config Tab -----------------------------------------------------
+
+function AuthConfigTab() {
+  const [settings, setSettings] = useState<Setting[]>([]);
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [testingOAuth, setTestingOAuth] = useState(false);
+  const { toast } = useToast();
+
+  const AUTH_KEYS = ['oauth_enabled', 'oauth_provider_url', 'oauth_client_id', 'oauth_client_secret', 'registration_mode', 'session_timeout_minutes', 'local_auth_enabled'];
+  const SECRET_KEYS = ['oauth_client_secret'];
+
+  const fetchSettings = () => api.get('/api/admin/settings/').then(r => {
+    const all: Setting[] = r.data;
+    const filtered = all.filter(s => AUTH_KEYS.includes(s.key));
+    setSettings(filtered);
+    const vals: Record<string, string> = {};
+    filtered.forEach(s => { vals[s.key] = s.value; });
+    setEditValues(vals);
+  }).catch(() => {});
+
+  useEffect(() => { fetchSettings(); }, []);
+
+  const save = async (key: string) => {
+    try {
+      await api.patch(`/api/admin/settings/${key}`, { value: editValues[key] });
+      toast(`Saved ${key}`, 'success');
+      fetchSettings();
+    } catch { toast('Failed to save', 'error'); }
+  };
+
+  const testOAuth = async () => {
+    setTestingOAuth(true);
+    try {
+      const url = editValues['oauth_provider_url'];
+      if (!url) { toast('Set provider URL first', 'error'); return; }
+      const res = await api.get('/api/health');
+      if (res.status === 200) {
+        toast('Backend reachable. Test OAuth by attempting SSO login.', 'info');
+      }
+    } catch { toast('Failed to test', 'error'); } finally { setTestingOAuth(false); }
+  };
+
+  const groupedSettings = [
+    { label: 'OAuth / OIDC', keys: ['oauth_enabled', 'oauth_provider_url', 'oauth_client_id', 'oauth_client_secret'] },
+    { label: 'Registration & Sessions', keys: ['registration_mode', 'session_timeout_minutes', 'local_auth_enabled'] },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <p className="text-sm text-paws-text-muted">Configure authentication providers, registration policy, and session settings.</p>
+
+      {groupedSettings.map(group => (
+        <div key={group.label}>
+          <h3 className="text-sm font-semibold text-paws-text-dim uppercase tracking-wider mb-2">{group.label}</h3>
+          <div className="flex flex-col gap-2">
+            {settings.filter(s => group.keys.includes(s.key)).map(s => (
+              <Card key={s.key}>
+                <CardContent className="flex gap-4 items-center">
+                  <div className="flex-1">
+                    <p className="font-bold text-sm text-paws-text">{s.key}</p>
+                    <p className="text-xs text-paws-text-dim">{s.description}</p>
+                  </div>
+                  {s.key === 'oauth_enabled' ? (
+                    <Select
+                      value={editValues[s.key] || 'false'}
+                      onChange={e => setEditValues(prev => ({ ...prev, [s.key]: e.target.value }))}
+                      options={[{ value: 'true', label: 'Enabled' }, { value: 'false', label: 'Disabled' }]}
+                    />
+                  ) : s.key === 'registration_mode' ? (
+                    <Select
+                      value={editValues[s.key] || 'open'}
+                      onChange={e => setEditValues(prev => ({ ...prev, [s.key]: e.target.value }))}
+                      options={[{ value: 'open', label: 'Open' }, { value: 'approval', label: 'Approval' }, { value: 'closed', label: 'Closed' }, { value: 'invite', label: 'Invite Only' }]}
+                    />
+                  ) : (
+                    <Input
+                      className="w-[250px]"
+                      type={SECRET_KEYS.includes(s.key) ? 'password' : 'text'}
+                      value={editValues[s.key] || ''}
+                      onChange={e => setEditValues(prev => ({ ...prev, [s.key]: e.target.value }))}
+                    />
+                  )}
+                  <Button variant="primary" size="sm" onClick={() => save(s.key)} disabled={editValues[s.key] === s.value}>Save</Button>
+                </CardContent>
+              </Card>
+            ))}
+            {group.label === 'OAuth / OIDC' && (
+              <Card>
+                <CardContent className="flex gap-4 items-center">
+                  <div className="flex-1">
+                    <p className="font-bold text-sm text-paws-text">Test OAuth</p>
+                    <p className="text-xs text-paws-text-dim">Verify your OAuth provider is reachable and configured</p>
+                  </div>
+                  <Button variant="primary" size="sm" onClick={testOAuth} disabled={testingOAuth}>
+                    {testingOAuth ? 'Testing...' : 'Test Connection'}
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // --- Cluster Tab ---------------------------------------------------------
 
 function ClusterTab() {
+  const [clusters, setClusters] = useState<Array<{
+    name: string; host: string; port: number;
+    pbs_host: string | null; pbs_configured: boolean;
+    pve_connected: boolean; pbs_connected: boolean;
+    nodes: string[]; node_count: number;
+  }>>([]);
+  const [clustersLoading, setClustersLoading] = useState(true);
+  const [selectedCluster, setSelectedCluster] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.get('/api/admin/clusters/').then(r => {
+      const data = r.data;
+      setClusters(data);
+      if (data.length === 1) setSelectedCluster(data[0].name);
+    }).catch(() => {}).finally(() => setClustersLoading(false));
+  }, []);
+
+  if (clustersLoading) return <LoadingSpinner message="Loading clusters..." />;
+
+  if (selectedCluster) {
+    return (
+      <div>
+        {clusters.length > 1 && (
+          <button
+            onClick={() => setSelectedCluster(null)}
+            className="flex items-center gap-1 text-sm text-paws-text-muted hover:text-paws-text mb-4"
+          >
+            <ChevronLeft className="w-4 h-4" /> All Clusters
+          </button>
+        )}
+        <ClusterDetailView clusterId={selectedCluster} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-paws-text text-lg font-semibold">Configured Clusters</h3>
+      {clusters.length === 0 ? (
+        <p className="text-paws-text-muted text-sm">No clusters configured. Add clusters in your .env configuration.</p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {clusters.map(c => (
+            <div key={c.name} onClick={() => setSelectedCluster(c.name)} className="cursor-pointer">
+              <Card className="hover:border-paws-primary/50 transition-colors h-full">
+                <CardContent>
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-paws-text font-bold text-lg">{c.name}</h4>
+                    <StatusBadge status={c.pve_connected ? 'online' : 'offline'} />
+                  </div>
+                  <div className="space-y-1.5 text-sm">
+                    <div className="flex justify-between text-paws-text-muted">
+                      <span>Host</span>
+                      <span className="text-paws-text font-mono text-xs">{c.host}:{c.port}</span>
+                    </div>
+                    <div className="flex justify-between text-paws-text-muted">
+                      <span>Nodes</span>
+                      <span className="text-paws-text">{c.node_count} {c.node_count === 1 ? 'node' : 'nodes'}</span>
+                    </div>
+                    {c.nodes.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {c.nodes.map(n => <Badge key={n} variant="default">{n}</Badge>)}
+                      </div>
+                    )}
+                    <div className="flex justify-between text-paws-text-muted pt-1">
+                      <span>PBS Backup</span>
+                      {c.pbs_configured ? (
+                        <Badge variant={c.pbs_connected ? 'success' : 'danger'}>
+                          {c.pbs_connected ? 'Connected' : 'Unreachable'}
+                        </Badge>
+                      ) : (
+                        <span className="text-paws-text-dim text-xs">Not configured</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-end mt-3 text-paws-primary text-sm">
+                    Details <ChevronRight className="w-4 h-4 ml-0.5" />
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClusterDetailView({ clusterId }: { clusterId: string }) {
   const [status, setStatus] = useState<ClusterStatus | null>(null);
   const [tasks, setTasks] = useState<PveTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -2941,13 +3463,14 @@ function ClusterTab() {
   const { confirm } = useConfirm();
 
   const fetchStatus = () => {
-    api.get('/api/cluster/status').then(r => setStatus(r.data)).catch(() => {});
+    api.get(`/api/cluster/status?cluster_id=${encodeURIComponent(clusterId)}`).then(r => setStatus(r.data)).catch(() => {});
   };
 
   const fetchTasks = () => {
     setTasksLoading(true);
     const params = new URLSearchParams();
     params.set('limit', '200');
+    params.set('cluster_id', clusterId);
     if (nodeFilter) params.set('node', nodeFilter);
     if (typeFilter) params.set('type', typeFilter);
     if (errorsOnly) params.set('errors_only', 'true');
@@ -3022,7 +3545,7 @@ function ClusterTab() {
   const openTaskDetail = (task: PveTask) => {
     setDetailLoading(true);
     setSelectedTask(null);
-    api.get(`/api/cluster/admin/tasks/${encodeURIComponent(task.node)}/${encodeURIComponent(task.upid)}`)
+    api.get(`/api/cluster/admin/tasks/${encodeURIComponent(task.node)}/${encodeURIComponent(task.upid)}?cluster_id=${encodeURIComponent(clusterId)}`)
       .then(r => setSelectedTask(r.data))
       .catch(() => setSelectedTask({ ...task, exitstatus: 'fetch error', log: 'Failed to load task log.' }))
       .finally(() => setDetailLoading(false));
@@ -3051,10 +3574,11 @@ function ClusterTab() {
   const nodeNames = status?.nodes.map(n => n.name) ?? [];
   const typeOptions = [...new Set(tasks.map(t => t.type))].sort();
 
-  if (!status) return <LoadingSpinner message="Loading cluster..." />;
+  if (!status) return <LoadingSpinner message={`Loading ${clusterId}...`} />;
 
   return (
     <div className="space-y-6">
+      <h2 className="text-xl font-bold text-paws-text">{status.cluster_name || clusterId}</h2>
       {/* Cluster overview metrics */}
       <div className="flex gap-4 mb-6 flex-wrap">
         <MetricCard

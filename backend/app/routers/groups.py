@@ -580,7 +580,7 @@ async def group_dashboard(
     }
 
 
-# ─── Group API Tokens ────────────────────────────────────────────────────
+# --- Group API Tokens ----------------------------------------------------
 
 
 class GroupTokenCreate(BaseModel):

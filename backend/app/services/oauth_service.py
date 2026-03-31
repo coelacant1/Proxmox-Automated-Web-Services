@@ -7,9 +7,44 @@ from app.core.config import settings
 
 class OAuthService:
     def __init__(self):
-        self.provider_url = settings.oauth_provider_url.rstrip("/")
-        self.client_id = settings.oauth_client_id
-        self.client_secret = settings.oauth_client_secret
+        self._cached_config: dict[str, str] | None = None
+
+    def _get_config_sync(self) -> dict[str, str]:
+        """Resolve OAuth config: DB first, env fallback (cached)."""
+        if self._cached_config is not None:
+            return self._cached_config
+        try:
+            from app.core.config_resolver import get_config_value_sync
+
+            cfg = {
+                "provider_url": get_config_value_sync("oauth_provider_url", settings.oauth_provider_url).rstrip("/"),
+                "client_id": get_config_value_sync("oauth_client_id", settings.oauth_client_id),
+                "client_secret": get_config_value_sync("oauth_client_secret", settings.oauth_client_secret),
+            }
+        except Exception:
+            cfg = {
+                "provider_url": settings.oauth_provider_url.rstrip("/"),
+                "client_id": settings.oauth_client_id,
+                "client_secret": settings.oauth_client_secret,
+            }
+        self._cached_config = cfg
+        return cfg
+
+    def invalidate_config(self) -> None:
+        """Clear cached config (called when admin updates OAuth settings)."""
+        self._cached_config = None
+
+    @property
+    def provider_url(self) -> str:
+        return self._get_config_sync()["provider_url"]
+
+    @property
+    def client_id(self) -> str:
+        return self._get_config_sync()["client_id"]
+
+    @property
+    def client_secret(self) -> str:
+        return self._get_config_sync()["client_secret"]
 
     @property
     def authorize_url(self) -> str:

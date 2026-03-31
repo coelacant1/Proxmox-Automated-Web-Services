@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import Resource, User
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 
@@ -30,7 +30,8 @@ async def get_resource_task_logs(
         raise HTTPException(status_code=404, detail="Resource not found")
 
     try:
-        tasks = proxmox_client.get_node_tasks(resource.proxmox_node, vmid=resource.proxmox_vmid)
+        pve = get_pve(resource.cluster_id)
+        tasks = pve.get_node_tasks(resource.proxmox_node, vmid=resource.proxmox_vmid)
         return {"resource_id": resource_id, "tasks": tasks[:limit]}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -52,7 +53,7 @@ async def get_task_detail(
         raise HTTPException(status_code=404, detail="Resource not found")
 
     try:
-        task_status = proxmox_client.get_task_status(resource.proxmox_node, upid)
+        task_status = get_pve(resource.cluster_id).get_task_status(resource.proxmox_node, upid)
         return {"upid": upid, "detail": task_status}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -65,11 +66,12 @@ async def get_cluster_logs(
 ):
     """Get cluster-wide task logs (admin only)."""
     try:
-        nodes = proxmox_client.get_nodes()
+        pve = get_pve()
+        nodes = pve.get_nodes()
         all_tasks = []
         for node_info in nodes[:5]:
             node_name = node_info.get("node", "")
-            tasks = proxmox_client.get_node_tasks(node_name)
+            tasks = pve.get_node_tasks(node_name)
             for t in tasks:
                 t["node"] = node_name
             all_tasks.extend(tasks)

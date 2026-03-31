@@ -1,15 +1,39 @@
 # Changelog
 
-## 0.2.9
+## 0.2.10 - 2026-03-31
 
 ### Added
+- **Multi-cluster support (Issue #32)** - ClusterRegistry service manages multiple PVE and PBS clients loaded from DB or environment; all resource models (Resources, Templates, VPCs, Volumes, SecurityGroups, Backups, HAGroups, VMIDPool) now carry a `cluster_id` column for cross-cluster isolation; admin endpoints at `/api/admin/clusters/` for listing clusters and checking status
+- **Web-based configuration system** - Database-driven settings via `config_resolver` (DB first, env fallback, coded default); AES-256-GCM encryption for sensitive values; `PAWS_MASTER_KEY` for at-rest credential protection; admin UI for all system settings with auto-seeding of known keys
+- **Setup wizard (Issue #1)** - First-run `/setup` page creates the initial admin account and platform name; `SetupGuardMiddleware` returns 503 with `setup_required` flag until setup completes; frontend auto-redirects unauthenticated pages to `/setup`
+- **Admin connections panel (Issue #2)** - CRUD for PVE, PBS, and S3 connections with encrypted credential storage, masked secrets in responses, test-connectivity button, and automatic cluster registry reload on changes
+- **Admin auth configuration** - OAuth and registration settings configurable from admin panel; OAuth provider URL, client ID, and client secret stored encrypted in DB; registration mode toggle (open, closed, oauth-only)
+- **Admin S3 configuration (Issue #7)** - S3 endpoint, access key, secret key, and region configurable from admin settings and connections panel; credentials encrypted at rest; storage service caches config with invalidation on change
+- **SSH key injection for configured user (Issue #41)** - VMs inject SSH keys for the cloud-init user (default "paws"); LXC containers now accept a username and inject SSH keys for that user via exec (best-effort, container must be running); root-level `ssh-public-keys` config is always set as fallback
+- **LXC username support** - `ci_user` field added to container creation and config update; stored in resource specs for round-trip persistence
+- **Admin user tier in API response (Issue #40)** - `tier_id` now included in `UserRead` schema so tier dropdown persists after page refresh
+- **Email notifications via SMTP (Issue #12)** - Full email notification system with admin-configurable SMTP settings, Jinja2 HTML templates (welcome, quota changed, resource alert, backup complete, test), Celery background task for non-blocking delivery, per-user opt-in/out toggle on API Keys page, test email button in admin settings, event publisher integration for backups/quotas/alarms
+- **Admin template editing (Issue #34)** - Edit button on template catalog list opens modal with fields for display name, description, OS type, min specs (CPU/RAM/disk), icon URL, and tags; changes saved to PAWS DB via PATCH API
+- **Web configuration documentation** - `docs/web-config.md` covering config priority, encryption, and migration from env-only to web-based configuration
 
+### Changed
+- **All routers cluster-aware** - Compute, networking, backups, volumes, security groups, storage pools, health checks, console, migration, monitoring, and logs routers resolve the target cluster from resource or request context via ClusterRegistry
+- **OAuth resolved from database** - `OAuthService` uses lazy config resolution with caching and `invalidate_config()` on admin settings changes; login and callback endpoints check DB-stored `oauth_enabled` flag before environment
+- **Admin settings UI reorganized** - Settings tab grouped into logical sections (Authentication, Email/SMTP with test button, S3 Storage); new dedicated Auth and Connections tabs in admin panel
+- **Environment file simplified** - `.env.example` updated with notes that most settings are now configurable via admin UI; multi-cluster env format documented for headless deployments
+
+### Fixed
+- **Admin tier assignment reverting to None (Issue #40)** - `UserRead` schema and frontend `UserData` interface now include `tier_id`; dropdown reads from typed field instead of `any` cast
+- **Quota page showing over-limit at exact limit (Issue #13)** - Changed `>=` to `>` in over-quota warning banner so 3/3 shows as "at limit" (warning) not "over limit" (danger); summary table now uses warning color for zero-available and danger only when truly over; QuotaBar progress bar only turns red when usage exceeds the limit
+
+## 0.2.9 - 2026-03-26
+
+### Added
 - **Unified loading spinners (Issue #43)** - Shared LoadingSpinner component with Loader2 animation replaces plain text "Loading..." across all pages
 - **Async dashboard loading** - Dashboard sections load independently with per-section spinners instead of blocking until all data arrives
 - **Loading states for API Keys and Quotas pages** - Added loading indicators where previously none existed
 
 ### Fixed
-
 - **HA group sync on migrated clusters (Issue #36)** - Sync endpoint now detects PVE 8.2+ clusters where HA groups have been migrated to rules and falls back to the rules API; create/update/delete operations tolerate the migration gracefully
 - **Admin loading patterns** - Replaced 5 plain-text loading messages in admin panel (Overview, Resources, Groups, SDN, Cluster) with consistent spinners
 - **DataTable loading state** - Table loading indicator now shows animated spinner instead of static text
@@ -17,7 +41,6 @@
 ## 0.2.8 - 2026-03-25
 
 ### Added
-
 - **Per-resource markdown notes (Issue #9)** - Notes tab on instance detail page with markdown editor and live preview; notes sync to Proxmox VM/LXC description alongside PAWS metadata
 - **Shared documentation pages (Issue #10)** - Full documentation system with create, edit, and delete; visibility controls (private, group, public); edit locking to prevent conflicts; accessible from sidebar
 - **Markdown editor component** - Reusable write/preview editor with GitHub Flavored Markdown support (tables, task lists, strikethrough)
@@ -25,7 +48,6 @@
 - **Database migration** - Added `notes` column to resources table and `doc_pages` table with indexes
 
 ### Fixed
-
 - **Group member access to resource notes** - Notes endpoints now check group-level access (read to view, operate to edit) instead of owner-only; group admins get full access to shared resources
 - **Group document viewing** - Fixed 403 error when group members tried to open shared documents; `_can_view` now checks group membership
 - **Group admin permission elevation** - Group admins now automatically get admin-level access to all resources shared with their group regardless of the share's permission level
@@ -35,14 +57,12 @@
 - **Documentation page API patterns** - Fixed toast/confirm hook usage and API import paths in Documentation page
 
 ### Changed
-
 - Group name badge shown on shared document cards in the documentation list
 - Documentation link added to sidebar navigation under Account section
 
 ## 0.2.7 - 2026-03-24
 
 ### Fixed
-
 - **Backend tests (63 failures -> 0)** - Added 29 missing mock methods to `MockProxmoxClient` test fixture; fixed VMID range assertions (100 -> 1000) to match system default; updated delete tests to expect hard-delete behavior; added required `resource_id` field to volume test payloads; rewrote static IP tests with proper VPC/Subnet DB setup; added volume detach step before delete; updated volume snapshot test to expect 404 (endpoint not implemented)
 - **Duplicate IP reservation race condition** - Added `IntegrityError` handling in networking router returning 409 on duplicate IP reserve
 - **Stale model references** - Removed non-existent `UserMFA` import from user cleanup service; removed premature `Tag` references from resource cleanup until tag feature is fully integrated
@@ -50,7 +70,6 @@
 ## 0.2.6 - 2026-03-24
 
 ### Fixed
-
 - **Backend lint (ruff)** - Fixed `ReviewBody` and `TierRequestBody` class definitions used before declaration in admin_tiers.py; renamed ambiguous `l` variables; fixed `== True` comparisons to `.is_(True)` for SQLAlchemy; moved misplaced import in compute.py; resolved 32 line-too-long violations; excluded alembic migrations from import sorting rules
 - **Backend format** - Applied `ruff format` across 73 files for consistent style
 - **Frontend lint (ESLint)** - Fixed empty catch blocks in InstanceDetail.tsx causing lint errors
@@ -58,20 +77,17 @@
 ## 0.2.5 - 2026-03-24
 
 ### Added
-
 - **Custom Confirm Dialog** - Promise-based `useConfirm` hook and `ConfirmProvider` replacing all native `confirm()` dialogs with a styled modal (danger icon, cancel/confirm buttons, dark overlay)
 - **Toast Notifications** - Added success and error toasts to all destructive and create operations across VPCs, VMs, Containers, Storage, FileBrowser, SSH Keys, Firewalls, Endpoints, Backups, BackupDetail, CustomImages, and Admin
 - **ESLint Configuration** - Added `eslint.config.js` for ESLint v9 with TypeScript and React plugins
 
 ### Changed
-
 - All 20 native `confirm()` calls replaced with `useConfirm` hook across 13 pages
 - Native `alert()` call in VPCs.tsx replaced with error toast
 - Normalized `useToast` destructuring in Admin.tsx (11 instances of `toast.toast()` simplified to `toast()`)
 - S3 quota labels added to QuotaRequests.tsx for `max_buckets` and `max_storage_gb`
 
 ### Fixed
-
 - **Frontend build** - JSX parse error from bare `->` in BucketDetail.tsx and Admin.tsx (escaped as `{'->'}`
 - **Backend CI** - `bcrypt` missing from `pyproject.toml` dependencies causing import failure
 - **Dashboard bucket count** - Was querying `resources` table instead of `storage_buckets` table, always showing 0
@@ -79,7 +95,6 @@
 ## 0.2.4 - 2026-03-20
 
 ### Added
-
 - **Ceph RadosGW Integration** - Migrated object storage backend from MinIO to Ceph RadosGW with S3-compatible API via aioboto3 and AWS SigV4 authentication
 - **S3 Usage Guide** - Collapsible in-app guide on the Storage page with tabbed code examples for AWS CLI, Python (boto3), JavaScript (AWS SDK v3), and presigned URLs; dynamically populated with real endpoint URL and region from server config
 - **S3 Quota Visibility** - Bucket count and storage GB quotas displayed on Dashboard (metric cards + quota bars), Storage page (quota bars), and Quota Requests page (Object Storage section); admin-configurable defaults via `default_max_buckets` and `default_max_storage_gb` system settings
@@ -88,7 +103,6 @@
 - **Native File Upload** - OS file picker and drag-and-drop upload in File Browser sending raw bytes with proper Content-Type headers
 
 ### Changed
-
 - Storage backend rewritten from httpx with basic auth to aioboto3 with SigV4 (`storage_service.py`)
 - Config keys renamed from `minio_*` to `s3_endpoint_url`, `s3_access_key`, `s3_secret_key`, `s3_region`
 - MinIO services and volumes removed from `docker-compose.yml`
@@ -99,7 +113,6 @@
 - S3 quota labels (`max_buckets`, `max_storage_gb`) added to quota request form
 
 ### Fixed
-
 - Bucket operations returning 500 when frontend passes bucket name instead of UUID (added name-based fallback lookup)
 - Presigned URL endpoint returning 404 (frontend called `/presigned`, backend only had `/presign`)
 - Object size displaying as "NaN undefined" (backend returned `size_bytes`, frontend expected `total_size`)
@@ -110,7 +123,6 @@
 ## 0.2.3 - 2026-03-13
 
 ### Added
-
 - **SDN Networking** - EVPN/VNet-based isolated networking with real Proxmox SDN integration; VPC creation now provisions Proxmox VNets with auto-allocated VXLAN tags; subnet creation provisions SDN subnets with SNAT; FirewallProfileService generates per-instance firewall rules based on network mode; static IP auto-allocation via cloud-init (VMs) and LXC net config with DB-backed IP reservations
 - **Network Modes** - Per-VPC network modes (Published/Private/Isolated) replacing per-instance mode; Published mode blocks RFC1918/bogon traffic while whitelisting admin-configured upstream proxy IPs (`sdn.upstream_ips`); VPC mode changes bulk re-apply firewall rules to all attached instances
 - **Multi-NIC Support** - Up to 2 NICs per instance (primary + one secondary); secondary NIC must target a private-mode VPC; isolated networks block secondary NICs; auto-allocated static IP with cloud-init `ipconfig1` for VMs
@@ -125,7 +137,6 @@
 - **VPC Peering Model** - Database model for future VPC-to-VPC peering support
 
 ### Changed
-
 - VPCs renamed to **Networks** throughout the UI (sidebar, page titles, admin tabs)
 - Security Groups renamed to **Firewalls** throughout the UI
 - Removed DNS Records, IP Addresses, Monitoring, and Alarms pages (functionality covered by Networks, Endpoints, Dashboard, and Quotas pages)
@@ -140,7 +151,6 @@
 - Dashboard alarm banner and alarm-related code removed (covered by quota warnings)
 
 ### Fixed
-
 - SSH keys silently dropped during VM/container creation (`ssh_key_ids` accepted but never resolved from database)
 - Cloud-init settings not applied during template clone (exception swallowed by bare `except: pass`)
 - Cloud-init ISO not regenerated after config or NIC changes (Proxmox requires explicit rebuild)
@@ -156,7 +166,6 @@
 ## 0.2.2 - 2026-03-11
 
 ### Added
-
 - **Admin Audit Mode** - "View as user" impersonation with 1-hour scoped tokens, audit banner with exit button, and automatic token backup/restore in localStorage
 - **Admin Resources View** - Global resource dashboard with 10 categories (Instances, Volumes, VPCs, Security Groups, Object Storage, Backups, DNS Records, Alarms, SSH Keys, Endpoints), search, pagination, and click-to-impersonate navigation
 - **Resource Lifecycle Management** - `last_accessed_at` tracking on resources, `last_login_at` on users, tier-based lifecycle policy overrides (`idle_shutdown_days`, `idle_destroy_days`, `account_inactive_days`), hourly auto-shutdown/destroy of idle resources, daily account purge of inactive users with full 28-table cascade cleanup
@@ -171,7 +180,6 @@
 - **Admin User Detail** - QuotaBar grid showing 8 utilization metrics with proper vCPU/RAM/Disk calculation from resource specs
 
 ### Changed
-
 - Admin navigation restructured from 15 flat tabs to 4 categorized sections (Dashboard, Users & Groups, System, Infrastructure)
 - Dashboard summary endpoint now calculates actual vCPU/RAM/Disk usage from `Resource.specs` instead of showing 0
 - Backup storage resolution changed from hardcoded node to dynamic node discovery via `_resolve_node()`
@@ -184,7 +192,6 @@
 - StatusBadge component added `provisioning` -> `info` variant mapping
 
 ### Fixed
-
 - Audit mode exit race condition where `stopImpersonating()` wasn't awaited before navigation
 - Transfer modal showing greyed-out button due to missing Select placeholder
 - Backup count and total size showing 0 due to hardcoded node fallback
@@ -200,26 +207,22 @@
 ## 0.2.1 - 2026-03-08
 
 ### Added
-
 - **Admin Groups Management** - System-wide group list with search, pagination, member/share counts, group detail view with members and shared resources, audit log per group, and admin force-delete with modal confirmation
 - **Group-Aware Resource Access** - Shared VPCs, security groups, and volumes can now be viewed/modified by group members according to their permission level (read/operate/admin)
 - **Modal Confirmations** - Replaced browser `confirm()` dialogs with styled modals for API key revoke, group token revoke, group delete, and member removal
 
 ### Changed
-
 - Security group endpoints (`get`, `delete`, `add_rule`, `delete_rule`) now use `_get_user_sg()` with group access fallback instead of inline `owner_id` checks
 - Volume endpoints (`get`, `attach`, `detach`, `delete`, `resize`) now use `_get_user_volume()` with group access fallback
 - Admin panel tabs expanded with Groups tab between Users and Tiers
 
 ### Fixed
-
 - Group members with appropriate permissions can now actually modify shared security groups and volumes (previously returned 404)
 - Revoked group API tokens now visually match revoked personal API keys (opacity + muted styling)
 
 ## 0.2.0 - 2026-03-06
 
 ### Added
-
 - **Groups & Resource Sharing** - IAM-style groups with member roles (owner/admin/member/viewer) and polymorphic sharing of VMs, LXCs, VPCs, volumes, buckets, endpoints, SSH keys, security groups, DNS records, backups, and alarms with read/operate/admin permission levels
 - **Tier System** - Capability-based user tiers with self-service upgrade requests and admin approval workflow; capabilities gate features like HA management, template requests, and resource sharing
 - **High Availability** - Admin HA group CRUD with PVE sync, per-instance HA enable/disable with group assignment, HA status monitoring in instance detail
@@ -232,7 +235,6 @@
 - Sidebar navigation for Groups, Account Tier, and System Rules pages
 
 ### Changed
-
 - `GroupResourceShare` model refactored from single `resource_id` FK to polymorphic `entity_type`/`entity_id` supporting 10 entity types
 - Instance detail page expanded with HA card, storage tab for attached volumes, and "Request as Template" button
 - Admin panel extended with Tiers, Bug Reports, Rules, and Analytics tabs
@@ -240,7 +242,6 @@
 - Cloud-init support during VM provisioning (hostname, SSH keys, user data, IP config)
 
 ### Fixed
-
 - xterm.js terminal viewer authentication and connection handling
 - Volume creation, detach, and reattach workflow across hosts (proper volid tracking, storage pool resolution)
 - Async SQLAlchemy `MissingGreenlet` crash on group member loading (changed to `lazy="selectin"`)

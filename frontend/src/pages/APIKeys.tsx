@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import api from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Modal, useToast } from '@/components/ui';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
-import { KeyRound, Plus, Copy, Trash2, AlertTriangle } from 'lucide-react';
+import { KeyRound, Plus, Copy, Trash2, AlertTriangle, Bell, BellOff } from 'lucide-react';
 
 interface APIKey {
   id: string;
@@ -64,8 +65,55 @@ export default function APIKeys() {
   const activeKeys = keys.filter(k => k.is_active);
   const revokedKeys = keys.filter(k => !k.is_active);
 
+  const { user } = useAuth();
+  const [emailNotifs, setEmailNotifs] = useState(user?.email_notifications ?? true);
+  const [notifSaving, setNotifSaving] = useState(false);
+
+  useEffect(() => {
+    if (user) setEmailNotifs(user.email_notifications ?? true);
+  }, [user]);
+
+  const toggleEmailNotifs = async () => {
+    setNotifSaving(true);
+    try {
+      const next = !emailNotifs;
+      await api.patch(`/api/auth/me/notifications?email_notifications=${next}`);
+      setEmailNotifs(next);
+      toast.toast(`Email notifications ${next ? 'enabled' : 'disabled'}`, 'success');
+    } catch {
+      toast.toast('Failed to update notification preferences', 'error');
+    } finally {
+      setNotifSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
+      {/* Notification Preferences */}
+      <div>
+        <h2 className="text-lg font-semibold text-paws-text mb-2">Notification Preferences</h2>
+        <Card>
+          <CardContent className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {emailNotifs ? <Bell className="w-5 h-5 text-green-400" /> : <BellOff className="w-5 h-5 text-paws-text-muted" />}
+              <div>
+                <p className="font-medium text-sm text-paws-text">Email Notifications</p>
+                <p className="text-xs text-paws-text-dim">Receive email alerts for backups, quota changes, and system events</p>
+              </div>
+            </div>
+            <Button
+              variant={emailNotifs ? 'primary' : 'outline'}
+              size="sm"
+              onClick={toggleEmailNotifs}
+              disabled={notifSaving}
+            >
+              {notifSaving ? 'Saving...' : emailNotifs ? 'Enabled' : 'Disabled'}
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* API Keys */}
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-bold text-paws-text">API Keys</h1>

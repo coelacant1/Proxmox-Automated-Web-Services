@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin, require_capability
 from app.models.models import Resource, TemplateCatalog, TemplateRequest, User
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/templates", tags=["template-requests"])
 
@@ -151,20 +151,21 @@ async def review_template_request(
 
     try:
         # Stop VM if running
+        pve = get_pve(resource.cluster_id)
         try:
-            vm_status = proxmox_client.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
+            vm_status = pve.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
             if vm_status.get("status") == "running":
-                proxmox_client.shutdown_vm(resource.proxmox_node, resource.proxmox_vmid)
-                proxmox_client.wait_for_task(
+                pve.shutdown_vm(resource.proxmox_node, resource.proxmox_vmid)
+                pve.wait_for_task(
                     resource.proxmox_node,
-                    proxmox_client.shutdown_vm(resource.proxmox_node, resource.proxmox_vmid),
+                    pve.shutdown_vm(resource.proxmox_node, resource.proxmox_vmid),
                     timeout=60,
                 )
         except Exception:
             pass
 
         # Convert to template
-        proxmox_client.api.nodes(resource.proxmox_node).qemu(resource.proxmox_vmid).template.post()
+        pve.api.nodes(resource.proxmox_node).qemu(resource.proxmox_vmid).template.post()
 
         # Create catalog entry
         tags_list = json.loads(req.tags) if req.tags else None

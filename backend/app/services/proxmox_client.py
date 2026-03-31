@@ -1,7 +1,7 @@
 """Proxmox VE API client service layer.
 
 All Proxmox interactions go through this service - never call proxmoxer directly from routes.
-Uses scoped API tokens for authentication.
+Uses scoped API tokens for authentication.  Supports multiple clusters via ClusterRegistry.
 """
 
 import logging
@@ -9,42 +9,53 @@ from typing import Any
 
 from proxmoxer import ProxmoxAPI
 
-from app.core.config import settings
-
 logger = logging.getLogger(__name__)
 
 
 class ProxmoxClient:
-    _instance: "ProxmoxClient | None" = None
-    _api: ProxmoxAPI | None = None
-    _session_ticket: str | None = None
-    _session_user: str | None = None
+    """Proxmox VE API client for a single cluster."""
 
-    def __new__(cls) -> "ProxmoxClient":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    def __init__(
+        self,
+        host: str,
+        port: int = 8006,
+        token_id: str = "",
+        token_secret: str = "",
+        verify_ssl: bool = False,
+        password: str = "",
+        cluster_name: str = "default",
+    ) -> None:
+        self.cluster_name = cluster_name
+        self._host = host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
+        self._port = port
+        self._token_id = token_id
+        self._token_secret = token_secret
+        self._verify_ssl = verify_ssl
+        self._password = password
+        self._api: ProxmoxAPI | None = None
+        self._session_ticket: str | None = None
+        self._session_user: str | None = None
 
     def _connect(self) -> ProxmoxAPI:
         if self._api is None:
-            if not settings.proxmox_host:
-                raise ConnectionError("Proxmox host not configured (set PAWS_PROXMOX_HOST)")
-
-            token_id = settings.proxmox_token_id
-            token_secret = settings.proxmox_token_secret
-            host = settings.proxmox_host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
-            port = settings.proxmox_port
+            if not self._host:
+                raise ConnectionError(f"Proxmox host not configured for cluster '{self.cluster_name}'")
 
             self._api = ProxmoxAPI(
-                host,
-                port=port,
-                user=token_id.split("!")[0],
-                token_name=token_id.split("!")[-1],
-                token_value=token_secret,
-                verify_ssl=settings.proxmox_verify_ssl,
+                self._host,
+                port=self._port,
+                user=self._token_id.split("!")[0],
+                token_name=self._token_id.split("!")[-1],
+                token_value=self._token_secret,
+                verify_ssl=self._verify_ssl,
                 timeout=30,
             )
-            logger.info("Connected to Proxmox at %s:%d", host, port)
+            logger.info(
+                "Connected to Proxmox cluster '%s' at %s:%d",
+                self.cluster_name,
+                self._host,
+                self._port,
+            )
         return self._api
 
     @property
@@ -59,17 +70,15 @@ class ProxmoxClient:
         """
         import requests
 
-        if not settings.proxmox_password:
-            raise ConnectionError("PAWS_PROXMOX_PASSWORD required for terminal console access")
+        if not self._password:
+            raise ConnectionError(f"Password required for terminal console access on cluster '{self.cluster_name}'")
 
-        host = settings.proxmox_host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
-        port = settings.proxmox_port
-        user = settings.proxmox_token_id.split("!")[0]
+        user = self._token_id.split("!")[0]
 
         resp = requests.post(
-            f"https://{host}:{port}/api2/json/access/ticket",
-            data={"username": user, "password": settings.proxmox_password},
-            verify=settings.proxmox_verify_ssl,
+            f"https://{self._host}:{self._port}/api2/json/access/ticket",
+            data={"username": user, "password": self._password},
+            verify=self._verify_ssl,
             timeout=10,
         )
         resp.raise_for_status()
@@ -256,6 +265,14 @@ class ProxmoxClient:
 
     def set_container_config(self, node: str, vmid: int, **kwargs: Any) -> None:
         self.api.nodes(node).lxc(vmid).config.put(**kwargs)
+
+    def lxc_exec(self, node: str, vmid: int, command: list[str]) -> Any:
+        """Execute a command inside a running LXC container (PVE 8+).
+
+        Returns the API response (typically the exit code).
+        Raises on failure or if the container is not running.
+        """
+        return self.api.nodes(node).lxc(vmid)("exec").post(command=command)
 
     def get_container_disk_storage(self, node: str, vmid: int) -> str | None:
         """Get the storage pool of a container's rootfs."""
@@ -693,4 +710,39 @@ class ProxmoxClient:
         return f"paws-{safe}"
 
 
-proxmox_client = ProxmoxClient()
+def get_pve(cluster_id: str | None = None) -> ProxmoxClient:
+    """Get a ProxmoxClient for the given cluster (or default).
+
+    This is the primary entry point for obtaining a Proxmox client.
+    Import and call this instead of using a global singleton.
+    """
+    from app.services.cluster_registry import cluster_registry
+
+    return cluster_registry.get_pve(cluster_id)
+
+
+def get_all_pve() -> dict[str, ProxmoxClient]:
+    """Get all configured ProxmoxClient instances keyed by cluster name."""
+    from app.services.cluster_registry import cluster_registry
+
+    return cluster_registry.get_all_pve()
+
+
+class _DefaultClientProxy:
+    """Lazy proxy that delegates attribute access to the default cluster's ProxmoxClient.
+
+    This preserves backward compatibility: ``from app.services.proxmox_client import proxmox_client``
+    keeps working because every attribute lookup is forwarded to the real default client at call time.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        from app.services.cluster_registry import cluster_registry
+
+        return getattr(cluster_registry.get_pve(), name)
+
+    def __repr__(self) -> str:
+        return "<ProxmoxClient proxy (default cluster)>"
+
+
+# Backward-compatible alias - delegates to default cluster via proxy
+proxmox_client: ProxmoxClient = _DefaultClientProxy()  # type: ignore[assignment]

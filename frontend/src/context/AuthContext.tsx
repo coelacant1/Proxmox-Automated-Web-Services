@@ -9,6 +9,7 @@ interface User {
   role: string;
   is_active: boolean;
   auth_provider: string;
+  email_notifications?: boolean;
   impersonated_by?: string;
   last_login_at?: string | null;
   lifecycle_policy?: {
@@ -47,7 +48,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const val = parseInt(r.data?.session_timeout_minutes || '0', 10);
         if (val > 0) setSessionTimeoutMinutes(val);
       })
-      .catch(() => {});
+      .catch((err) => {
+        // If 503 with setup_required, redirect to setup wizard
+        if (err?.response?.status === 503 && err?.response?.data?.setup_required) {
+          if (window.location.pathname !== '/setup') {
+            window.location.href = '/setup';
+          }
+        }
+      });
   }, []);
 
   // Track user activity

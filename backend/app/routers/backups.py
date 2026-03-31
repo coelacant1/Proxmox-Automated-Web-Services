@@ -15,7 +15,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import Backup, BackupPlan, Resource, SystemSetting, User, UserQuota
 from app.services.audit_service import log_action
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/backups", tags=["backups"])
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ async def list_snapshots(
     resource = await _get_resource(db, user.id, resource_id)
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        snapshots = proxmox_client.list_snapshots(resource.proxmox_node, resource.proxmox_vmid, vmtype)
+        snapshots = get_pve(resource.cluster_id).list_snapshots(resource.proxmox_node, resource.proxmox_vmid, vmtype)
         return [s for s in snapshots if s.get("name") != "current"]
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -86,7 +86,8 @@ async def create_snapshot(
         kwargs = {"description": body.description}
         if vmtype == "qemu" and body.include_ram:
             kwargs["vmstate"] = 1
-        upid = proxmox_client.create_snapshot(resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype, **kwargs)
+        pve = get_pve(resource.cluster_id)
+        upid = pve.create_snapshot(resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype, **kwargs)
         await log_action(db, user.id, "snapshot_create", resource.resource_type, resource.id, {"snapshot": body.name})
         return {"status": "creating", "task": upid, "snapshot": body.name}
     except Exception as e:
@@ -104,7 +105,8 @@ async def rollback_snapshot(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        upid = proxmox_client.rollback_snapshot(resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype)
+        pve = get_pve(resource.cluster_id)
+        upid = pve.rollback_snapshot(resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype)
         await log_action(db, user.id, "snapshot_rollback", resource.resource_type, resource.id, {"snapshot": body.name})
         return {"status": "rolling_back", "task": upid}
     except Exception as e:
@@ -122,7 +124,8 @@ async def delete_snapshot(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        upid = proxmox_client.delete_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapshot_name, vmtype)
+        pve = get_pve(resource.cluster_id)
+        upid = pve.delete_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapshot_name, vmtype)
         await log_action(
             db, user.id, "snapshot_delete", resource.resource_type, resource.id, {"snapshot": snapshot_name}
         )
@@ -153,12 +156,15 @@ async def _get_resource(db: AsyncSession, user_id: uuid.UUID, resource_id: str) 
 @router.get("")
 async def list_backups(
     resource_id: str | None = None,
+    cluster_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
     query = select(Backup).where(Backup.owner_id == user.id).order_by(Backup.created_at.desc())
     if resource_id:
         query = query.where(Backup.resource_id == uuid.UUID(resource_id))
+    if cluster_id:
+        query = query.where(Backup.cluster_id == cluster_id)
     result = await db.execute(query)
     backups = result.scalars().all()
     return [
@@ -204,6 +210,7 @@ async def create_backup(
         status="pending",
         notes=body.notes,
         started_at=datetime.now(UTC),
+        cluster_id=resource.cluster_id,
     )
     db.add(backup)
     await db.commit()
@@ -280,6 +287,7 @@ async def create_backup_plan(
         backup_type=body.backup_type,
         retention_count=body.retention_count,
         retention_days=body.retention_days,
+        cluster_id=resource.cluster_id,
     )
     db.add(plan)
     await db.commit()
@@ -361,7 +369,8 @@ async def browse_backup_contents(
         raise HTTPException(status_code=404, detail="Source resource not found")
 
     try:
-        snapshots = proxmox_client.list_snapshots(resource.proxmox_node, resource.proxmox_vmid, resource.resource_type)
+        pve = get_pve(resource.cluster_id)
+        snapshots = pve.list_snapshots(resource.proxmox_node, resource.proxmox_vmid, resource.resource_type)
         return {
             "backup_id": str(backup.id),
             "resource": resource.display_name,
@@ -456,7 +465,7 @@ async def restore_inplace(
         raise HTTPException(status_code=404, detail="Source resource not found")
 
     try:
-        upid = proxmox_client.rollback_snapshot(
+        upid = get_pve(resource.cluster_id).rollback_snapshot(
             resource.proxmox_node, resource.proxmox_vmid, "current", resource.resource_type
         )
         return {"status": "restoring", "task": upid, "resource_id": str(resource.id)}
@@ -490,7 +499,7 @@ async def restore_to_new_vm(
         raise HTTPException(status_code=404, detail="Source resource not found")
 
     node = body.target_node or resource.proxmox_node
-    new_vmid = proxmox_client.get_next_vmid()
+    new_vmid = get_pve(resource.cluster_id).get_next_vmid()
 
     new_resource = Resource(
         owner_id=user.id,
@@ -544,10 +553,10 @@ async def list_restore_jobs(
 # --- Global Proxmox Backups (all user resources) ---
 
 
-def _get_any_node() -> str:
+def _get_any_node(cluster_id: str | None = None) -> str:
     """Get any available cluster node name for storage queries."""
     try:
-        nodes = proxmox_client.get_nodes()
+        nodes = get_pve(cluster_id).get_nodes()
         if nodes:
             return nodes[0].get("node", "pve")
     except Exception:
@@ -555,9 +564,13 @@ def _get_any_node() -> str:
     return "pve"
 
 
-def _resolve_node(storage_entry: dict, fallback_node: str | None = None) -> str:
+def _resolve_node(
+    storage_entry: dict,
+    fallback_node: str | None = None,
+    cluster_id: str | None = None,
+) -> str:
     """Resolve the node to use for a storage content query."""
-    return storage_entry.get("node") or fallback_node or _get_any_node()
+    return storage_entry.get("node") or fallback_node or _get_any_node(cluster_id)
 
 
 @router.get("/proxmox/all")
@@ -586,51 +599,54 @@ async def list_all_proxmox_backups(
     user_tag = f"[paws:{user.id}]"
     backups: list[dict] = []
 
-    try:
-        storages = proxmox_client.get_storage_list()
-        for s in storages:
-            if "backup" not in s.get("content", ""):
-                continue
-            try:
-                node = _resolve_node(s, fallback_node)
-                contents = proxmox_client.get_storage_content(node, s["storage"])
-                is_pbs = s.get("type") == "pbs"
-                for item in contents:
-                    if item.get("content") != "backup":
-                        continue
-                    notes = item.get("notes", "") or ""
-                    if user_tag not in notes:
-                        continue
-                    volid = item.get("volid", "")
-                    # Match to resource by VMID
-                    matched_resource = None
-                    for vmid_str, r in vmid_to_resource.items():
-                        if vmid_str in volid:
-                            matched_resource = r
-                            break
+    cluster_ids = {r.cluster_id for r in resources}
+    for cid in cluster_ids:
+        try:
+            pve = get_pve(cid)
+            storages = pve.get_storage_list()
+            for s in storages:
+                if "backup" not in s.get("content", ""):
+                    continue
+                try:
+                    node = _resolve_node(s, fallback_node, cid)
+                    contents = pve.get_storage_content(node, s["storage"])
+                    is_pbs = s.get("type") == "pbs"
+                    for item in contents:
+                        if item.get("content") != "backup":
+                            continue
+                        notes = item.get("notes", "") or ""
+                        if user_tag not in notes:
+                            continue
+                        volid = item.get("volid", "")
+                        # Match to resource by VMID
+                        matched_resource = None
+                        for vmid_str, r in vmid_to_resource.items():
+                            if vmid_str in volid:
+                                matched_resource = r
+                                break
 
-                    entry = {
-                        "volid": volid,
-                        "size": item.get("size", 0),
-                        "ctime": item.get("ctime", 0),
-                        "format": item.get("format", "pbs" if is_pbs else ""),
-                        "storage": s["storage"],
-                        "notes": notes,
-                        "pbs": is_pbs,
-                        "resource_id": str(matched_resource.id) if matched_resource else None,
-                        "resource_name": matched_resource.display_name if matched_resource else None,
-                        "resource_type": matched_resource.resource_type if matched_resource else None,
-                        "vmid": matched_resource.proxmox_vmid if matched_resource else None,
-                        "node": matched_resource.proxmox_node if matched_resource else (s.get("node") or None),
-                    }
-                    if is_pbs:
-                        entry["backup_type"] = "ct" if "/ct/" in volid else "vm"
-                        entry["backup_time"] = item.get("ctime", 0)
-                    backups.append(entry)
-            except Exception:
-                pass
-    except Exception:
-        pass
+                        entry = {
+                            "volid": volid,
+                            "size": item.get("size", 0),
+                            "ctime": item.get("ctime", 0),
+                            "format": item.get("format", "pbs" if is_pbs else ""),
+                            "storage": s["storage"],
+                            "notes": notes,
+                            "pbs": is_pbs,
+                            "resource_id": str(matched_resource.id) if matched_resource else None,
+                            "resource_name": matched_resource.display_name if matched_resource else None,
+                            "resource_type": matched_resource.resource_type if matched_resource else None,
+                            "vmid": matched_resource.proxmox_vmid if matched_resource else None,
+                            "node": matched_resource.proxmox_node if matched_resource else (s.get("node") or None),
+                        }
+                        if is_pbs:
+                            entry["backup_type"] = "ct" if "/ct/" in volid else "vm"
+                            entry["backup_time"] = item.get("ctime", 0)
+                        backups.append(entry)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     backups.sort(key=lambda b: b.get("ctime", 0), reverse=True)
     return {"backups": backups, "total": len(backups)}
@@ -673,7 +689,7 @@ async def backup_quota_summary(
             continue
         try:
             vmtype = "lxc" if r.resource_type == "lxc" else "qemu"
-            snaps = proxmox_client.list_snapshots(r.proxmox_node, r.proxmox_vmid, vmtype)
+            snaps = get_pve(r.cluster_id).list_snapshots(r.proxmox_node, r.proxmox_vmid, vmtype)
             snapshot_count += len([s for s in snaps if s.get("name") != "current"])
         except Exception:
             pass
@@ -683,25 +699,28 @@ async def backup_quota_summary(
     user_tag = f"[paws:{user.id}]"
     total_backup_size = 0
     proxmox_backup_count = 0
-    try:
-        storages = proxmox_client.get_storage_list()
-        for s in storages:
-            if "backup" not in s.get("content", ""):
-                continue
-            try:
-                node = _resolve_node(s, fallback_node)
-                contents = proxmox_client.get_storage_content(node, s["storage"])
-                for item in contents:
-                    if item.get("content") != "backup":
-                        continue
-                    if user_tag not in (item.get("notes", "") or ""):
-                        continue
-                    proxmox_backup_count += 1
-                    total_backup_size += item.get("size", 0)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    cluster_ids = {r.cluster_id for r in all_resources}
+    for cid in cluster_ids:
+        try:
+            pve = get_pve(cid)
+            storages = pve.get_storage_list()
+            for s in storages:
+                if "backup" not in s.get("content", ""):
+                    continue
+                try:
+                    node = _resolve_node(s, fallback_node, cid)
+                    contents = pve.get_storage_content(node, s["storage"])
+                    for item in contents:
+                        if item.get("content") != "backup":
+                            continue
+                        if user_tag not in (item.get("notes", "") or ""):
+                            continue
+                        proxmox_backup_count += 1
+                        total_backup_size += item.get("size", 0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     return {
         "max_snapshots": max_snapshots,
@@ -728,7 +747,7 @@ async def download_proxmox_backup(
     resource = await _get_resource(db, user.id, resource_id)
 
     try:
-        data = proxmox_client.download_backup_file(
+        data = get_pve(resource.cluster_id).download_backup_file(
             resource.proxmox_node,
             storage,
             volid,
@@ -767,7 +786,7 @@ async def browse_proxmox_backup(
     resource = await _get_resource(db, user.id, resource_id)
 
     try:
-        files = proxmox_client.list_backup_files(
+        files = get_pve(resource.cluster_id).list_backup_files(
             resource.proxmox_node,
             storage,
             volid,
@@ -841,7 +860,8 @@ async def admin_prune_backups(
             if b.proxmox_volid and b.proxmox_storage:
                 resource = await db.get(Resource, b.resource_id)
                 if resource and resource.proxmox_node:
-                    proxmox_client.delete_storage_content(resource.proxmox_node, b.proxmox_storage, b.proxmox_volid)
+                    pve = get_pve(resource.cluster_id)
+                    pve.delete_storage_content(resource.proxmox_node, b.proxmox_storage, b.proxmox_volid)
             await db.delete(b)
             pruned += 1
         except Exception:
@@ -853,6 +873,7 @@ async def admin_prune_backups(
 
 @router.get("/admin/all")
 async def admin_list_all_backups(
+    cluster_id: str | None = Query(None, description="Target cluster"),
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
@@ -866,8 +887,9 @@ async def admin_list_all_backups(
             Resource.status != "destroyed",
         )
     )
+    all_resources = list(result.scalars().all())
     vmid_map: dict[str, Resource] = {}
-    for r in result.scalars().all():
+    for r in all_resources:
         if r.proxmox_vmid:
             vmid_map[str(r.proxmox_vmid)] = r
 
@@ -875,58 +897,67 @@ async def admin_list_all_backups(
     user_result = await db.execute(select(User))
     user_map = {str(u.id): u.username for u in user_result.scalars().all()}
 
-    try:
-        storages = proxmox_client.get_storage_list()
-        for s in storages:
-            if "backup" not in s.get("content", ""):
-                continue
-            try:
-                node = s.get("node", "pve")
-                contents = proxmox_client.get_storage_content(node, s["storage"])
-                is_pbs = s.get("type") == "pbs"
-                for item in contents:
-                    if item.get("content") != "backup":
-                        continue
-                    volid = item.get("volid", "")
-                    notes = item.get("notes", "") or ""
-                    # Extract owner from paws tag
-                    owner_id = None
-                    owner_name = None
-                    if "[paws:" in notes:
-                        try:
-                            tag = notes.split("[paws:")[1].split("]")[0]
-                            owner_id = tag
-                            owner_name = user_map.get(tag, tag[:8])
-                        except Exception:
-                            pass
+    # Determine which clusters to scan
+    if cluster_id is not None:
+        scan_cluster_ids = {cluster_id}
+    else:
+        scan_cluster_ids = {r.cluster_id for r in all_resources}
+        scan_cluster_ids.add(None)  # include default cluster
 
-                    # Match resource
-                    matched_resource = None
-                    for vmid_str, r in vmid_map.items():
-                        if vmid_str in volid:
-                            matched_resource = r
-                            break
+    for cid in scan_cluster_ids:
+        try:
+            pve = get_pve(cid)
+            storages = pve.get_storage_list()
+            for s in storages:
+                if "backup" not in s.get("content", ""):
+                    continue
+                try:
+                    node = s.get("node", "pve")
+                    contents = pve.get_storage_content(node, s["storage"])
+                    is_pbs = s.get("type") == "pbs"
+                    for item in contents:
+                        if item.get("content") != "backup":
+                            continue
+                        volid = item.get("volid", "")
+                        notes = item.get("notes", "") or ""
+                        # Extract owner from paws tag
+                        owner_id = None
+                        owner_name = None
+                        if "[paws:" in notes:
+                            try:
+                                tag = notes.split("[paws:")[1].split("]")[0]
+                                owner_id = tag
+                                owner_name = user_map.get(tag, tag[:8])
+                            except Exception:
+                                pass
 
-                    backups.append(
-                        {
-                            "volid": volid,
-                            "size": item.get("size", 0),
-                            "ctime": item.get("ctime", 0),
-                            "format": item.get("format", "pbs" if is_pbs else ""),
-                            "storage": s["storage"],
-                            "notes": notes,
-                            "pbs": is_pbs,
-                            "owner_id": owner_id,
-                            "owner_name": owner_name,
-                            "resource_id": str(matched_resource.id) if matched_resource else None,
-                            "resource_name": matched_resource.display_name if matched_resource else None,
-                            "node": s.get("node") or (matched_resource.proxmox_node if matched_resource else None),
-                        }
-                    )
-            except Exception:
-                pass
-    except Exception:
-        pass
+                        # Match resource
+                        matched_resource = None
+                        for vmid_str, r in vmid_map.items():
+                            if vmid_str in volid:
+                                matched_resource = r
+                                break
+
+                        backups.append(
+                            {
+                                "volid": volid,
+                                "size": item.get("size", 0),
+                                "ctime": item.get("ctime", 0),
+                                "format": item.get("format", "pbs" if is_pbs else ""),
+                                "storage": s["storage"],
+                                "notes": notes,
+                                "pbs": is_pbs,
+                                "owner_id": owner_id,
+                                "owner_name": owner_name,
+                                "resource_id": str(matched_resource.id) if matched_resource else None,
+                                "resource_name": matched_resource.display_name if matched_resource else None,
+                                "node": s.get("node") or (matched_resource.proxmox_node if matched_resource else None),
+                            }
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     backups.sort(key=lambda b: b.get("ctime", 0), reverse=True)
     return {"backups": backups, "total": len(backups)}
@@ -937,12 +968,13 @@ async def admin_delete_backup(
     volid: str = Query(...),
     storage: str = Query(...),
     node: str = Query(...),
+    cluster_id: str | None = Query(None, description="Target cluster"),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
     """Admin: delete a specific Proxmox backup file."""
     try:
-        proxmox_client.delete_storage_content(node, storage, volid)
+        get_pve(cluster_id).delete_storage_content(node, storage, volid)
         await log_action(db, admin.id, "admin_backup_delete", "backup", None, {"volid": volid, "storage": storage})
         return {"status": "deleted"}
     except Exception as e:
