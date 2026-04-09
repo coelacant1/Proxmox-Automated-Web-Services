@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Shield, Plus, Trash2, ArrowDown, ArrowUp, Eye } from 'lucide-react';
+import { Shield, Plus, Trash2, ArrowDown, ArrowUp } from 'lucide-react';
 import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
-  DataTable, Input, Modal, Select, Badge, EmptyState, Tabs, useConfirm, useToast, type Column,
+  DataTable, Input, Modal, Select, Badge, EmptyState, useConfirm, useToast, type Column,
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
 
@@ -27,22 +27,6 @@ interface Rule {
   [key: string]: unknown;
 }
 
-// Common service presets for the visual builder
-const SERVICE_PRESETS = [
-  { label: 'SSH', protocol: 'tcp', port: '22', icon: '🔑' },
-  { label: 'HTTP', protocol: 'tcp', port: '80', icon: '🌐' },
-  { label: 'HTTPS', protocol: 'tcp', port: '443', icon: '🔒' },
-  { label: 'RDP', protocol: 'tcp', port: '3389', icon: '🖥️' },
-  { label: 'MySQL', protocol: 'tcp', port: '3306', icon: '🗄️' },
-  { label: 'PostgreSQL', protocol: 'tcp', port: '5432', icon: '🐘' },
-  { label: 'Redis', protocol: 'tcp', port: '6379', icon: '⚡' },
-  { label: 'DNS', protocol: 'udp', port: '53', icon: '📡' },
-  { label: 'SMTP', protocol: 'tcp', port: '25', icon: '📧' },
-  { label: 'Ping', protocol: 'icmp', port: '', icon: '📶' },
-  { label: 'Custom TCP', protocol: 'tcp', port: '', icon: '🔧' },
-  { label: 'Custom UDP', protocol: 'udp', port: '', icon: '🔧' },
-];
-
 export default function SecurityGroups() {
   const { confirm } = useConfirm();
   const { toast } = useToast();
@@ -56,7 +40,6 @@ export default function SecurityGroups() {
   const [ruleForm, setRuleForm] = useState<Rule>({
     direction: 'inbound', action: 'allow', protocol: 'tcp', port_range: '', source: '0.0.0.0/0',
   });
-  const [rulesTab, setRulesTab] = useState('table');
 
   const fetchGroups = () => {
     api.get('/api/security-groups/')
@@ -130,24 +113,6 @@ export default function SecurityGroups() {
     }
   };
 
-  const handleQuickAdd = async (preset: typeof SERVICE_PRESETS[0], direction: string) => {
-    if (!selected) return;
-    try {
-      await api.post(`/api/security-groups/${selected.id}/rules`, {
-        direction,
-        action: 'allow',
-        protocol: preset.protocol,
-        port_range: preset.port,
-        source: '0.0.0.0/0',
-        description: preset.label,
-      });
-      toast(`${preset.label} rule added`, 'success');
-      fetchGroups();
-    } catch (e: any) {
-      toast(e?.response?.data?.detail || 'Failed to add rule', 'error');
-    }
-  };
-
   const ruleColumns: Column<Rule>[] = [
     {
       key: 'direction',
@@ -172,14 +137,6 @@ export default function SecurityGroups() {
         </Button>
       ),
     },
-  ];
-
-  const inboundRules = (selected?.rules || []).filter((r) => r.direction === 'inbound');
-  const outboundRules = (selected?.rules || []).filter((r) => r.direction === 'outbound');
-
-  const rulesTabs = [
-    { id: 'table', label: 'Rules Table' },
-    { id: 'visual', label: 'Visual Builder', icon: <Eye className="h-3.5 w-3.5" /> },
   ];
 
   return (
@@ -242,96 +199,11 @@ export default function SecurityGroups() {
                 </div>
               </CardHeader>
               <CardContent>
-                <Tabs tabs={rulesTabs} activeTab={rulesTab} onChange={setRulesTab} className="mb-4" />
-
-                {rulesTab === 'table' && (
-                  <DataTable
-                    columns={ruleColumns}
-                    data={selected.rules || []}
-                    emptyMessage="No rules. All traffic is blocked by default."
-                  />
-                )}
-
-                {rulesTab === 'visual' && (
-                  <div className="space-y-6">
-                    {/* Inbound visual */}
-                    <div>
-                      <h3 className="text-sm font-medium text-paws-text mb-3 flex items-center gap-2">
-                        <ArrowDown className="h-4 w-4 text-paws-info" /> Inbound Rules
-                      </h3>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 mb-3">
-                        {SERVICE_PRESETS.map((preset) => {
-                          const isActive = inboundRules.some(
-                            (r) => r.protocol === preset.protocol && r.port_range === preset.port && r.action === 'allow'
-                          );
-                          return (
-                            <button
-                              key={`in-${preset.label}`}
-                              onClick={() => !isActive && handleQuickAdd(preset, 'inbound')}
-                              className={cn(
-                                'flex items-center gap-2 px-3 py-2 rounded-lg border text-left text-sm transition-colors',
-                                isActive
-                                  ? 'border-paws-success/50 bg-paws-success/10 text-paws-text'
-                                  : 'border-paws-border hover:border-paws-primary/50 hover:bg-paws-surface-hover text-paws-text-muted',
-                              )}
-                            >
-                              <span>{preset.icon}</span>
-                              <span>{preset.label}</span>
-                              {isActive && <span className="ml-auto text-xs text-paws-success">✓</span>}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Outbound visual */}
-                    <div>
-                      <h3 className="text-sm font-medium text-paws-text mb-3 flex items-center gap-2">
-                        <ArrowUp className="h-4 w-4 text-paws-warning" /> Outbound Rules
-                      </h3>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                        {SERVICE_PRESETS.map((preset) => {
-                          const isActive = outboundRules.some(
-                            (r) => r.protocol === preset.protocol && r.port_range === preset.port && r.action === 'allow'
-                          );
-                          return (
-                            <button
-                              key={`out-${preset.label}`}
-                              onClick={() => !isActive && handleQuickAdd(preset, 'outbound')}
-                              className={cn(
-                                'flex items-center gap-2 px-3 py-2 rounded-lg border text-left text-sm transition-colors',
-                                isActive
-                                  ? 'border-paws-success/50 bg-paws-success/10 text-paws-text'
-                                  : 'border-paws-border hover:border-paws-primary/50 hover:bg-paws-surface-hover text-paws-text-muted',
-                              )}
-                            >
-                              <span>{preset.icon}</span>
-                              <span>{preset.label}</span>
-                              {isActive && <span className="ml-auto text-xs text-paws-success">✓</span>}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Summary */}
-                    <div className="bg-paws-bg rounded-lg p-4 text-xs text-paws-text-dim">
-                      <p className="font-medium text-paws-text mb-2">Traffic Summary</p>
-                      <div className="flex gap-8">
-                        <div>
-                          <span className="text-paws-info">Inbound:</span>{' '}
-                          {inboundRules.filter((r) => r.action === 'allow').length} allowed,{' '}
-                          {inboundRules.filter((r) => r.action === 'deny').length} denied
-                        </div>
-                        <div>
-                          <span className="text-paws-warning">Outbound:</span>{' '}
-                          {outboundRules.filter((r) => r.action === 'allow').length} allowed,{' '}
-                          {outboundRules.filter((r) => r.action === 'deny').length} denied
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                <DataTable
+                  columns={ruleColumns}
+                  data={selected.rules || []}
+                  emptyMessage="No rules. All traffic is blocked by default."
+                />
               </CardContent>
             </Card>
           ) : (

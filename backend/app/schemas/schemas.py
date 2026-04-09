@@ -44,7 +44,6 @@ class QuotaRead(BaseModel):
     max_backups: int = 20
     max_backup_size_gb: int = 100
     max_networks: int = 3
-    max_subnets_per_network: int = 5
     max_elastic_ips: int = 5
 
     model_config = {"from_attributes": True}
@@ -428,6 +427,8 @@ class VPCCreate(BaseModel):
     name: str
     cidr: str | None = None  # auto-allocate if None
     gateway: str | None = None
+    snat_enabled: bool = True
+    dns_server: str | None = None
     dhcp_enabled: bool = True
     network_mode: str = "private"  # published, private, isolated
     cluster_id: str = "default"

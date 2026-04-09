@@ -27,7 +27,7 @@ from app.models.models import (
     UserQuota,
     UserTier,
 )
-from app.schemas.schemas import SubnetCreate, SubnetRead, VPCCreate, VPCRead
+from app.schemas.schemas import SubnetRead, VPCCreate, VPCRead
 from app.services.audit_service import log_action
 from app.services.group_access import check_group_access
 from app.services.ipam_service import cidr_pool, ipam_service
@@ -256,6 +256,39 @@ async def create_vpc(
     cidr = body.cidr or await ipam_service.allocate_vpc_cidr(db)
     gateway = body.gateway or cidr_pool.get_gateway(cidr)
 
+    # Enforce global CIDR uniqueness
+    if not await ipam_service.check_cidr_globally_unique(db, cidr):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="CIDR overlaps with an existing network. Each network must have a unique subnet.",
+        )
+
+    # Subnet size enforcement (tier-based)
+    net = ipaddress.ip_network(cidr, strict=False)
+    requested_prefix = net.prefixlen
+
+    tier_row = await db.execute(select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user.id))
+    user_tier = tier_row.scalar_one_or_none()
+    tier_max = user_tier.max_subnet_prefix if user_tier else None
+
+    if tier_max is None:
+        setting_row = await db.execute(
+            select(SystemSetting).where(SystemSetting.key == "sdn.default_max_subnet_prefix")
+        )
+        setting = setting_row.scalar_one_or_none()
+        max_prefix = int(setting.value) if setting else 24
+    else:
+        max_prefix = tier_max
+
+    if requested_prefix < max_prefix:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Subnet too large. Your maximum allowed subnet size is /{max_prefix} "
+                f"({2 ** (32 - max_prefix) - 2} hosts). Requested: /{requested_prefix}"
+            ),
+        )
+
     # VXLAN tag
     cluster_id = body.cluster_id if hasattr(body, "cluster_id") else "default"
     tag = sdn_service.allocate_vxlan_tag(cluster_id=cluster_id)
@@ -285,6 +318,36 @@ async def create_vpc(
     except Exception:
         logger.exception("Failed to create Proxmox VNet for VPC %s", vpc.id)
         vpc.status = "error"
+
+    # Auto-create the single subnet for this network
+    snat_enabled = body.snat_enabled
+    proxmox_subnet_id = cidr.replace("/", "-")
+    sub_status = "active"
+    try:
+        sdn_service.create_subnet(
+            vnet_name,
+            cidr,
+            gateway,
+            snat=snat_enabled,
+            cluster_id=cluster_id,
+        )
+    except Exception:
+        logger.exception("Failed to create Proxmox subnet %s on VNet %s", cidr, vnet_name)
+        sub_status = "error"
+
+    subnet = Subnet(
+        vpc_id=vpc.id,
+        name=body.name,
+        cidr=cidr,
+        gateway=gateway,
+        is_public=False,
+        snat_enabled=snat_enabled,
+        dhcp_enabled=False,
+        dns_server=body.dns_server,
+        proxmox_subnet_id=proxmox_subnet_id,
+        status=sub_status,
+    )
+    db.add(subnet)
 
     # Auto-create managed security group for published networks
     if body.network_mode == "published":
@@ -526,155 +589,6 @@ async def update_vpc_mode(
 
 
 # ---------------------------------------------------------------------------
-# Subnets
-# ---------------------------------------------------------------------------
-
-
-@router.post("/{vpc_id}/subnets", response_model=SubnetRead, status_code=status.HTTP_201_CREATED)
-async def create_subnet(
-    vpc_id: str,
-    body: SubnetCreate,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_active_user),
-):
-    vpc = await _get_vpc(db, user.id, vpc_id, min_perm="admin")
-
-    # Quota enforcement
-    quota_row = await db.execute(select(UserQuota).where(UserQuota.user_id == user.id))
-    quota = quota_row.scalar_one_or_none()
-    if quota:
-        subnet_count = len(vpc.subnets)
-        if subnet_count >= quota.max_subnets_per_network:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Subnet quota exceeded (max {quota.max_subnets_per_network} per network)",
-            )
-
-    # CIDR / gateway allocation
-    cidr = body.cidr or await ipam_service.allocate_subnet_cidr(db, str(vpc.id))
-    gateway = body.gateway or cidr_pool.get_gateway(cidr)
-
-    # Subnet size enforcement
-    net = ipaddress.ip_network(cidr, strict=False)
-    requested_prefix = net.prefixlen
-
-    tier_row = await db.execute(select(UserTier).join(User, User.tier_id == UserTier.id).where(User.id == user.id))
-    user_tier = tier_row.scalar_one_or_none()
-    tier_max = user_tier.max_subnet_prefix if user_tier else None
-
-    if tier_max is None:
-        setting_row = await db.execute(
-            select(SystemSetting).where(SystemSetting.key == "sdn.default_max_subnet_prefix")
-        )
-        setting = setting_row.scalar_one_or_none()
-        max_prefix = int(setting.value) if setting else 24
-    else:
-        max_prefix = tier_max
-
-    if requested_prefix < max_prefix:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Subnet too large. Your maximum allowed subnet size is /{max_prefix} "
-                f"({2 ** (32 - max_prefix) - 2} hosts). Requested: /{requested_prefix}"
-            ),
-        )
-
-    # Proxmox SDN subnet creation (DHCP not supported on EVPN/VXLAN -- IPs assigned statically)
-    proxmox_subnet_id = cidr.replace("/", "-")
-    try:
-        sdn_service.create_subnet(
-            vpc.proxmox_vnet,
-            cidr,
-            gateway,
-            snat=body.snat_enabled,
-            cluster_id=vpc.cluster_id,
-        )
-        sub_status = "active"
-    except Exception:
-        logger.exception("Failed to create Proxmox subnet %s on VNet %s", cidr, vpc.proxmox_vnet)
-        sub_status = "error"
-
-    subnet = Subnet(
-        vpc_id=vpc.id,
-        name=body.name,
-        cidr=cidr,
-        gateway=gateway,
-        is_public=body.is_public,
-        snat_enabled=body.snat_enabled,
-        dhcp_enabled=False,
-        dns_server=body.dns_server,
-        proxmox_subnet_id=proxmox_subnet_id,
-        status=sub_status,
-    )
-    db.add(subnet)
-    await db.commit()
-    await db.refresh(subnet)
-
-    await log_action(
-        db,
-        user.id,
-        "subnet.create",
-        resource_type="subnet",
-        resource_id=subnet.id,
-        details={"vpc_id": vpc_id, "name": body.name, "cidr": cidr},
-    )
-
-    return subnet
-
-
-@router.delete("/{vpc_id}/subnets/{subnet_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_subnet(
-    vpc_id: str,
-    subnet_id: str,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_active_user),
-):
-    vpc = await _get_vpc(db, user.id, vpc_id, min_perm="admin")
-
-    subnet_result = await db.execute(select(Subnet).where(Subnet.id == _uuid.UUID(subnet_id), Subnet.vpc_id == vpc.id))
-    subnet = subnet_result.scalar_one_or_none()
-    if not subnet:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subnet not found")
-
-    # Reject if IP reservations are bound to resources
-    bound = await db.execute(
-        select(IPReservation).where(
-            IPReservation.subnet_id == subnet.id,
-            IPReservation.resource_id.isnot(None),
-        )
-    )
-    if bound.scalars().first():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cannot delete subnet with bound IP reservations",
-        )
-
-    # Remove Proxmox SDN subnet
-    if vpc.proxmox_vnet and subnet.proxmox_subnet_id:
-        try:
-            sdn_service.delete_subnet(vpc.proxmox_vnet, subnet.proxmox_subnet_id, cluster_id=vpc.cluster_id)
-        except Exception:
-            logger.exception(
-                "Failed to delete Proxmox subnet %s on VNet %s",
-                subnet.proxmox_subnet_id,
-                vpc.proxmox_vnet,
-            )
-
-    await log_action(
-        db,
-        user.id,
-        "subnet.delete",
-        resource_type="subnet",
-        resource_id=subnet.id,
-        details={"vpc_id": vpc_id, "name": subnet.name, "cidr": subnet.cidr},
-    )
-
-    await db.delete(subnet)
-    await db.commit()
-
-
-# ---------------------------------------------------------------------------
 # Instances attached to VPC
 # ---------------------------------------------------------------------------
 
@@ -769,7 +683,7 @@ async def change_instance_ip(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    """Change the static IP of an instance within its VPC subnet range."""
+    """Change the static IP of an instance within its network's subnet range."""
     vpc_result = await db.execute(select(VPC).where(VPC.id == _uuid.UUID(vpc_id), VPC.owner_id == user.id))
     vpc = vpc_result.scalar_one_or_none()
     if not vpc:

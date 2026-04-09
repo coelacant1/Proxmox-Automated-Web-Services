@@ -23,6 +23,8 @@ class ProxmoxClient:
         token_secret: str = "",
         verify_ssl: bool = False,
         password: str = "",
+        console_user: str = "",
+        console_password: str = "",
         cluster_name: str = "default",
     ) -> None:
         self.cluster_name = cluster_name
@@ -32,6 +34,8 @@ class ProxmoxClient:
         self._token_secret = token_secret
         self._verify_ssl = verify_ssl
         self._password = password
+        self._console_user = console_user
+        self._console_password = console_password
         self._api: ProxmoxAPI | None = None
         self._session_ticket: str | None = None
         self._session_user: str | None = None
@@ -66,18 +70,21 @@ class ProxmoxClient:
         """Get a PVE session ticket using username+password.
 
         Required for xterm.js terminal auth (termproxy does not support API tokens).
+        Uses dedicated console_user/console_password if configured, otherwise
+        falls back to the API token user + password.
         Returns (username, ticket) tuple.
         """
         import requests
 
-        if not self._password:
-            raise ConnectionError(f"Password required for terminal console access on cluster '{self.cluster_name}'")
+        user = self._console_user or self._token_id.split("!")[0]
+        password = self._console_password or self._password
 
-        user = self._token_id.split("!")[0]
+        if not password:
+            raise ConnectionError(f"Password required for terminal console access on cluster '{self.cluster_name}'")
 
         resp = requests.post(
             f"https://{self._host}:{self._port}/api2/json/access/ticket",
-            data={"username": user, "password": self._password},
+            data={"username": user, "password": password},
             verify=self._verify_ssl,
             timeout=10,
         )

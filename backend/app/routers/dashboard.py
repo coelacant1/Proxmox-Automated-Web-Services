@@ -136,7 +136,6 @@ async def user_dashboard_summary(
             "max_backups": quota.max_backups if quota else 20,
             "max_backup_size_gb": quota.max_backup_size_gb if quota else 100,
             "max_networks": quota.max_networks if quota else 3,
-            "max_subnets_per_network": quota.max_subnets_per_network if quota else 5,
             "max_elastic_ips": quota.max_elastic_ips if quota else 5,
             "max_buckets": quota.max_buckets if quota else 5,
             "max_storage_gb": quota.max_storage_gb if quota else 50,

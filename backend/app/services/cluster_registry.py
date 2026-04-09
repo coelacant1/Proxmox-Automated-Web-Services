@@ -68,7 +68,8 @@ class ClusterRegistry:
                     text(
                         "SELECT name, conn_type, host, port, token_id, "
                         "token_secret_enc, password_enc, fingerprint, "
-                        "verify_ssl, is_active, extra_config "
+                        "verify_ssl, is_active, extra_config, "
+                        "console_user, console_password_enc "
                         "FROM cluster_connections WHERE is_active = true "
                         "ORDER BY created_at"
                     )
@@ -92,6 +93,8 @@ class ClusterRegistry:
                 fingerprint = r[7] or ""
                 verify_ssl = r[8]
                 extra = json.loads(r[10]) if r[10] else {}
+                console_user = r[11] or ""
+                console_password = decrypt(r[12]) if r[12] else ""
 
                 if conn_type == "pve":
                     cfg = ClusterConfig(
@@ -102,6 +105,8 @@ class ClusterRegistry:
                         token_secret=token_secret,
                         verify_ssl=verify_ssl,
                         password=password,
+                        console_user=console_user,
+                        console_password=console_password,
                     )
                     self._configs[name] = cfg
                     self._pve_clients[name] = ProxmoxClient(
@@ -111,6 +116,8 @@ class ClusterRegistry:
                         token_secret=token_secret,
                         verify_ssl=verify_ssl,
                         password=password,
+                        console_user=console_user,
+                        console_password=console_password,
                         cluster_name=name,
                     )
                     if self._default_cluster is None:
@@ -149,6 +156,8 @@ class ClusterRegistry:
             token_secret=cfg.token_secret,
             verify_ssl=cfg.verify_ssl,
             password=cfg.password,
+            console_user=cfg.console_user,
+            console_password=cfg.console_password,
             cluster_name=cfg.name,
         )
         self._pbs_clients[cfg.name] = PBSClient(

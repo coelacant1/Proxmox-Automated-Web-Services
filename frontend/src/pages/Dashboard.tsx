@@ -26,7 +26,7 @@ interface DashboardData {
     max_vms: number; max_containers: number; max_vcpus: number;
     max_ram_mb: number; max_disk_gb: number; max_snapshots: number;
     max_backups: number; max_backup_size_gb: number;
-    max_networks: number; max_subnets_per_network: number; max_elastic_ips: number;
+    max_networks: number; max_elastic_ips: number;
     max_buckets: number; max_storage_gb: number;
   };
   status_breakdown: Record<string, number>;

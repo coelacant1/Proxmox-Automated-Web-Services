@@ -109,7 +109,7 @@ const ADMIN_SECTIONS = [
   },
   {
     label: 'Infrastructure',
-    tabs: ['Storage', 'Cluster', 'Connections', 'SDN'] as const,
+    tabs: ['Storage', 'Connections', 'SDN'] as const,
   },
 ] as const;
 
@@ -211,7 +211,6 @@ export default function Admin() {
       {activeTab === 'Auth' && <AuthConfigTab />}
       {activeTab === 'Audit Log' && <AuditLogTab />}
       {activeTab === 'API Keys' && <ApiKeysTab onSwitchTab={handleTabClick} />}
-      {activeTab === 'Cluster' && <ClusterTab />}
       {activeTab === 'Connections' && <ConnectionsTab />}
       {activeTab === 'SDN' && <SDNTab />}
     </div>
@@ -3056,7 +3055,8 @@ function SDNTab() {
 interface ConnectionData {
   id: string; name: string; conn_type: string; host: string; port: number;
   token_id: string | null; token_secret_masked: string | null;
-  password_set: boolean; fingerprint: string | null; verify_ssl: boolean;
+  password_set: boolean; console_user: string | null; console_password_set: boolean;
+  fingerprint: string | null; verify_ssl: boolean;
   is_active: boolean; extra_config: Record<string, string> | null;
   created_at: string; updated_at: string;
 }
@@ -3065,13 +3065,16 @@ function ConnectionsTab() {
   const [connections, setConnections] = useState<ConnectionData[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<ConnectionData | null>(null);
+  const [expandedPve, setExpandedPve] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [form, setForm] = useState({
     name: '', conn_type: 'pve', host: '', port: 8006,
-    token_id: '', token_secret: '', password: '', fingerprint: '',
+    token_id: '', token_secret: '', password: '',
+    console_user: '', console_password: '',
+    fingerprint: '',
     verify_ssl: false, is_active: true, extra_config_str: '',
   });
 
@@ -3080,7 +3083,9 @@ function ConnectionsTab() {
 
   const resetForm = () => setForm({
     name: '', conn_type: 'pve', host: '', port: 8006,
-    token_id: '', token_secret: '', password: '', fingerprint: '',
+    token_id: '', token_secret: '', password: '',
+    console_user: '', console_password: '',
+    fingerprint: '',
     verify_ssl: false, is_active: true, extra_config_str: '',
   });
 
@@ -3089,7 +3094,9 @@ function ConnectionsTab() {
     setEditing(c);
     setForm({
       name: c.name, conn_type: c.conn_type, host: c.host, port: c.port,
-      token_id: c.token_id || '', token_secret: '', password: '', fingerprint: c.fingerprint || '',
+      token_id: c.token_id || '', token_secret: '', password: '',
+      console_user: c.console_user || '', console_password: '',
+      fingerprint: c.fingerprint || '',
       verify_ssl: c.verify_ssl, is_active: c.is_active,
       extra_config_str: c.extra_config ? JSON.stringify(c.extra_config, null, 2) : '',
     });
@@ -3109,6 +3116,8 @@ function ConnectionsTab() {
       if (form.token_id) payload.token_id = form.token_id;
       if (form.token_secret) payload.token_secret = form.token_secret;
       if (form.password) payload.password = form.password;
+      if (form.console_user) payload.console_user = form.console_user;
+      if (form.console_password) payload.console_password = form.console_password;
       if (form.fingerprint) payload.fingerprint = form.fingerprint;
       if (extra) payload.extra_config = extra;
 
@@ -3165,32 +3174,45 @@ function ConnectionsTab() {
       ) : (
         <div className="grid gap-3">
           {connections.map(c => (
-            <Card key={c.id}>
-              <CardContent className="flex items-center gap-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-bold text-sm text-paws-text">{c.name}</span>
-                    <Badge variant={typeBadge(c.conn_type)}>{typeLabel(c.conn_type)}</Badge>
-                    {!c.is_active && <Badge variant="default">Disabled</Badge>}
-                  </div>
-                  <p className="text-xs text-paws-text-dim">
-                    {c.host}:{c.port}
-                    {c.token_id && <span className="ml-2">Token: {c.token_id}</span>}
-                    {c.token_secret_masked && <span className="ml-1">({c.token_secret_masked})</span>}
-                  </p>
-                  {testResults[c.id] && (
-                    <p className={`text-xs mt-1 ${testResults[c.id]?.success ? 'text-green-400' : 'text-red-400'}`}>
-                      {testResults[c.id]?.success ? '\u2713' : '\u2717'} {testResults[c.id]?.message}
+            <div key={c.id}>
+              <Card className={c.conn_type === 'pve' ? 'cursor-pointer hover:border-paws-primary/40 transition-colors' : ''}>
+                <CardContent>
+                  <div className="flex items-center gap-4" onClick={() => {
+                    if (c.conn_type === 'pve') setExpandedPve(prev => prev === c.name ? null : c.name);
+                  }}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-bold text-sm text-paws-text">{c.name}</span>
+                      <Badge variant={typeBadge(c.conn_type)}>{typeLabel(c.conn_type)}</Badge>
+                      {!c.is_active && <Badge variant="default">Disabled</Badge>}
+                      {c.conn_type === 'pve' && expandedPve === c.name && <Badge variant="info">Viewing Cluster</Badge>}
+                    </div>
+                    <p className="text-xs text-paws-text-dim">
+                      {c.host}:{c.port}
+                      {c.token_id && <span className="ml-2">Token: {c.token_id}</span>}
+                      {c.token_secret_masked && <span className="ml-1">({c.token_secret_masked})</span>}
+                      {c.console_user && <span className="ml-2">Console: {c.console_user}</span>}
                     </p>
-                  )}
+                    {testResults[c.id] && (
+                      <p className={`text-xs mt-1 ${testResults[c.id]?.success ? 'text-green-400' : 'text-red-400'}`}>
+                        {testResults[c.id]?.success ? '\u2713' : '\u2717'} {testResults[c.id]?.message}
+                      </p>
+                    )}
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleTest(c); }} disabled={testing[c.id]}>
+                    {testing[c.id] ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); openEdit(c); }}><Pencil className="w-4 h-4" /></Button>
+                  <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleDelete(c); }}><Trash2 className="w-4 h-4 text-red-400" /></Button>
+                  </div>
+                </CardContent>
+              </Card>
+              {c.conn_type === 'pve' && expandedPve === c.name && (
+                <div className="mt-3 ml-2 border-l-2 border-paws-primary/30 pl-4 pb-2">
+                  <ClusterDetailView clusterId={c.name} />
                 </div>
-                <Button variant="ghost" size="sm" onClick={() => handleTest(c)} disabled={testing[c.id]}>
-                  {testing[c.id] ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Activity className="w-4 h-4" />}
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => openEdit(c)}><Pencil className="w-4 h-4" /></Button>
-                <Button variant="ghost" size="sm" onClick={() => handleDelete(c)}><Trash2 className="w-4 h-4 text-red-400" /></Button>
-              </CardContent>
-            </Card>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -3224,6 +3246,15 @@ function ConnectionsTab() {
             <>
               <Input label="Password (alternative to token)" type="password" value={form.password} onChange={e => setForm(p => ({ ...p, password: e.target.value }))} placeholder={editing ? '(leave blank to keep current)' : 'Optional'} />
               <Input label="Fingerprint (PBS)" value={form.fingerprint} onChange={e => setForm(p => ({ ...p, fingerprint: e.target.value }))} placeholder="Optional" />
+            </>
+          )}
+          {form.conn_type === 'pve' && (
+            <>
+              <div className="border-t border-paws-border-subtle pt-3 mt-1">
+                <p className="text-xs text-paws-text-dim mb-2">Console Access (xterm.js) — dedicated read-only Proxmox user for terminal sessions</p>
+                <Input label="Console Username" value={form.console_user} onChange={e => setForm(p => ({ ...p, console_user: e.target.value }))} placeholder="e.g. paws-console@pve" />
+                <Input label="Console Password" type="password" value={form.console_password} onChange={e => setForm(p => ({ ...p, console_password: e.target.value }))} placeholder={editing ? '(leave blank to keep current)' : ''} />
+              </div>
             </>
           )}
           <Textarea label="Extra Config (JSON)" value={form.extra_config_str} onChange={e => setForm(p => ({ ...p, extra_config_str: e.target.value }))} placeholder='{"datastore":"backups","pve_cluster":"prod"}' rows={3} />
@@ -3353,96 +3384,6 @@ function AuthConfigTab() {
   );
 }
 
-// --- Cluster Tab ---------------------------------------------------------
-
-function ClusterTab() {
-  const [clusters, setClusters] = useState<Array<{
-    name: string; host: string; port: number;
-    pbs_host: string | null; pbs_configured: boolean;
-    pve_connected: boolean; pbs_connected: boolean;
-    nodes: string[]; node_count: number;
-  }>>([]);
-  const [clustersLoading, setClustersLoading] = useState(true);
-  const [selectedCluster, setSelectedCluster] = useState<string | null>(null);
-
-  useEffect(() => {
-    api.get('/api/admin/clusters/').then(r => {
-      const data = r.data;
-      setClusters(data);
-      if (data.length === 1) setSelectedCluster(data[0].name);
-    }).catch(() => {}).finally(() => setClustersLoading(false));
-  }, []);
-
-  if (clustersLoading) return <LoadingSpinner message="Loading clusters..." />;
-
-  if (selectedCluster) {
-    return (
-      <div>
-        {clusters.length > 1 && (
-          <button
-            onClick={() => setSelectedCluster(null)}
-            className="flex items-center gap-1 text-sm text-paws-text-muted hover:text-paws-text mb-4"
-          >
-            <ChevronLeft className="w-4 h-4" /> All Clusters
-          </button>
-        )}
-        <ClusterDetailView clusterId={selectedCluster} />
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      <h3 className="text-paws-text text-lg font-semibold">Configured Clusters</h3>
-      {clusters.length === 0 ? (
-        <p className="text-paws-text-muted text-sm">No clusters configured. Add clusters in your .env configuration.</p>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {clusters.map(c => (
-            <div key={c.name} onClick={() => setSelectedCluster(c.name)} className="cursor-pointer">
-              <Card className="hover:border-paws-primary/50 transition-colors h-full">
-                <CardContent>
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-paws-text font-bold text-lg">{c.name}</h4>
-                    <StatusBadge status={c.pve_connected ? 'online' : 'offline'} />
-                  </div>
-                  <div className="space-y-1.5 text-sm">
-                    <div className="flex justify-between text-paws-text-muted">
-                      <span>Host</span>
-                      <span className="text-paws-text font-mono text-xs">{c.host}:{c.port}</span>
-                    </div>
-                    <div className="flex justify-between text-paws-text-muted">
-                      <span>Nodes</span>
-                      <span className="text-paws-text">{c.node_count} {c.node_count === 1 ? 'node' : 'nodes'}</span>
-                    </div>
-                    {c.nodes.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {c.nodes.map(n => <Badge key={n} variant="default">{n}</Badge>)}
-                      </div>
-                    )}
-                    <div className="flex justify-between text-paws-text-muted pt-1">
-                      <span>PBS Backup</span>
-                      {c.pbs_configured ? (
-                        <Badge variant={c.pbs_connected ? 'success' : 'danger'}>
-                          {c.pbs_connected ? 'Connected' : 'Unreachable'}
-                        </Badge>
-                      ) : (
-                        <span className="text-paws-text-dim text-xs">Not configured</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-end mt-3 text-paws-primary text-sm">
-                    Details <ChevronRight className="w-4 h-4 ml-0.5" />
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function ClusterDetailView({ clusterId }: { clusterId: string }) {
   const [status, setStatus] = useState<ClusterStatus | null>(null);

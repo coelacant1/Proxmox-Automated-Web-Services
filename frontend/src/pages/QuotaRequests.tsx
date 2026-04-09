@@ -20,7 +20,7 @@ interface DashboardSummary {
     max_vms: number; max_containers: number; max_vcpus: number;
     max_ram_mb: number; max_disk_gb: number; max_snapshots: number;
     max_backups: number; max_backup_size_gb: number;
-    max_networks: number; max_subnets_per_network: number; max_elastic_ips: number;
+    max_networks: number; max_elastic_ips: number;
     max_buckets: number; max_storage_gb: number;
   };
 }
@@ -38,7 +38,7 @@ const QUOTA_LABELS: Record<string, string> = {
   max_vms: 'Max VMs', max_containers: 'Max Containers', max_vcpus: 'Max vCPUs',
   max_ram_mb: 'Max RAM (MB)', max_disk_gb: 'Max Disk (GB)', max_snapshots: 'Max Snapshots',
   max_backups: 'Max Backups', max_backup_size_gb: 'Max Backup Storage (GB)',
-  max_networks: 'Max Networks', max_subnets_per_network: 'Max Subnets per Network',
+  max_networks: 'Max Networks',
   max_elastic_ips: 'Max Elastic IPs',
   max_buckets: 'Max S3 Buckets', max_storage_gb: 'Max S3 Storage (GB)',
 };
@@ -216,10 +216,6 @@ export default function QuotaRequests() {
                   <div className="flex-1"><QuotaBar label="Networks (VPCs)" used={summary.resources.networks} limit={summary.quota.max_networks} /></div>
                 </div>
                 <div className="flex items-center gap-3">
-                  <Network className="h-5 w-5 text-paws-info shrink-0" />
-                  <div className="flex-1"><QuotaBar label="Subnets per Network" used={0} limit={summary.quota.max_subnets_per_network} /></div>
-                </div>
-                <div className="flex items-center gap-3">
                   <Network className="h-5 w-5 text-paws-warning shrink-0" />
                   <div className="flex-1"><QuotaBar label="Elastic IPs" used={0} limit={summary.quota.max_elastic_ips} /></div>
                 </div>
@@ -269,7 +265,6 @@ export default function QuotaRequests() {
                       { label: 'Backups', used: backupQuota?.proxmox_backup_count ?? 0, limit: summary.quota.max_backups },
                       { label: 'Backup Storage (GB)', used: backupQuota ? Math.round(backupQuota.total_backup_size / (1024 * 1024 * 1024)) : 0, limit: summary.quota.max_backup_size_gb },
                       { label: 'Networks (VPCs)', used: summary.resources.networks, limit: summary.quota.max_networks },
-                      { label: 'Subnets per Network', used: 0, limit: summary.quota.max_subnets_per_network },
                       { label: 'Elastic IPs', used: 0, limit: summary.quota.max_elastic_ips },
                     ].map((row) => {
                       const avail = Math.max(0, row.limit - row.used);

@@ -1,7 +1,7 @@
 """CIDR pool allocator and IP address management (IPAM) service.
 
-Allocates non-overlapping VPC CIDRs and subnet ranges from a configurable
-supernet. Tracks IP assignments for instances within subnets.
+Allocates non-overlapping VPC CIDRs from a configurable supernet.
+Each VPC gets a single /24 subnet. Tracks IP assignments for instances.
 """
 
 import ipaddress
@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Default supernet for VPC allocation
 DEFAULT_SUPERNET = "10.0.0.0/8"
-DEFAULT_VPC_PREFIX = 16  # /16 per VPC = 65534 hosts
-DEFAULT_SUBNET_PREFIX = 24  # /24 per subnet = 254 hosts
+DEFAULT_VPC_PREFIX = 24  # /24 per VPC = one subnet per network
 
 
 class CIDRPool:
@@ -29,7 +28,7 @@ class CIDRPool:
         self.vpc_prefix = vpc_prefix
 
     def get_available_vpc_cidr(self, used_cidrs: list[str]) -> str:
-        """Find the next available VPC CIDR block."""
+        """Find the next available VPC CIDR block (globally unique)."""
         used_networks = [ipaddress.ip_network(c, strict=False) for c in used_cidrs]
 
         for candidate in self.supernet.subnets(new_prefix=self.vpc_prefix):
@@ -37,19 +36,6 @@ class CIDRPool:
                 return str(candidate)
 
         raise RuntimeError("No available VPC CIDR blocks in the pool")
-
-    def get_available_subnet_cidr(
-        self, vpc_cidr: str, used_cidrs: list[str], prefix: int = DEFAULT_SUBNET_PREFIX
-    ) -> str:
-        """Find the next available subnet CIDR within a VPC."""
-        vpc_net = ipaddress.ip_network(vpc_cidr, strict=False)
-        used_networks = [ipaddress.ip_network(c, strict=False) for c in used_cidrs]
-
-        for candidate in vpc_net.subnets(new_prefix=prefix):
-            if not any(candidate.overlaps(used) for used in used_networks):
-                return str(candidate)
-
-        raise RuntimeError(f"No available subnet CIDRs in VPC {vpc_cidr}")
 
     @staticmethod
     def validate_cidr(cidr: str) -> bool:
@@ -92,18 +78,14 @@ class IPAMService:
         used = [row[0] for row in result.all() if row[0]]
         return self.cidr_pool.get_available_vpc_cidr(used)
 
-    async def allocate_subnet_cidr(self, db: AsyncSession, vpc_id: str, prefix: int = 24) -> str:
-        """Allocate the next available subnet within a VPC."""
-        import uuid as _uuid
-
-        vpc_result = await db.execute(select(VPC).where(VPC.id == _uuid.UUID(vpc_id)))
-        vpc = vpc_result.scalar_one_or_none()
-        if not vpc:
-            raise ValueError("VPC not found")
-
-        subnet_result = await db.execute(select(Subnet.cidr).where(Subnet.vpc_id == vpc.id))
-        used = [row[0] for row in subnet_result.all() if row[0]]
-        return self.cidr_pool.get_available_subnet_cidr(vpc.cidr, used, prefix)
+    async def check_cidr_globally_unique(self, db: AsyncSession, cidr: str) -> bool:
+        """Check that a CIDR does not overlap with any existing VPC."""
+        candidate = ipaddress.ip_network(cidr, strict=False)
+        result = await db.execute(select(VPC.cidr))
+        for row in result.all():
+            if row[0] and ipaddress.ip_network(row[0], strict=False).overlaps(candidate):
+                return False
+        return True
 
     def get_next_ip(self, cidr: str, used_ips: list[str]) -> str:
         """Get the next available IP in a subnet (skip gateway)."""

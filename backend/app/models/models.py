@@ -305,6 +305,8 @@ class ClusterConnection(Base):
     token_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     token_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    console_user: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    console_password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     fingerprint: Mapped[str | None] = mapped_column(String(255), nullable=True)
     verify_ssl: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

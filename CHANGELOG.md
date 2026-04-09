@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.11 - Current
+
+### Changed
+- **Single subnet per VPC** - Each VPC now has exactly one /24 subnet, auto-created during VPC creation; removed subnet CRUD endpoints and UI; enforced globally unique CIDRs to support inward/outward traversal
+- **Console user for xterm.js** - Cluster connections support a dedicated read-only `console_user` and `console_password` for password-based session tickets required by Proxmox `termproxy`; avoids using root credentials for terminal access; configurable per-connection in admin panel and via environment variables
+- **Simplified firewall management** - Removed visual builder (service presets and quick-add grid) from security groups page; rules are managed directly via the data table and add-rule modal
+- **Simplified network management** - Removed network topology diagram tab from VPC detail view; VPC details display directly without tabs
+- **Network mode inferred from VPC** - Removed network mode selector from instance creation wizard; mode is inherited from the selected VPC and displayed inline in the VPC dropdown
+- **Cluster info merged into connections** - Removed dedicated Cluster admin tab; PVE connection cards in the Connections tab now expand inline to show cluster status, tasks, and HA groups
+
 ## 0.2.10 - 2026-03-31
 
 ### Added

@@ -7,24 +7,14 @@ from app.services.ipam_service import CIDRPool, IPAMService
 
 class TestCIDRPool:
     def test_get_available_vpc_cidr_first(self):
-        pool = CIDRPool("10.0.0.0/8", vpc_prefix=16)
+        pool = CIDRPool("10.0.0.0/8", vpc_prefix=24)
         cidr = pool.get_available_vpc_cidr([])
-        assert cidr == "10.0.0.0/16"
+        assert cidr == "10.0.0.0/24"
 
     def test_get_available_vpc_cidr_skips_used(self):
-        pool = CIDRPool("10.0.0.0/8", vpc_prefix=16)
-        cidr = pool.get_available_vpc_cidr(["10.0.0.0/16", "10.1.0.0/16"])
-        assert cidr == "10.2.0.0/16"
-
-    def test_get_available_subnet_cidr(self):
-        pool = CIDRPool()
-        subnet = pool.get_available_subnet_cidr("10.0.0.0/16", [], prefix=24)
-        assert subnet == "10.0.0.0/24"
-
-    def test_get_available_subnet_cidr_skips_used(self):
-        pool = CIDRPool()
-        subnet = pool.get_available_subnet_cidr("10.0.0.0/16", ["10.0.0.0/24"], prefix=24)
-        assert subnet == "10.0.1.0/24"
+        pool = CIDRPool("10.0.0.0/8", vpc_prefix=24)
+        cidr = pool.get_available_vpc_cidr(["10.0.0.0/24", "10.0.1.0/24"])
+        assert cidr == "10.0.2.0/24"
 
     def test_validate_cidr_valid(self):
         assert CIDRPool.validate_cidr("10.0.0.0/16")

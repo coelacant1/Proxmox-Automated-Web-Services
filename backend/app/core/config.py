@@ -17,6 +17,8 @@ class ClusterConfig:
     token_secret: str = ""
     verify_ssl: bool = False
     password: str = ""
+    console_user: str = ""
+    console_password: str = ""
     # PBS settings (per-cluster)
     pbs_host: str = ""
     pbs_port: int = 8007
@@ -50,6 +52,8 @@ class Settings(BaseSettings):
     proxmox_token_secret: str = ""
     proxmox_verify_ssl: bool = False
     proxmox_password: str = ""
+    proxmox_console_user: str = ""
+    proxmox_console_password: str = ""
 
     # Multi-cluster support: comma-separated cluster names
     cluster_names: str = ""
@@ -133,6 +137,8 @@ class Settings(BaseSettings):
                     token_secret=self.proxmox_token_secret,
                     verify_ssl=self.proxmox_verify_ssl,
                     password=self.proxmox_password,
+                    console_user=self.proxmox_console_user,
+                    console_password=self.proxmox_console_password,
                     pbs_host=self.pbs_host,
                     pbs_port=self.pbs_port,
                     pbs_token_id=self.pbs_token_id,
@@ -155,6 +161,8 @@ class Settings(BaseSettings):
                     token_secret=os.environ.get(f"{prefix}TOKEN_SECRET", ""),
                     verify_ssl=os.environ.get(f"{prefix}VERIFY_SSL", "false").lower() == "true",
                     password=os.environ.get(f"{prefix}PASSWORD", ""),
+                    console_user=os.environ.get(f"{prefix}CONSOLE_USER", ""),
+                    console_password=os.environ.get(f"{prefix}CONSOLE_PASSWORD", ""),
                     pbs_host=os.environ.get(f"{prefix}PBS_HOST", ""),
                     pbs_port=int(os.environ.get(f"{prefix}PBS_PORT", "8007")),
                     pbs_token_id=os.environ.get(f"{prefix}PBS_TOKEN_ID", "root@pam!paws"),

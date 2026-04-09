@@ -35,6 +35,8 @@ class ConnectionCreate(BaseModel):
     token_id: str | None = None
     token_secret: str | None = None
     password: str | None = None
+    console_user: str | None = None
+    console_password: str | None = None
     fingerprint: str | None = None
     verify_ssl: bool = False
     is_active: bool = True
@@ -48,6 +50,8 @@ class ConnectionUpdate(BaseModel):
     token_id: str | None = None
     token_secret: str | None = None
     password: str | None = None
+    console_user: str | None = None
+    console_password: str | None = None
     fingerprint: str | None = None
     verify_ssl: bool | None = None
     is_active: bool | None = None
@@ -63,6 +67,8 @@ class ConnectionRead(BaseModel):
     token_id: str | None
     token_secret_masked: str | None
     password_set: bool
+    console_user: str | None
+    console_password_set: bool
     fingerprint: str | None
     verify_ssl: bool
     is_active: bool
@@ -93,6 +99,8 @@ def _to_read(c: ClusterConnection) -> ConnectionRead:
         token_id=c.token_id,
         token_secret_masked=secret_masked,
         password_set=c.password_enc is not None,
+        console_user=c.console_user,
+        console_password_set=c.console_password_enc is not None,
         fingerprint=c.fingerprint,
         verify_ssl=c.verify_ssl,
         is_active=c.is_active,
@@ -138,6 +146,8 @@ async def create_connection(
         token_id=body.token_id,
         token_secret_enc=encrypt(body.token_secret) if body.token_secret else None,
         password_enc=encrypt(body.password) if body.password else None,
+        console_user=body.console_user,
+        console_password_enc=encrypt(body.console_password) if body.console_password else None,
         fingerprint=body.fingerprint,
         verify_ssl=body.verify_ssl,
         is_active=body.is_active,
@@ -195,6 +205,10 @@ async def update_connection(
         conn.token_secret_enc = encrypt(body.token_secret)
     if body.password is not None:
         conn.password_enc = encrypt(body.password)
+    if body.console_user is not None:
+        conn.console_user = body.console_user
+    if body.console_password is not None:
+        conn.console_password_enc = encrypt(body.console_password)
     if body.fingerprint is not None:
         conn.fingerprint = body.fingerprint
     if body.verify_ssl is not None:
