@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.2.11 - Current
+## 0.2.12 - Current
+
+### Added
+- **Redis-backed cache for cluster status** - `/api/cluster/status` now caches the sanitized Proxmox response in Redis with a 10s TTL, eliminating per-request PVE API round-trips on dashboard load; new `app/services/cache.py` helper provides reusable JSON cache primitives that gracefully no-op when Redis is unavailable
+- **Redis-backed cache for live VM and container status** - `list_vms`, `get_vm`, `list_containers`, `get_container` now cache per-resource live status in Redis with a 5s TTL; cache is invalidated on power actions (start/stop/shutdown/suspend/hibernate) and resize so user-triggered changes surface immediately
+- **Celery Beat cache warming** - New `paws.refresh_cluster_status_cache` task runs every 30 seconds to pre-populate cluster status for every registered cluster so the dashboard always reads from a warm cache
+- **`cached_at` timestamps on cluster status** - `ClusterStatusResponse` now carries an epoch-second `cached_at` field so the UI can render freshness
+
+## 0.2.11 - 2026-04-09
 
 ### Changed
 - **Single subnet per VPC** - Each VPC now has exactly one /24 subnet, auto-created during VPC creation; removed subnet CRUD endpoints and UI; enforced globally unique CIDRs to support inward/outward traversal

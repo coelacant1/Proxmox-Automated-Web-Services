@@ -11,12 +11,35 @@ Usage:
 
 import json
 import logging
+from dataclasses import dataclass, field
 
-from app.core.config import ClusterConfig, settings
+from app.core.config import settings
 from app.services.pbs_client import PBSClient
 from app.services.proxmox_client import ProxmoxClient
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ClusterConfig:
+    """Lightweight cluster metadata held in memory for admin/status queries.
+
+    Credentials are NOT stored here; they live (encrypted) in the
+    ``cluster_connections`` table and are passed directly to the PVE/PBS
+    client instances on registration.
+    """
+
+    name: str
+    host: str = ""
+    port: int = 8006
+    pbs_host: str = ""
+    pbs_port: int = 8007
+    pbs_datastore: str = "backups"
+    extra: dict = field(default_factory=dict)
+
+
+class NoClustersConfigured(RuntimeError):
+    """Raised when a caller needs a Proxmox client but none are configured."""
 
 
 class ClusterRegistry:
@@ -34,18 +57,8 @@ class ClusterRegistry:
             return
         self._initialized = True
 
-        # Try DB-based connections first, then fall back to env
-        if self._load_from_db():
-            return
-
-        configs = settings.get_cluster_configs()
-        if not configs:
-            logger.warning("No Proxmox clusters configured")
-            return
-
-        self._default_cluster = configs[0].name
-        for cfg in configs:
-            self._register_from_config(cfg)
+        if not self._load_from_db():
+            logger.warning("No Proxmox clusters configured. Add one via Admin > Infrastructure > Connections.")
 
     def _load_from_db(self) -> bool:
         """Load cluster connections from the database (synchronous, for init)."""
@@ -101,12 +114,6 @@ class ClusterRegistry:
                         name=name,
                         host=host,
                         port=port,
-                        token_id=token_id,
-                        token_secret=token_secret,
-                        verify_ssl=verify_ssl,
-                        password=password,
-                        console_user=console_user,
-                        console_password=console_password,
                     )
                     self._configs[name] = cfg
                     self._pve_clients[name] = ProxmoxClient(
@@ -138,6 +145,11 @@ class ClusterRegistry:
                         verify_ssl=verify_ssl,
                         cluster_name=pve_cluster,
                     )
+                    # Annotate matching PVE config with PBS endpoint for admin views
+                    if pve_cluster in self._configs:
+                        self._configs[pve_cluster].pbs_host = host
+                        self._configs[pve_cluster].pbs_port = port
+                        self._configs[pve_cluster].pbs_datastore = datastore
                     logger.info("Registered PBS '%s' from DB (%s:%d)", name, host, port)
 
             return bool(self._pve_clients)
@@ -145,32 +157,6 @@ class ClusterRegistry:
         except Exception as exc:
             logger.debug("DB cluster load skipped: %s", exc)
             return False
-
-    def _register_from_config(self, cfg: ClusterConfig) -> None:
-        """Register a cluster from a ClusterConfig (env-based)."""
-        self._configs[cfg.name] = cfg
-        self._pve_clients[cfg.name] = ProxmoxClient(
-            host=cfg.host,
-            port=cfg.port,
-            token_id=cfg.token_id,
-            token_secret=cfg.token_secret,
-            verify_ssl=cfg.verify_ssl,
-            password=cfg.password,
-            console_user=cfg.console_user,
-            console_password=cfg.console_password,
-            cluster_name=cfg.name,
-        )
-        self._pbs_clients[cfg.name] = PBSClient(
-            host=cfg.pbs_host,
-            port=cfg.pbs_port,
-            token_id=cfg.pbs_token_id,
-            token_secret=cfg.pbs_token_secret,
-            fingerprint=cfg.pbs_fingerprint,
-            datastore=cfg.pbs_datastore,
-            verify_ssl=cfg.pbs_verify_ssl,
-            cluster_name=cfg.name,
-        )
-        logger.info("Registered cluster '%s' (%s:%d)", cfg.name, cfg.host, cfg.port)
 
     def invalidate(self) -> None:
         """Clear all cached clients, forcing reload on next access."""
@@ -185,35 +171,63 @@ class ClusterRegistry:
     def default_cluster(self) -> str:
         self._ensure_init()
         if self._default_cluster is None:
-            raise RuntimeError("No Proxmox clusters configured")
+            raise NoClustersConfigured(
+                "No Proxmox clusters configured. Add one via Admin > Infrastructure > Connections."
+            )
         return self._default_cluster
 
-    def get_pve(self, cluster_id: str | None = None) -> ProxmoxClient:
-        """Return ProxmoxClient for the given cluster, or the default."""
+    def _resolve_cluster_id(self, cluster_id: str | None) -> str:
+        """Return a valid cluster id, falling back to the default.
+
+        PAWS is now a single-cluster control plane (one PAWS instance per
+        Proxmox cluster). Legacy rows in the database may still carry stale
+        ``cluster_id`` values for clusters that have been removed or renamed;
+        rather than 500ing, we transparently redirect them to the primary
+        cluster and log a debug note. Callers that genuinely need "the only
+        cluster we have" can pass ``None``.
+        """
         self._ensure_init()
-        cid = cluster_id or self.default_cluster
-        client = self._pve_clients.get(cid)
-        if client is None:
-            raise KeyError(f"Unknown cluster '{cid}'. Available: {list(self._pve_clients)}")
-        return client
+        if not self._pve_clients:
+            raise NoClustersConfigured(
+                "No Proxmox clusters configured. Add one via Admin > Infrastructure > Connections."
+            )
+        if not cluster_id:
+            return self._default_cluster  # type: ignore[return-value]
+        if cluster_id in self._pve_clients:
+            return cluster_id
+        logger.debug(
+            "Unknown cluster_id '%s'; falling back to primary '%s'. This is normal during single-cluster migration.",
+            cluster_id,
+            self._default_cluster,
+        )
+        return self._default_cluster  # type: ignore[return-value]
+
+    def get_pve(self, cluster_id: str | None = None) -> ProxmoxClient:
+        """Return ProxmoxClient for the given cluster, or the primary cluster.
+
+        Unknown cluster ids are transparently redirected to the primary
+        (single-cluster consolidation). Raises ``NoClustersConfigured`` if no
+        clusters are registered at all.
+        """
+        cid = self._resolve_cluster_id(cluster_id)
+        return self._pve_clients[cid]
 
     def get_pbs(self, cluster_id: str | None = None) -> PBSClient:
-        """Return PBSClient for the given cluster, or the default."""
-        self._ensure_init()
-        cid = cluster_id or self.default_cluster
+        """Return PBSClient for the given cluster, or the primary.
+
+        Raises ``KeyError`` only when PBS is not configured for the resolved
+        cluster (PBS is optional per cluster).
+        """
+        cid = self._resolve_cluster_id(cluster_id)
         client = self._pbs_clients.get(cid)
         if client is None:
-            raise KeyError(f"Unknown cluster '{cid}'. Available: {list(self._pbs_clients)}")
+            raise KeyError(f"PBS not configured for cluster '{cid}'. Available: {list(self._pbs_clients)}")
         return client
 
     def get_config(self, cluster_id: str | None = None) -> ClusterConfig:
-        """Return ClusterConfig for the given cluster, or the default."""
-        self._ensure_init()
-        cid = cluster_id or self.default_cluster
-        cfg = self._configs.get(cid)
-        if cfg is None:
-            raise KeyError(f"Unknown cluster '{cid}'")
-        return cfg
+        """Return ClusterConfig for the given cluster, or the primary."""
+        cid = self._resolve_cluster_id(cluster_id)
+        return self._configs[cid]
 
     def get_all_pve(self) -> dict[str, ProxmoxClient]:
         """Return all ProxmoxClient instances keyed by cluster name."""

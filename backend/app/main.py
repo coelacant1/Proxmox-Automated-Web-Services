@@ -90,12 +90,6 @@ def validate_security_settings() -> None:
             "Set PAWS_DEFAULT_ADMIN_PASSWORD in your .env or change it after first login."
         )
 
-    if not settings.proxmox_verify_ssl:
-        logger.warning(
-            "WARNING: Proxmox SSL verification is disabled (PAWS_PROXMOX_VERIFY_SSL=false). "
-            "Enable it in production with a valid certificate."
-        )
-
     if not settings.debug:
         for origin in settings.cors_origin_list:
             if "localhost" in origin or "127.0.0.1" in origin:

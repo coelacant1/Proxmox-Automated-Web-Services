@@ -1,7 +1,8 @@
 """Admin endpoints for cluster management.
 
-Clusters are defined in .env configuration, not in the database.
-These endpoints provide read-only visibility and health status for all configured clusters.
+Clusters are configured via the Admin UI (Infrastructure > Connections) and
+stored (encrypted) in the ``cluster_connections`` table. These endpoints
+provide read-only visibility and health status for every registered cluster.
 """
 
 import logging
@@ -24,14 +25,17 @@ async def list_clusters(current_user: User = Depends(require_admin)) -> list[dic
     for cid in cluster_registry.list_cluster_ids():
         cfg = cluster_registry.get_config(cid)
         pve = cluster_registry.get_pve(cid)
-        pbs = cluster_registry.get_pbs(cid)
+        try:
+            pbs = cluster_registry.get_pbs(cid)
+        except KeyError:
+            pbs = None
 
         cluster_info: dict[str, Any] = {
             "name": cfg.name,
             "host": cfg.host,
             "port": cfg.port,
             "pbs_host": cfg.pbs_host or None,
-            "pbs_configured": pbs.configured,
+            "pbs_configured": bool(pbs and pbs.configured),
             "pve_connected": False,
             "pbs_connected": False,
             "nodes": [],
@@ -46,7 +50,7 @@ async def list_clusters(current_user: User = Depends(require_admin)) -> list[dic
         except Exception as exc:
             logger.warning("Failed to connect to cluster '%s': %s", cid, exc)
 
-        if pbs.configured:
+        if pbs and pbs.configured:
             try:
                 await pbs.list_datastores()
                 cluster_info["pbs_connected"] = True

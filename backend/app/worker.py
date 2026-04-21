@@ -30,6 +30,10 @@ celery_app.conf.update(
             "task": "paws.enforce_quota",
             "schedule": 900.0,  # every 15 minutes
         },
+        "refresh-cluster-status-cache": {
+            "task": "paws.refresh_cluster_status_cache",
+            "schedule": 30.0,  # every 30 seconds - keeps dashboard warm
+        },
     },
 )
 

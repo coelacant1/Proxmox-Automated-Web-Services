@@ -12,18 +12,62 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import Resource, User
 from app.schemas.schemas import ClusterNodeStatus, ClusterStatusResponse
-from app.services.cluster_registry import cluster_registry
+from app.services.cache import cached_call, now_epoch
+from app.services.cluster_registry import NoClustersConfigured, cluster_registry
 from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cluster", tags=["cluster"])
 
+CLUSTER_STATUS_TTL_SECONDS = 10
+
 
 @router.get("/list")
 async def list_available_clusters(_: User = Depends(get_current_active_user)) -> list[dict[str, Any]]:
     """List available clusters (name only, no credentials)."""
     return [{"name": cid} for cid in cluster_registry.list_cluster_ids()]
+
+
+async def _compute_cluster_status(cluster_id: str | None) -> dict[str, Any]:
+    """Call Proxmox and build the sanitized cluster status payload."""
+    try:
+        pve = get_pve(cluster_id)
+    except NoClustersConfigured:
+        return {"api_reachable": False, "cached_at": now_epoch()}
+    try:
+        nodes = pve.get_nodes()
+        cluster_info = pve.get_cluster_status()
+    except Exception:
+        logger.warning("Proxmox API unreachable for cluster health check")
+        return {"api_reachable": False, "cached_at": now_epoch()}
+
+    cluster_name = None
+    quorate = False
+    for item in cluster_info:
+        if item.get("type") == "cluster":
+            cluster_name = item.get("name")
+            quorate = bool(item.get("quorate", 0))
+            break
+
+    node_statuses = [
+        {
+            "name": n.get("node", "unknown"),
+            "status": "online" if n.get("status") == "online" else "offline",
+            "uptime_seconds": n.get("uptime", 0),
+        }
+        for n in nodes
+    ]
+
+    return {
+        "api_reachable": True,
+        "cluster_name": cluster_name,
+        "node_count": len(node_statuses),
+        "nodes_online": sum(1 for n in node_statuses if n["status"] == "online"),
+        "nodes": node_statuses,
+        "quorate": quorate,
+        "cached_at": now_epoch(),
+    }
 
 
 @router.get("/status", response_model=ClusterStatusResponse)
@@ -35,39 +79,28 @@ async def cluster_health(
 
     Shows node count, per-node online/offline status, and API connectivity.
     Does NOT expose raw CPU/RAM/disk capacity to prevent users seeing total resources.
+
+    Results are cached in Redis for a short TTL so dashboard loads do not
+    hit the Proxmox API on every request.
     """
-    pve = get_pve(cluster_id)
-    try:
-        nodes = pve.get_nodes()
-        cluster_info = pve.get_cluster_status()
-    except Exception:
-        logger.warning("Proxmox API unreachable for cluster health check")
-        return ClusterStatusResponse(api_reachable=False)
+    cache_key = f"cluster_status:{cluster_id or 'default'}"
+    payload = await cached_call(
+        cache_key,
+        CLUSTER_STATUS_TTL_SECONDS,
+        lambda: _compute_cluster_status(cluster_id),
+    )
 
-    cluster_name = None
-    quorate = False
-    for item in cluster_info:
-        if item.get("type") == "cluster":
-            cluster_name = item.get("name")
-            quorate = bool(item.get("quorate", 0))
-            break
-
-    node_statuses = [
-        ClusterNodeStatus(
-            name=n.get("node", "unknown"),
-            status="online" if n.get("status") == "online" else "offline",
-            uptime_seconds=n.get("uptime", 0),
-        )
-        for n in nodes
-    ]
+    if not payload.get("api_reachable"):
+        return ClusterStatusResponse(api_reachable=False, cached_at=payload.get("cached_at"))
 
     return ClusterStatusResponse(
         api_reachable=True,
-        cluster_name=cluster_name,
-        node_count=len(node_statuses),
-        nodes_online=sum(1 for n in node_statuses if n.status == "online"),
-        nodes=node_statuses,
-        quorate=quorate,
+        cluster_name=payload.get("cluster_name"),
+        node_count=payload.get("node_count", 0),
+        nodes_online=payload.get("nodes_online", 0),
+        nodes=[ClusterNodeStatus(**n) for n in payload.get("nodes", [])],
+        quorate=payload.get("quorate", False),
+        cached_at=payload.get("cached_at"),
     )
 
 

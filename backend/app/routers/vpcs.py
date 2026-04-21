@@ -27,7 +27,7 @@ from app.models.models import (
     UserQuota,
     UserTier,
 )
-from app.schemas.schemas import SubnetRead, VPCCreate, VPCRead
+from app.schemas.schemas import VPCCreate, VPCRead
 from app.services.audit_service import log_action
 from app.services.group_access import check_group_access
 from app.services.ipam_service import cidr_pool, ipam_service
@@ -389,7 +389,7 @@ async def delete_vpc(
     if vpc.is_default:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete default VPC")
 
-    # Reject if resources are still attached
+    # Reject if resources are still attached (primary or secondary NIC)
     res = await db.execute(select(Resource).where(Resource.owner_id == user.id))
     for r in res.scalars().all():
         specs = r.specs
@@ -398,11 +398,17 @@ async def delete_vpc(
                 specs = json.loads(specs)
             except (json.JSONDecodeError, TypeError):
                 specs = {}
-        if isinstance(specs, dict) and specs.get("vpc_id") == vpc_id:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Cannot delete VPC with attached resources",
-            )
+        if isinstance(specs, dict):
+            if specs.get("vpc_id") == vpc_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Cannot delete VPC with attached resources",
+                )
+            if vpc_id in specs.get("secondary_vpc_ids", []):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Cannot delete VPC with attached resources",
+                )
 
     # Remove Proxmox VNet (cascades to SDN subnets)
     if vpc.proxmox_vnet:

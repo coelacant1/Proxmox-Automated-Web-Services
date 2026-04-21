@@ -78,6 +78,16 @@ class _ChainableMock:
 class MockProxmoxClient:
     """Fake ProxmoxClient that returns realistic data without network calls."""
 
+    _host = "test"
+    _port = 8006
+    _token_id = "mock@pam!paws"
+    _token_secret = "mock-secret"
+    _verify_ssl = False
+    _password = ""
+    _console_user = ""
+    _console_password = ""
+    cluster_name = "default"
+
     @property
     def api(self):
         """Chainable mock for raw proxmoxer API access (e.g. api.nodes(x).qemu(y).firewall.rules.get())."""
@@ -521,6 +531,8 @@ async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncC
                     "port": 8006,
                     "pbs_host": "",
                     "pbs_port": 8007,
+                    "pbs_datastore": "backups",
+                    "extra": {},
                 },
             )()
         },

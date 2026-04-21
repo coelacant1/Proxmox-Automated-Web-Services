@@ -179,6 +179,7 @@ class ClusterStatusResponse(BaseModel):
     nodes_online: int = 0
     nodes: list[ClusterNodeStatus] = []
     quorate: bool = False
+    cached_at: int | None = None  # epoch seconds when the payload was computed
 
 
 # --- Usage ---

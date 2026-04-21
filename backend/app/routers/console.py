@@ -113,10 +113,9 @@ async def get_available_consoles(
 
 def _build_ws_url(resource: Resource, proxy_type: str, ticket_data: dict) -> str:
     """Build WebSocket URL for proxying through Proxmox."""
-    from app.core.config import settings
-
-    host = settings.proxmox_host
-    port = settings.proxmox_port
+    pve = get_pve(resource.cluster_id)
+    host = pve._host
+    port = pve._port
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     vncticket = ticket_data.get("ticket", "")
     return (

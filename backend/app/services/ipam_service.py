@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import VPC, Subnet
+from app.models.models import VPC
 
 logger = logging.getLogger(__name__)
 

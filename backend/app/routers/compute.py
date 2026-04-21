@@ -13,12 +13,12 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.core.lifecycle import validate_instance_specs
 from app.models.models import VPC, Resource, SSHKeyPair, Subnet, SystemSetting, User, UserQuota, VMIDPool, Volume
 from app.services.audit_service import log_action
+from app.services.cache import cache_delete, cached_call
 from app.services.firewall_profile import FirewallProfileService
 from app.services.node_service import get_next_vmid, select_node
 from app.services.pool_service import add_resource_to_pool, cleanup_user_pool, ensure_user_pool
@@ -595,10 +595,10 @@ async def list_vms(
             "created_at": str(r.created_at),
             "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
         }
-        # Fetch live status if running
+        # Fetch live status if running (Redis-cached; ~5s TTL)
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
             try:
-                live = _get_live_status(r)
+                live = await _get_live_status_cached(r)
                 vm_data["live_status"] = live.get("status")
                 vm_data["cpu_usage"] = live.get("cpu", 0)
                 vm_data["mem_usage"] = live.get("mem", 0)
@@ -634,7 +634,7 @@ async def get_vm(
     }
     if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
         try:
-            live = _get_live_status(r)
+            live = await _get_live_status_cached(r)
             vm_data["live_status"] = live.get("status")
             vm_data["cpu_usage"] = live.get("cpu", 0)
             vm_data["mem_usage"] = live.get("mem", 0)
@@ -648,8 +648,9 @@ async def get_vm(
                 r.proxmox_node = actual_node
                 await db.commit()
                 vm_data["proxmox_node"] = actual_node
+                await _invalidate_vm_status(r)
                 try:
-                    live = _get_live_status(r)
+                    live = await _get_live_status_cached(r)
                     vm_data["live_status"] = live.get("status")
                     vm_data["cpu_usage"] = live.get("cpu", 0)
                     vm_data["mem_usage"] = live.get("mem", 0)
@@ -683,6 +684,7 @@ async def vm_action(
         try:
             upid = get_pve(resource.cluster_id).suspend_vm(node, vmid, to_disk=False)
             await log_action(db, user.id, "vm_suspend", rtype, resource.id)
+            await _invalidate_vm_status(resource)
             return {"status": "ok", "task": upid}
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -690,6 +692,7 @@ async def vm_action(
         try:
             upid = get_pve(resource.cluster_id).suspend_vm(node, vmid, to_disk=True)
             await log_action(db, user.id, "vm_hibernate", rtype, resource.id)
+            await _invalidate_vm_status(resource)
             return {"status": "ok", "task": upid}
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -700,6 +703,7 @@ async def vm_action(
     try:
         upid = _do_action(resource, action)
         await log_action(db, user.id, f"{rtype}_{body.action}", rtype, resource.id)
+        await _invalidate_vm_status(resource)
         return {"status": "ok", "task": upid}
     except ValueError as e:
         code = 403 if "Network safety" in str(e) else 400
@@ -789,6 +793,7 @@ async def resize_vm(
     resource.specs = json.dumps(specs)
     await db.commit()
     await log_action(db, user.id, "vm_resize", "vm", resource.id)
+    await _invalidate_vm_status(resource)
     return {"status": "ok", "specs": specs}
 
 
@@ -909,8 +914,8 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
 
     port = ticket_data.get("port")
     ticket = ticket_data.get("ticket")
-    pve_host = settings.proxmox_host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
-    pve_port = settings.proxmox_port
+    pve_host = pve._host
+    pve_port = pve._port
     vmid = resource.proxmox_vmid
     node = resource.proxmox_node  # Already resolved to actual node above
 
@@ -925,7 +930,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
     proxmox_ws_url = f"wss://{pve_host}:{pve_port}{ws_path}"
 
     ssl_ctx = ssl.create_default_context()
-    if not settings.proxmox_verify_ssl:
+    if not pve._verify_ssl:
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
@@ -938,8 +943,8 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
 
     pve_ws = None
     try:
-        pve_token_id = settings.proxmox_token_id
-        pve_token_secret = settings.proxmox_token_secret
+        pve_token_id = pve._token_id
+        pve_token_secret = pve._token_secret
         auth_header = f"PVEAPIToken={pve_token_id}={pve_token_secret}"
         pve_ws = await websockets.connect(
             proxmox_ws_url,
@@ -2320,7 +2325,7 @@ async def list_containers(
         }
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
             try:
-                live = get_pve(r.cluster_id).get_container_status(r.proxmox_node, r.proxmox_vmid)
+                live = await _get_live_status_cached(r)
                 ct_data["live_status"] = live.get("status")
             except Exception:
                 ct_data["live_status"] = "unknown"
@@ -2349,7 +2354,7 @@ async def get_container(
     }
     if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
         try:
-            live = get_pve(r.cluster_id).get_container_status(r.proxmox_node, r.proxmox_vmid)
+            live = await _get_live_status_cached(r)
             ct_data["live_status"] = live.get("status")
         except Exception:
             ct_data["live_status"] = "unknown"
@@ -2385,6 +2390,7 @@ async def container_action(
     try:
         upid = actions[body.action](node, vmid)
         await log_action(db, user.id, f"container_{body.action}", "lxc", resource.id)
+        await _invalidate_vm_status(resource)
         return {"status": "ok", "task": upid}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -2722,6 +2728,32 @@ def _get_live_status(resource: Resource) -> dict:
                 return pve.get_container_status(actual_node, vmid)
             return pve.get_vm_status(actual_node, vmid)
         raise
+
+
+# Keys the VM/LXC live-status cache uses. TTL is short (5s) so user-visible
+# state still reflects reality without hammering PVE on every list page load.
+_VM_STATUS_TTL_SECONDS = 5
+
+
+def _vm_status_cache_key(resource: Resource) -> str:
+    cluster = resource.cluster_id or "default"
+    return f"vm_status:{cluster}:{resource.proxmox_vmid}"
+
+
+async def _get_live_status_cached(resource: Resource) -> dict:
+    """Async, Redis-cached wrapper around :func:`_get_live_status`."""
+    key = _vm_status_cache_key(resource)
+
+    async def _produce() -> dict:
+        # _get_live_status is sync; run in a worker thread so we don't block the loop
+        return await asyncio.to_thread(_get_live_status, resource)
+
+    return await cached_call(key, _VM_STATUS_TTL_SECONDS, _produce)
+
+
+async def _invalidate_vm_status(resource: Resource) -> None:
+    """Drop the cached live status so the next read hits PVE."""
+    await cache_delete(_vm_status_cache_key(resource))
 
 
 async def _resolve_vpc_networking(
