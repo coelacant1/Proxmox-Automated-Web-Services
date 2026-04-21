@@ -38,6 +38,37 @@ async def test_cluster_status_unauthenticated(client: AsyncClient):
     assert resp.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_cluster_status_unknown_cluster_id_falls_back(auth_client: AsyncClient):
+    """Unknown cluster_id must not 500; it should fall back to the primary cluster.
+
+    Single-cluster consolidation: legacy rows may hold stale cluster_id values,
+    and the UI may race-load before the registry settles. We promise never to
+    return 500 for this case.
+    """
+    resp = await auth_client.get("/api/cluster/status?cluster_id=does-not-exist")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["api_reachable"] is True
+
+
+@pytest.mark.asyncio
+async def test_cluster_status_no_clusters_configured(auth_client: AsyncClient, monkeypatch):
+    """When zero clusters are configured, endpoint returns api_reachable=False, not 500."""
+    from app.routers import cluster as cluster_router
+    from app.services.cluster_registry import NoClustersConfigured
+
+    def _raise(_cluster_id=None):
+        raise NoClustersConfigured("No Proxmox clusters configured")
+
+    monkeypatch.setattr(cluster_router, "get_pve", _raise)
+
+    resp = await auth_client.get("/api/cluster/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["api_reachable"] is False
+
+
 # ---------------------------------------------------------------------------
 # TemplateCatalog model
 # ---------------------------------------------------------------------------

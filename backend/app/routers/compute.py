@@ -13,16 +13,16 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.core.lifecycle import validate_instance_specs
 from app.models.models import VPC, Resource, SSHKeyPair, Subnet, SystemSetting, User, UserQuota, VMIDPool, Volume
 from app.services.audit_service import log_action
+from app.services.cache import cache_delete, cached_call
 from app.services.firewall_profile import FirewallProfileService
 from app.services.node_service import get_next_vmid, select_node
 from app.services.pool_service import add_resource_to_pool, cleanup_user_pool, ensure_user_pool
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 from app.services.rate_limiter import check_action_rate_limit
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ class VMCreateRequest(BaseModel):
     security_group_ids: list[str] | None = None
     placement_strategy: str | None = None
     termination_protected: bool = False
+    cluster_id: str = "default"
     # Instance configuration
     hostname: str | None = None
     ci_user: str | None = None
@@ -69,7 +70,9 @@ class ContainerCreateRequest(BaseModel):
     ssh_key_ids: list[str] | None = None
     security_group_ids: list[str] | None = None
     termination_protected: bool = False
+    cluster_id: str = "default"
     hostname: str | None = None
+    ci_user: str | None = None
     ci_password: str | None = None
     dns_server: str | None = None
     dns_domain: str | None = None
@@ -129,6 +132,7 @@ def _apply_instance_config(
     vmid: int,
     resource_type: str,
     *,
+    cluster_id: str = "default",
     username: str | None = None,
     password: str | None = None,
     hostname: str | None = None,
@@ -145,7 +149,7 @@ def _apply_instance_config(
         node: Proxmox node name
         vmid: VM/container ID
         resource_type: "qemu", "vm", or "lxc"
-        username: Cloud-init user (VM) - ignored for LXC
+        username: Cloud-init user (VM) or target user for SSH key injection (LXC)
         password: Cloud-init password (VM) or container root password (LXC)
         hostname: VM name / container hostname
         dns_server: DNS nameserver(s)
@@ -155,6 +159,7 @@ def _apply_instance_config(
     import urllib.parse
 
     is_lxc = resource_type == "lxc"
+    pve = get_pve(cluster_id)
 
     if is_lxc:
         params: dict[str, str] = {}
@@ -167,10 +172,13 @@ def _apply_instance_config(
         if ssh_public_keys is not None:
             params["ssh-public-keys"] = "\n".join(ssh_public_keys) + "\n" if ssh_public_keys else ""
         if params:
-            proxmox_client.set_container_config(node, vmid, **params)
+            pve.set_container_config(node, vmid, **params)
         # LXC password must be set in a separate API call
         if password is not None:
-            proxmox_client.set_container_config(node, vmid, password=password)
+            pve.set_container_config(node, vmid, password=password)
+        # Inject SSH keys for a non-root user via exec (best-effort, container must be running)
+        if username and ssh_public_keys:
+            _inject_lxc_user_ssh_keys(node, vmid, username, ssh_public_keys, cluster_id=cluster_id)
     else:
         params = {}
         if username is not None:
@@ -188,8 +196,52 @@ def _apply_instance_config(
                 urllib.parse.quote("\n".join(ssh_public_keys) + "\n", safe="") if ssh_public_keys else ""
             )
         if params:
-            proxmox_client.update_vm_config(node, vmid, **params)
-            proxmox_client.regenerate_cloudinit(node, vmid)
+            pve.update_vm_config(node, vmid, **params)
+            pve.regenerate_cloudinit(node, vmid)
+
+
+def _inject_lxc_user_ssh_keys(
+    node: str,
+    vmid: int,
+    username: str,
+    ssh_public_keys: list[str],
+    *,
+    cluster_id: str = "default",
+) -> None:
+    """Best-effort injection of SSH keys for a non-root user inside an LXC container.
+
+    Uses the PVE exec API (PVE 8+) to create the user and write authorized_keys.
+    Falls back silently if the container is not running or exec is unavailable;
+    the root-level ssh-public-keys config is always set as a reliable fallback.
+    """
+    import re
+
+    if not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", username):
+        logger.warning("Invalid LXC username '%s', skipping SSH key injection", username)
+        return
+
+    keys_content = "\n".join(ssh_public_keys)
+    # Shell script: create user if missing, set up authorized_keys
+    setup_script = (
+        f"id -u {username} >/dev/null 2>&1 || useradd -m -s /bin/bash {username}; "
+        f"home=$(eval echo ~{username}); "
+        f'mkdir -p "$home/.ssh"; '
+        f"printf '%s\\n' '{keys_content}' > \"$home/.ssh/authorized_keys\"; "
+        f'chmod 700 "$home/.ssh"; '
+        f'chmod 600 "$home/.ssh/authorized_keys"; '
+        f'chown -R {username}:{username} "$home/.ssh"'
+    )
+
+    try:
+        pve = get_pve(cluster_id)
+        status = pve.get_container_status(node, vmid)
+        if status.get("status") != "running":
+            logger.info("LXC %s not running, deferring user SSH key injection for '%s'", vmid, username)
+            return
+        pve.lxc_exec(node, vmid, ["bash", "-c", setup_script])
+        logger.info("Injected SSH keys for user '%s' in LXC %s", username, vmid)
+    except Exception as exc:
+        logger.warning("Could not inject SSH keys for user '%s' in LXC %s: %s", username, vmid, exc)
 
 
 def _build_net0(
@@ -232,6 +284,7 @@ def _apply_nic(
     resource_type: str,
     net0_val: str,
     *,
+    cluster_id: str = "default",
     ip: str | None = None,
     prefix_len: int | None = None,
     gateway: str | None = None,
@@ -242,10 +295,11 @@ def _apply_nic(
     All NIC application MUST go through this function so that VM ipconfig0
     and LXC net0 IP embedding stay consistent.
     """
+    pve = get_pve(cluster_id)
     if resource_type == "lxc":
-        proxmox_client.set_container_config(node, vmid, net0=net0_val)
+        pve.set_container_config(node, vmid, net0=net0_val)
     else:
-        proxmox_client.update_vm_config(node, vmid, net0=net0_val, agent="1")
+        pve.update_vm_config(node, vmid, net0=net0_val, agent="1")
         # VMs use cloud-init ipconfig0 for static IP (LXC embeds IP in net0)
         if ip and prefix_len and gateway:
             ci_ip_params: dict[str, str] = {
@@ -253,8 +307,8 @@ def _apply_nic(
             }
             if dns_server:
                 ci_ip_params["nameserver"] = dns_server
-            proxmox_client.update_vm_config(node, vmid, **ci_ip_params)
-        proxmox_client.regenerate_cloudinit(node, vmid)
+            pve.update_vm_config(node, vmid, **ci_ip_params)
+        pve.regenerate_cloudinit(node, vmid)
 
 
 def _apply_paws_metadata(
@@ -270,10 +324,11 @@ def _apply_paws_metadata(
     tags = "paws-managed"
     description = _build_paws_description(resource, user, resource.notes or "")
     try:
+        pve = get_pve(resource.cluster_id)
         if vmtype == "lxc":
-            proxmox_client.set_container_config(node, vmid, tags=tags, description=description)
+            pve.set_container_config(node, vmid, tags=tags, description=description)
         else:
-            proxmox_client.update_vm_config(node, vmid, tags=tags, description=description)
+            pve.update_vm_config(node, vmid, tags=tags, description=description)
         logger.info("Applied PAWS metadata to VMID %s on %s (type=%s)", vmid, node, vmtype)
     except Exception as e:
         logger.warning("Failed to apply PAWS metadata to VMID %s on %s: %s", vmid, node, e)
@@ -325,18 +380,19 @@ async def create_vm(
 
     # Find template's source node and determine clone strategy
     try:
-        template_node = proxmox_client.find_vm_node(body.template_vmid)
+        pve = get_pve(body.cluster_id)
+        template_node = pve.find_vm_node(body.template_vmid)
         if not template_node:
             raise RuntimeError(f"Template VMID {body.template_vmid} not found on any node")
 
-        template_type = proxmox_client.get_resource_type(body.template_vmid) or "qemu"
+        template_type = pve.get_resource_type(body.template_vmid) or "qemu"
         is_lxc_template = template_type == "lxc"
 
         if is_lxc_template:
-            template_disk_storage = proxmox_client.get_container_disk_storage(template_node, body.template_vmid)
+            template_disk_storage = pve.get_container_disk_storage(template_node, body.template_vmid)
         else:
-            template_disk_storage = proxmox_client.get_vm_disk_storage(template_node, body.template_vmid)
-        storage_is_shared = proxmox_client.is_storage_shared(template_disk_storage) if template_disk_storage else False
+            template_disk_storage = pve.get_vm_disk_storage(template_node, body.template_vmid)
+        storage_is_shared = pve.is_storage_shared(template_disk_storage) if template_disk_storage else False
 
         # Linked clone if storage is shared, full clone if local
         use_full_clone = not storage_is_shared
@@ -344,7 +400,7 @@ async def create_vm(
 
         # Clone on the template's source node
         if is_lxc_template:
-            upid = proxmox_client.clone_container(
+            upid = pve.clone_container(
                 node=template_node,
                 source_vmid=body.template_vmid,
                 new_vmid=new_vmid,
@@ -355,7 +411,7 @@ async def create_vm(
             )
             resource_type = "lxc"
         else:
-            upid = proxmox_client.clone_vm(
+            upid = pve.clone_vm(
                 node=template_node,
                 source_vmid=body.template_vmid,
                 new_vmid=new_vmid,
@@ -384,6 +440,7 @@ async def create_vm(
         proxmox_node=clone_node,
         status="provisioning",
         termination_protected=body.termination_protected,
+        cluster_id=body.cluster_id,
         specs=json.dumps(
             {
                 "cores": body.cores,
@@ -391,6 +448,7 @@ async def create_vm(
                 "disk_gb": body.disk_gb,
                 "hostname": body.hostname,
                 "vpc_id": body.vpc_id,
+                **({"ci_user": body.ci_user} if body.ci_user else {}),
             }
         ),
     )
@@ -413,24 +471,24 @@ async def create_vm(
 
     # Wait for clone to complete, then migrate if needed
     try:
-        proxmox_client.wait_for_task(clone_node, upid, timeout=120)
+        pve.wait_for_task(clone_node, upid, timeout=120)
     except Exception as wait_err:
         logger.warning("Clone task wait failed for VMID %s: %s", new_vmid, wait_err)
 
     if needs_migration:
         try:
             if is_lxc_template:
-                mig_upid = proxmox_client.migrate_container(clone_node, new_vmid, target=node, online=False)
+                mig_upid = pve.migrate_container(clone_node, new_vmid, target=node, online=False)
             else:
-                mig_upid = proxmox_client.migrate_vm(clone_node, new_vmid, target=node, online=False)
+                mig_upid = pve.migrate_vm(clone_node, new_vmid, target=node, online=False)
             # Wait for migration to finish before applying config
-            proxmox_client.wait_for_task(clone_node, mig_upid, timeout=300)
+            pve.wait_for_task(clone_node, mig_upid, timeout=300)
             resource.proxmox_node = node
             await db.commit()
         except Exception as mig_err:
             logger.warning("Migration of VMID %s to %s failed: %s", new_vmid, node, mig_err)
             # VM stays on clone_node; update resource to reflect reality
-            actual_node = proxmox_client.find_vm_node(new_vmid) or clone_node
+            actual_node = pve.find_vm_node(new_vmid) or clone_node
             if resource.proxmox_node != actual_node:
                 resource.proxmox_node = actual_node
                 await db.commit()
@@ -444,14 +502,14 @@ async def create_vm(
     try:
         # Resize specs (cores/memory) - separate from config
         if is_lxc_template:
-            proxmox_client.set_container_config(
+            pve.set_container_config(
                 resource.proxmox_node,
                 new_vmid,
                 cores=body.cores,
                 memory=body.memory_mb,
             )
         else:
-            proxmox_client.update_vm_config(
+            pve.update_vm_config(
                 resource.proxmox_node,
                 new_vmid,
                 cores=body.cores,
@@ -462,6 +520,7 @@ async def create_vm(
             resource.proxmox_node,
             new_vmid,
             rtype,
+            cluster_id=body.cluster_id,
             username=body.ci_user or ("paws" if not is_lxc_template else None),
             password=body.ci_password,
             hostname=body.hostname,
@@ -536,10 +595,10 @@ async def list_vms(
             "created_at": str(r.created_at),
             "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
         }
-        # Fetch live status if running
+        # Fetch live status if running (Redis-cached; ~5s TTL)
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
             try:
-                live = _get_live_status(r)
+                live = await _get_live_status_cached(r)
                 vm_data["live_status"] = live.get("status")
                 vm_data["cpu_usage"] = live.get("cpu", 0)
                 vm_data["mem_usage"] = live.get("mem", 0)
@@ -575,7 +634,7 @@ async def get_vm(
     }
     if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
         try:
-            live = _get_live_status(r)
+            live = await _get_live_status_cached(r)
             vm_data["live_status"] = live.get("status")
             vm_data["cpu_usage"] = live.get("cpu", 0)
             vm_data["mem_usage"] = live.get("mem", 0)
@@ -584,13 +643,14 @@ async def get_vm(
             vm_data["netout"] = live.get("netout", 0)
         except Exception:
             # Node might be wrong - try to find the correct one
-            actual_node = proxmox_client.find_vm_node(r.proxmox_vmid)
+            actual_node = get_pve(r.cluster_id).find_vm_node(r.proxmox_vmid)
             if actual_node and actual_node != r.proxmox_node:
                 r.proxmox_node = actual_node
                 await db.commit()
                 vm_data["proxmox_node"] = actual_node
+                await _invalidate_vm_status(r)
                 try:
-                    live = _get_live_status(r)
+                    live = await _get_live_status_cached(r)
                     vm_data["live_status"] = live.get("status")
                     vm_data["cpu_usage"] = live.get("cpu", 0)
                     vm_data["mem_usage"] = live.get("mem", 0)
@@ -622,15 +682,17 @@ async def vm_action(
 
     if body.action == "suspend" and rtype == "vm":
         try:
-            upid = proxmox_client.suspend_vm(node, vmid, to_disk=False)
+            upid = get_pve(resource.cluster_id).suspend_vm(node, vmid, to_disk=False)
             await log_action(db, user.id, "vm_suspend", rtype, resource.id)
+            await _invalidate_vm_status(resource)
             return {"status": "ok", "task": upid}
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
     elif body.action == "hibernate" and rtype == "vm":
         try:
-            upid = proxmox_client.suspend_vm(node, vmid, to_disk=True)
+            upid = get_pve(resource.cluster_id).suspend_vm(node, vmid, to_disk=True)
             await log_action(db, user.id, "vm_hibernate", rtype, resource.id)
+            await _invalidate_vm_status(resource)
             return {"status": "ok", "task": upid}
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -641,6 +703,7 @@ async def vm_action(
     try:
         upid = _do_action(resource, action)
         await log_action(db, user.id, f"{rtype}_{body.action}", rtype, resource.id)
+        await _invalidate_vm_status(resource)
         return {"status": "ok", "task": upid}
     except ValueError as e:
         code = 403 if "Network safety" in str(e) else 400
@@ -712,15 +775,16 @@ async def resize_vm(
         raise HTTPException(status_code=403, detail=f"vCPU quota exceeded ({quota.max_vcpus} max)")
 
     try:
+        pve = get_pve(resource.cluster_id)
         if resource.resource_type == "lxc":
-            proxmox_client.set_container_config(
+            pve.set_container_config(
                 resource.proxmox_node,
                 resource.proxmox_vmid,
                 cores=new_cores,
                 memory=new_ram,
             )
         else:
-            proxmox_client.resize_vm(resource.proxmox_node, resource.proxmox_vmid, new_cores, new_ram)
+            pve.resize_vm(resource.proxmox_node, resource.proxmox_vmid, new_cores, new_ram)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -729,6 +793,7 @@ async def resize_vm(
     resource.specs = json.dumps(specs)
     await db.commit()
     await log_action(db, user.id, "vm_resize", "vm", resource.id)
+    await _invalidate_vm_status(resource)
     return {"status": "ok", "specs": specs}
 
 
@@ -746,16 +811,17 @@ async def vm_console(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     # Resolve actual node - VM may have migrated since DB record was written
-    actual_node = proxmox_client.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
+    pve = get_pve(resource.cluster_id)
+    actual_node = pve.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
     if actual_node != resource.proxmox_node:
         resource.proxmox_node = actual_node
         await db.commit()
 
     try:
         if console_type == "terminal":
-            ticket_data = proxmox_client.get_terminal_proxy(actual_node, resource.proxmox_vmid, vmtype=vmtype)
+            ticket_data = pve.get_terminal_proxy(actual_node, resource.proxmox_vmid, vmtype=vmtype)
         else:
-            ticket_data = proxmox_client.get_vnc_ticket(actual_node, resource.proxmox_vmid, vmtype=vmtype)
+            ticket_data = pve.get_vnc_ticket(actual_node, resource.proxmox_vmid, vmtype=vmtype)
         ticket_data["node"] = actual_node
         ticket_data["vmid"] = resource.proxmox_vmid
         ticket_data["vmtype"] = vmtype
@@ -811,7 +877,8 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
         async for db in get_db():
             resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="operate")
             # Resolve actual node - VM may have migrated
-            actual_node = proxmox_client.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
+            pve = get_pve(resource.cluster_id)
+            actual_node = pve.find_vm_node(resource.proxmox_vmid) or resource.proxmox_node
             if actual_node != resource.proxmox_node:
                 print(f"[CONSOLE] Node corrected: DB={resource.proxmox_node} -> actual={actual_node}", flush=True)
                 resource.proxmox_node = actual_node
@@ -831,14 +898,14 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
         if console_type == "terminal":
             # Terminal requires a PVE session ticket (API tokens not supported by termproxy)
             try:
-                session_user, session_ticket = proxmox_client.get_session_ticket()
+                session_user, session_ticket = pve.get_session_ticket()
             except Exception as se:
                 print(f"[CONSOLE] Session ticket error: {se}", flush=True)
                 await websocket.close(code=4502, reason="Terminal requires PAWS_PROXMOX_PASSWORD")
                 return
-            ticket_data = proxmox_client.get_terminal_proxy(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
+            ticket_data = pve.get_terminal_proxy(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
         else:
-            ticket_data = proxmox_client.get_vnc_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
+            ticket_data = pve.get_vnc_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
         print(f"[CONSOLE] Got ticket for {console_type}, port={ticket_data.get('port')}", flush=True)
     except Exception as e:
         print(f"[CONSOLE] Failed to get ticket: {e}", flush=True)
@@ -847,8 +914,8 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
 
     port = ticket_data.get("port")
     ticket = ticket_data.get("ticket")
-    pve_host = settings.proxmox_host.replace("https://", "").replace("http://", "").split(":")[0].rstrip("/")
-    pve_port = settings.proxmox_port
+    pve_host = pve._host
+    pve_port = pve._port
     vmid = resource.proxmox_vmid
     node = resource.proxmox_node  # Already resolved to actual node above
 
@@ -863,7 +930,7 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
     proxmox_ws_url = f"wss://{pve_host}:{pve_port}{ws_path}"
 
     ssl_ctx = ssl.create_default_context()
-    if not settings.proxmox_verify_ssl:
+    if not pve._verify_ssl:
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
@@ -876,8 +943,8 @@ async def ws_console_proxy(websocket: WebSocket, resource_id: str):
 
     pve_ws = None
     try:
-        pve_token_id = settings.proxmox_token_id
-        pve_token_secret = settings.proxmox_token_secret
+        pve_token_id = pve._token_id
+        pve_token_secret = pve._token_secret
         auth_header = f"PVEAPIToken={pve_token_id}={pve_token_secret}"
         pve_ws = await websockets.connect(
             proxmox_ws_url,
@@ -1001,7 +1068,7 @@ async def list_vm_snapshots(
     resource = await _get_user_resource(db, user.id, resource_id, "vm")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        return proxmox_client.list_snapshots(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
+        return get_pve(resource.cluster_id).list_snapshots(resource.proxmox_node, resource.proxmox_vmid, vmtype=vmtype)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -1016,7 +1083,7 @@ async def create_vm_snapshot(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        upid = proxmox_client.create_snapshot(
+        upid = get_pve(resource.cluster_id).create_snapshot(
             resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype=vmtype, description=body.description
         )
         await log_action(db, user.id, "snapshot_create", resource.resource_type, resource.id, {"snapshot": body.name})
@@ -1035,7 +1102,8 @@ async def rollback_vm_snapshot(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        upid = proxmox_client.rollback_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype)
+        pve = get_pve(resource.cluster_id)
+        upid = pve.rollback_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype)
         await log_action(db, user.id, "snapshot_rollback", resource.resource_type, resource.id, {"snapshot": snapname})
         return {"status": "ok", "task": upid}
     except Exception as e:
@@ -1052,7 +1120,8 @@ async def delete_vm_snapshot(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
-        upid = proxmox_client.delete_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype)
+        pve = get_pve(resource.cluster_id)
+        upid = pve.delete_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapname, vmtype=vmtype)
         await log_action(db, user.id, "snapshot_delete", resource.resource_type, resource.id, {"snapshot": snapname})
         return {"status": "ok", "task": upid}
     except Exception as e:
@@ -1074,7 +1143,7 @@ async def vm_metrics(
         raise HTTPException(status_code=400, detail="Invalid timeframe")
     try:
         vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
-        data = proxmox_client.get_rrd_data(
+        data = get_pve(resource.cluster_id).get_rrd_data(
             resource.proxmox_node,
             resource.proxmox_vmid,
             vmtype=vmtype,
@@ -1100,7 +1169,8 @@ async def vm_tasks(
     """Get Proxmox task history for a VM."""
     resource = await _get_user_resource(db, user.id, resource_id, "vm")
     try:
-        tasks = proxmox_client.get_node_tasks(resource.proxmox_node, vmid=resource.proxmox_vmid, limit=limit)
+        pve = get_pve(resource.cluster_id)
+        tasks = pve.get_node_tasks(resource.proxmox_node, vmid=resource.proxmox_vmid, limit=limit)
         return {"tasks": tasks}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -1115,10 +1185,11 @@ async def vm_network(
     """Get network interfaces configuration for a VM, plus user's available VPCs."""
     resource = await _get_user_resource(db, user.id, resource_id, "vm")
     try:
+        pve = get_pve(resource.cluster_id)
         if resource.resource_type == "lxc":
-            config = proxmox_client.get_container_config(resource.proxmox_node, resource.proxmox_vmid)
+            config = pve.get_container_config(resource.proxmox_node, resource.proxmox_vmid)
         else:
-            config = proxmox_client.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
+            config = pve.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
         nets = {}
         for key, val in config.items():
             if key.startswith("net") and key[3:].isdigit():
@@ -1129,7 +1200,7 @@ async def vm_network(
         ip_addresses: dict[str, list[str]] = {}
         if resource.resource_type == "qemu":
             try:
-                ifaces = proxmox_client.get_agent_network_interfaces(resource.proxmox_node, resource.proxmox_vmid)
+                ifaces = pve.get_agent_network_interfaces(resource.proxmox_node, resource.proxmox_vmid)
                 for iface in ifaces:
                     name = iface.get("name", "")
                     ips = [
@@ -1248,6 +1319,7 @@ async def update_vm_network(
                         label=resource.display_name,
                         is_gateway=False,
                         owner_id=user.id,
+                        cluster_id=vpc.cluster_id,
                     )
                 )
         except Exception:
@@ -1268,23 +1340,24 @@ async def update_vm_network(
         dns = (subnet.dns_server or "1.1.1.1") if subnet else "1.1.1.1"
 
         # Check if running - NIC bridge changes require stop/start for VMs
+        pve = get_pve(resource.cluster_id)
         was_running = False
         if vmtype != "lxc":
             try:
-                st = proxmox_client.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
+                st = pve.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
                 was_running = st.get("status") == "running"
                 if was_running:
-                    upid = proxmox_client.stop_vm(resource.proxmox_node, resource.proxmox_vmid)
-                    proxmox_client.wait_for_task(resource.proxmox_node, upid, timeout=60)
+                    upid = pve.stop_vm(resource.proxmox_node, resource.proxmox_vmid)
+                    pve.wait_for_task(resource.proxmox_node, upid, timeout=60)
             except Exception:
                 pass
         else:
             try:
-                st = proxmox_client.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
+                st = pve.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
                 was_running = st.get("status") == "running"
                 if was_running:
-                    upid = proxmox_client.stop_container(resource.proxmox_node, resource.proxmox_vmid)
-                    proxmox_client.wait_for_task(resource.proxmox_node, upid, timeout=60)
+                    upid = pve.stop_container(resource.proxmox_node, resource.proxmox_vmid)
+                    pve.wait_for_task(resource.proxmox_node, upid, timeout=60)
             except Exception:
                 pass
 
@@ -1295,6 +1368,7 @@ async def update_vm_network(
                 resource.proxmox_vmid,
                 vmtype,
                 net0_val,
+                cluster_id=resource.cluster_id,
                 ip=ip_str,
                 prefix_len=prefix_len,
                 gateway=gateway,
@@ -1302,11 +1376,9 @@ async def update_vm_network(
             )
         else:
             if vmtype == "lxc":
-                proxmox_client.set_container_config(
-                    resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val}
-                )
+                pve.set_container_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val})
             else:
-                proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val})
+                pve.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val})
 
         specs = json.loads(resource.specs) if resource.specs else {}
         specs["vpc_id"] = str(vpc.id)
@@ -1319,9 +1391,9 @@ async def update_vm_network(
         if was_running:
             try:
                 if vmtype == "lxc":
-                    proxmox_client.start_container(resource.proxmox_node, resource.proxmox_vmid)
+                    pve.start_container(resource.proxmox_node, resource.proxmox_vmid)
                 else:
-                    proxmox_client.start_vm(resource.proxmox_node, resource.proxmox_vmid)
+                    pve.start_vm(resource.proxmox_node, resource.proxmox_vmid)
             except Exception:
                 pass
 
@@ -1366,9 +1438,9 @@ async def add_nic(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
     if resource.resource_type == "lxc":
-        config = proxmox_client.get_container_config(resource.proxmox_node, resource.proxmox_vmid)
+        config = get_pve(resource.cluster_id).get_container_config(resource.proxmox_node, resource.proxmox_vmid)
     else:
-        config = proxmox_client.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
+        config = get_pve(resource.cluster_id).get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
     existing = [k for k in config if k.startswith("net") and k[3:].isdigit()]
 
     # Check primary VPC mode
@@ -1454,10 +1526,11 @@ async def add_nic(
     )
 
     try:
+        pve = get_pve(resource.cluster_id)
         if resource.resource_type == "lxc":
-            proxmox_client.update_container_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
+            pve.update_container_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
         else:
-            proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
+            pve.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{net_id: net_val})
 
         # Set cloud-init ipconfig for secondary NIC (VMs only)
         if resource.resource_type == "qemu" and ip_str and prefix_len:
@@ -1465,12 +1538,12 @@ async def add_nic(
             ipconfig_val = f"ip={ip_str}/{prefix_len}"
             if gateway:
                 ipconfig_val += f",gw={gateway}"
-            proxmox_client.update_vm_config(
+            pve.update_vm_config(
                 resource.proxmox_node,
                 resource.proxmox_vmid,
                 **{ipconfig_key: ipconfig_val},
             )
-            proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
+            pve.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
 
         # Create IP reservation
         if ip_str and subnet:
@@ -1482,6 +1555,7 @@ async def add_nic(
                     label=f"{resource.display_name}-{net_id}",
                     is_gateway=False,
                     owner_id=user.id,
+                    cluster_id=vpc.cluster_id,
                 )
             )
 
@@ -1524,16 +1598,17 @@ async def remove_nic(
     net_idx = int(net_id[3:])
 
     try:
+        pve = get_pve(resource.cluster_id)
         if resource.resource_type == "lxc":
-            proxmox_client.update_container_config(resource.proxmox_node, resource.proxmox_vmid, delete=net_id)
+            pve.update_container_config(resource.proxmox_node, resource.proxmox_vmid, delete=net_id)
         else:
             # Remove NIC config
-            proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, delete=net_id)
+            pve.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, delete=net_id)
             # Remove cloud-init ipconfig for this NIC
             ipconfig_key = f"ipconfig{net_idx}"
             try:
-                proxmox_client.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, delete=ipconfig_key)
-                proxmox_client.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
+                pve.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, delete=ipconfig_key)
+                pve.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
             except Exception:
                 logger.debug("No ipconfig%d to remove", net_idx)
 
@@ -1604,8 +1679,9 @@ async def get_instance_config(
     user_keys = {k.public_key.strip(): str(k.id) for k in user_keys_result.scalars().all()}
 
     try:
+        pve = get_pve(resource.cluster_id)
         if resource.resource_type == "qemu":
-            config = proxmox_client.get_vm_config(node, vmid)
+            config = pve.get_vm_config(node, vmid)
             result["username"] = config.get("ciuser")
             result["password_set"] = bool(config.get("cipassword"))
             raw_keys = config.get("sshkeys", "")
@@ -1625,7 +1701,10 @@ async def get_instance_config(
                     if part.startswith("ip="):
                         result["ip_address"] = part[3:]
         elif resource.resource_type == "lxc":
-            config = proxmox_client.get_container_config(node, vmid)
+            config = pve.get_container_config(node, vmid)
+            # Read username from stored specs (LXC has no cloud-init ciuser)
+            specs = json.loads(resource.specs) if resource.specs else {}
+            result["username"] = specs.get("ci_user")
             result["hostname"] = config.get("hostname") or None
             result["dns_domain"] = config.get("searchdomain") or None
             result["dns_server"] = config.get("nameserver") or None
@@ -1676,11 +1755,21 @@ async def update_instance_config(
     if body.ssh_key_ids is not None:
         resolved_keys = await _resolve_ssh_keys(db, user.id, body.ssh_key_ids) if body.ssh_key_ids else []
 
+    # For LXC: persist username in resource specs so it survives round-trips
+    if resource.resource_type == "lxc" and body.username is not None:
+        specs = json.loads(resource.specs) if resource.specs else {}
+        if body.username:
+            specs["ci_user"] = body.username
+        else:
+            specs.pop("ci_user", None)
+        resource.specs = json.dumps(specs)
+
     try:
         _apply_instance_config(
             node,
             vmid,
             resource.resource_type,
+            cluster_id=resource.cluster_id,
             username=body.username,
             password=body.password,
             hostname=body.hostname,
@@ -1727,7 +1816,7 @@ async def list_available_backup_storages(
 ):
     """Admin-only: list all Proxmox storages that support backups."""
     try:
-        storages = proxmox_client.get_storage_list()
+        storages = get_pve().get_storage_list()
         result = []
         for s in storages:
             if "backup" in s.get("content", ""):
@@ -1757,12 +1846,13 @@ async def vm_backups(
 
     # Scan all PVE backup-capable storages (including PBS-type)
     try:
-        storages = proxmox_client.get_storage_list()
+        pve = get_pve(resource.cluster_id)
+        storages = pve.get_storage_list()
         for s in storages:
             if "backup" not in s.get("content", ""):
                 continue
             try:
-                contents = proxmox_client.get_storage_content(s.get("node", resource.proxmox_node), s["storage"])
+                contents = pve.get_storage_content(s.get("node", resource.proxmox_node), s["storage"])
                 is_pbs = s.get("type") == "pbs"
                 for item in contents:
                     if item.get("content") != "backup":
@@ -1822,13 +1912,14 @@ async def create_vm_backup(
     user_tag = f"[paws:{user.id}]"
     current_count = 0
     try:
-        storages = proxmox_client.get_storage_list()
+        pve = get_pve(resource.cluster_id)
+        storages = pve.get_storage_list()
         for st in storages:
             if "backup" not in st.get("content", ""):
                 continue
             try:
                 node = st.get("node") or resource.proxmox_node
-                contents = proxmox_client.get_storage_content(node, st["storage"])
+                contents = pve.get_storage_content(node, st["storage"])
                 for item in contents:
                     if item.get("content") == "backup" and user_tag in (item.get("notes", "") or ""):
                         current_count += 1
@@ -1868,7 +1959,7 @@ async def create_vm_backup(
         if body.notes:
             auto_note = f"{auto_note} | {body.notes}"
         kwargs["notes-template"] = auto_note
-        upid = proxmox_client.create_backup(resource.proxmox_node, resource.proxmox_vmid, **kwargs)
+        upid = get_pve(resource.cluster_id).create_backup(resource.proxmox_node, resource.proxmox_vmid, **kwargs)
         await log_action(db, user.id, "vm_backup", "vm", resource.id, {"storage": body.storage})
         return {"status": "ok", "task": upid}
     except Exception as e:
@@ -1895,7 +1986,7 @@ async def delete_vm_backup(
     resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
     try:
-        proxmox_client.delete_storage_content(resource.proxmox_node, body.storage, body.volid)
+        get_pve(resource.cluster_id).delete_storage_content(resource.proxmox_node, body.storage, body.volid)
         await log_action(db, user.id, "backup_delete", "vm", resource.id, {"volid": body.volid})
         return {"status": "deleted"}
     except Exception as e:
@@ -1920,14 +2011,15 @@ async def restore_vm_backup(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
+        pve = get_pve(resource.cluster_id)
         if vmtype == "lxc":
-            upid = proxmox_client.restore_ct_backup(
+            upid = pve.restore_ct_backup(
                 resource.proxmox_node,
                 resource.proxmox_vmid,
                 body.volid,
             )
         else:
-            upid = proxmox_client.restore_vm_backup(
+            upid = pve.restore_vm_backup(
                 resource.proxmox_node,
                 resource.proxmox_vmid,
                 body.volid,
@@ -1971,7 +2063,7 @@ async def list_backup_files(
             body.volid,
             body.filepath or "/",
         )
-        files = proxmox_client.list_backup_files(
+        files = get_pve(resource.cluster_id).list_backup_files(
             resource.proxmox_node,
             body.storage,
             body.volid,
@@ -2002,7 +2094,7 @@ async def download_backup_file(
     resource = await _get_user_resource(db, user.id, resource_id, "vm")
 
     try:
-        data = proxmox_client.download_backup_file(
+        data = get_pve(resource.cluster_id).download_backup_file(
             resource.proxmox_node,
             body.storage,
             body.volid,
@@ -2071,20 +2163,19 @@ async def create_container(
     await db.commit()
 
     try:
+        pve = get_pve(body.cluster_id)
         if body.template_vmid:
             # Clone from CT template (same logic as VM cloning)
-            template_node = proxmox_client.find_vm_node(body.template_vmid)
+            template_node = pve.find_vm_node(body.template_vmid)
             if not template_node:
                 raise RuntimeError(f"Template VMID {body.template_vmid} not found on any node")
 
-            template_disk_storage = proxmox_client.get_container_disk_storage(template_node, body.template_vmid)
-            storage_is_shared = (
-                proxmox_client.is_storage_shared(template_disk_storage) if template_disk_storage else False
-            )
+            template_disk_storage = pve.get_container_disk_storage(template_node, body.template_vmid)
+            storage_is_shared = pve.is_storage_shared(template_disk_storage) if template_disk_storage else False
             use_full_clone = not storage_is_shared
             needs_migration = template_node != node
 
-            upid = proxmox_client.clone_container(
+            upid = pve.clone_container(
                 node=template_node,
                 source_vmid=body.template_vmid,
                 new_vmid=new_vmid,
@@ -2096,7 +2187,7 @@ async def create_container(
             clone_node = template_node
         else:
             # Create from ostemplate tarball
-            upid = proxmox_client.create_container(
+            upid = pve.create_container(
                 node=node,
                 vmid=new_vmid,
                 hostname=body.name,
@@ -2110,6 +2201,9 @@ async def create_container(
             clone_node = node
 
         # Create the resource record
+        ct_specs: dict = {"cores": body.cores, "memory_mb": body.memory_mb, "disk_gb": body.disk_gb}
+        if body.ci_user:
+            ct_specs["ci_user"] = body.ci_user
         resource = Resource(
             owner_id=user.id,
             resource_type="lxc",
@@ -2117,7 +2211,8 @@ async def create_container(
             proxmox_vmid=new_vmid,
             proxmox_node=clone_node,
             status="provisioning",
-            specs=json.dumps({"cores": body.cores, "memory_mb": body.memory_mb, "disk_gb": body.disk_gb}),
+            cluster_id=body.cluster_id,
+            specs=json.dumps(ct_specs),
         )
         db.add(resource)
         vmid_result = await db.execute(select(VMIDPool).where(VMIDPool.vmid == new_vmid))
@@ -2137,8 +2232,8 @@ async def create_container(
         # Migrate to target node if cloned on a different node
         if body.template_vmid and needs_migration:
             try:
-                proxmox_client.wait_for_task(clone_node, upid, timeout=120)
-                proxmox_client.migrate_container(clone_node, new_vmid, target=node, online=False)
+                pve.wait_for_task(clone_node, upid, timeout=120)
+                pve.migrate_container(clone_node, new_vmid, target=node, online=False)
                 resource.proxmox_node = node
                 await db.commit()
             except Exception:
@@ -2146,7 +2241,7 @@ async def create_container(
         else:
             # Wait for create/clone to finish before reconfiguring
             try:
-                proxmox_client.wait_for_task(clone_node, upid, timeout=120)
+                pve.wait_for_task(clone_node, upid, timeout=120)
             except Exception:
                 pass
 
@@ -2156,7 +2251,7 @@ async def create_container(
         # Reconfigure specs and config after clone
         if body.template_vmid:
             try:
-                proxmox_client.set_container_config(
+                pve.set_container_config(
                     resource.proxmox_node,
                     new_vmid,
                     cores=body.cores,
@@ -2166,6 +2261,8 @@ async def create_container(
                     resource.proxmox_node,
                     new_vmid,
                     "lxc",
+                    cluster_id=body.cluster_id,
+                    username=body.ci_user or None,
                     password=body.ci_password,
                     hostname=body.hostname,
                     dns_server=body.dns_server,
@@ -2228,7 +2325,7 @@ async def list_containers(
         }
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
             try:
-                live = proxmox_client.get_container_status(r.proxmox_node, r.proxmox_vmid)
+                live = await _get_live_status_cached(r)
                 ct_data["live_status"] = live.get("status")
             except Exception:
                 ct_data["live_status"] = "unknown"
@@ -2257,7 +2354,7 @@ async def get_container(
     }
     if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
         try:
-            live = proxmox_client.get_container_status(r.proxmox_node, r.proxmox_vmid)
+            live = await _get_live_status_cached(r)
             ct_data["live_status"] = live.get("status")
         except Exception:
             ct_data["live_status"] = "unknown"
@@ -2274,10 +2371,11 @@ async def container_action(
     resource = await _get_user_resource(db, user.id, resource_id, "lxc", min_group_perm="operate")
     node, vmid = resource.proxmox_node, resource.proxmox_vmid
 
+    pve = get_pve(resource.cluster_id)
     actions = {
-        "start": proxmox_client.start_container,
-        "stop": proxmox_client.stop_container,
-        "shutdown": proxmox_client.shutdown_container,
+        "start": pve.start_container,
+        "stop": pve.stop_container,
+        "shutdown": pve.shutdown_container,
     }
     if body.action not in actions:
         raise HTTPException(status_code=400, detail=f"Invalid action: {body.action}")
@@ -2292,6 +2390,7 @@ async def container_action(
     try:
         upid = actions[body.action](node, vmid)
         await log_action(db, user.id, f"container_{body.action}", "lxc", resource.id)
+        await _invalidate_vm_status(resource)
         return {"status": "ok", "task": upid}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -2304,12 +2403,13 @@ async def delete_container(
     user: User = Depends(get_current_active_user),
 ):
     resource = await _get_user_resource(db, user.id, resource_id, "lxc", min_group_perm="admin")
+    pve = get_pve(resource.cluster_id)
     try:
-        proxmox_client.stop_container(resource.proxmox_node, resource.proxmox_vmid)
+        pve.stop_container(resource.proxmox_node, resource.proxmox_vmid)
     except Exception:
         pass
     try:
-        proxmox_client.delete_container(resource.proxmox_node, resource.proxmox_vmid)
+        pve.delete_container(resource.proxmox_node, resource.proxmox_vmid)
     except Exception:
         pass
 
@@ -2539,7 +2639,7 @@ async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dic
             # unused config entries before deletion so PVE won't touch them.
             # If removal fails, block deletion to protect user data.
             try:
-                config = proxmox_client.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
+                config = get_pve(resource.cluster_id).get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
                 for ov in orphan_vols:
                     if ov.proxmox_volid:
                         unused_slot = None
@@ -2566,18 +2666,19 @@ async def _terminate_vm(db: AsyncSession, user: User, resource: Resource) -> dic
             await db.flush()
 
     is_lxc = resource.resource_type == "lxc"
+    pve = get_pve(resource.cluster_id)
     try:
         if is_lxc:
-            proxmox_client.stop_container(resource.proxmox_node, resource.proxmox_vmid)
+            pve.stop_container(resource.proxmox_node, resource.proxmox_vmid)
         else:
-            proxmox_client.stop_vm(resource.proxmox_node, resource.proxmox_vmid)
+            pve.stop_vm(resource.proxmox_node, resource.proxmox_vmid)
     except Exception:
         pass
     try:
         if is_lxc:
-            proxmox_client.delete_container(resource.proxmox_node, resource.proxmox_vmid)
+            pve.delete_container(resource.proxmox_node, resource.proxmox_vmid)
         else:
-            proxmox_client.delete_vm(resource.proxmox_node, resource.proxmox_vmid)
+            pve.delete_vm(resource.proxmox_node, resource.proxmox_vmid)
     except Exception:
         pass
 
@@ -2613,19 +2714,46 @@ def _get_live_status(resource: Resource) -> dict:
     """Get live status from Proxmox, dispatching to correct API based on type.
     Falls back to cluster lookup if the stored node is stale (post-migration)."""
     node, vmid = resource.proxmox_node, resource.proxmox_vmid
+    pve = get_pve(resource.cluster_id)
     try:
         if resource.resource_type == "lxc":
-            return proxmox_client.get_container_status(node, vmid)
-        return proxmox_client.get_vm_status(node, vmid)
+            return pve.get_container_status(node, vmid)
+        return pve.get_vm_status(node, vmid)
     except Exception:
         # Node may be stale after migration - look up current node
-        actual_node = proxmox_client.find_vm_node(vmid)
+        actual_node = pve.find_vm_node(vmid)
         if actual_node and actual_node != node:
             resource.proxmox_node = actual_node
             if resource.resource_type == "lxc":
-                return proxmox_client.get_container_status(actual_node, vmid)
-            return proxmox_client.get_vm_status(actual_node, vmid)
+                return pve.get_container_status(actual_node, vmid)
+            return pve.get_vm_status(actual_node, vmid)
         raise
+
+
+# Keys the VM/LXC live-status cache uses. TTL is short (5s) so user-visible
+# state still reflects reality without hammering PVE on every list page load.
+_VM_STATUS_TTL_SECONDS = 5
+
+
+def _vm_status_cache_key(resource: Resource) -> str:
+    cluster = resource.cluster_id or "default"
+    return f"vm_status:{cluster}:{resource.proxmox_vmid}"
+
+
+async def _get_live_status_cached(resource: Resource) -> dict:
+    """Async, Redis-cached wrapper around :func:`_get_live_status`."""
+    key = _vm_status_cache_key(resource)
+
+    async def _produce() -> dict:
+        # _get_live_status is sync; run in a worker thread so we don't block the loop
+        return await asyncio.to_thread(_get_live_status, resource)
+
+    return await cached_call(key, _VM_STATUS_TTL_SECONDS, _produce)
+
+
+async def _invalidate_vm_status(resource: Resource) -> None:
+    """Drop the cached live status so the next read hits PVE."""
+    await cache_delete(_vm_status_cache_key(resource))
 
 
 async def _resolve_vpc_networking(
@@ -2663,10 +2791,11 @@ async def _resolve_vpc_networking(
         # No VPC - set NIC to vmbr0 disconnected
         try:
             net0_val = _build_net0(vmtype, "vmbr0", link_down=True)
+            pve = get_pve(resource.cluster_id)
             if vmtype == "lxc":
-                proxmox_client.set_container_config(node, vmid, net0=net0_val)
+                pve.set_container_config(node, vmid, net0=net0_val)
             else:
-                proxmox_client.update_vm_config(node, vmid, net0=net0_val)
+                pve.update_vm_config(node, vmid, net0=net0_val)
         except Exception:
             logger.warning("Failed to set disconnected NIC for %s/%s", node, vmid, exc_info=True)
         return
@@ -2711,6 +2840,7 @@ async def _resolve_vpc_networking(
                         label=resource.display_name,
                         is_gateway=False,
                         owner_id=user.id,
+                        cluster_id=vpc.cluster_id,
                     )
                 )
         except Exception:
@@ -2733,6 +2863,7 @@ async def _resolve_vpc_networking(
             vmid,
             vmtype,
             net0_val,
+            cluster_id=resource.cluster_id,
             ip=ip_str,
             prefix_len=prefix_len,
             gateway=gateway,
@@ -2798,19 +2929,20 @@ def _do_action(resource: Resource, action: str, **kwargs) -> str:
     if action in ("start", "reboot"):
         _enforce_network_safety(resource)
 
+    pve = get_pve(resource.cluster_id)
     actions_vm = {
-        "start": proxmox_client.start_vm,
-        "stop": proxmox_client.stop_vm,
-        "shutdown": proxmox_client.shutdown_vm,
-        "reboot": proxmox_client.reboot_vm,
-        "resume": proxmox_client.resume_vm,
+        "start": pve.start_vm,
+        "stop": pve.stop_vm,
+        "shutdown": pve.shutdown_vm,
+        "reboot": pve.reboot_vm,
+        "resume": pve.resume_vm,
     }
     actions_lxc = {
-        "start": proxmox_client.start_container,
-        "stop": proxmox_client.stop_container,
-        "shutdown": proxmox_client.shutdown_container,
-        "reboot": lambda n, v: proxmox_client.api.nodes(n).lxc(v).status.reboot.post(),
-        "resume": lambda n, v: proxmox_client.api.nodes(n).lxc(v).status.resume.post(),
+        "start": pve.start_container,
+        "stop": pve.stop_container,
+        "shutdown": pve.shutdown_container,
+        "reboot": lambda n, v: pve.api.nodes(n).lxc(v).status.reboot.post(),
+        "resume": lambda n, v: pve.api.nodes(n).lxc(v).status.resume.post(),
     }
     fn = (actions_lxc if is_lxc else actions_vm).get(action)
     if not fn:
@@ -2827,10 +2959,11 @@ def _enforce_network_safety(resource: Resource) -> None:
     node, vmid = resource.proxmox_node, resource.proxmox_vmid
     is_lxc = resource.resource_type == "lxc"
     try:
+        pve = get_pve(resource.cluster_id)
         if is_lxc:
-            config = proxmox_client.get_container_config(node, vmid)
+            config = pve.get_container_config(node, vmid)
         else:
-            config = proxmox_client.get_vm_config(node, vmid)
+            config = pve.get_vm_config(node, vmid)
         net0 = str(config.get("net0", ""))
         if not net0:
             return

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic_settings import BaseSettings
 
 
@@ -17,14 +19,6 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
-    # Proxmox
-    proxmox_host: str = ""
-    proxmox_port: int = 8006
-    proxmox_token_id: str = ""
-    proxmox_token_secret: str = ""
-    proxmox_verify_ssl: bool = False
-    proxmox_password: str = ""  # PVE user password (required for xterm.js terminal)
-
     # Auth modes
     local_auth_enabled: bool = True
     oauth_enabled: bool = True
@@ -41,7 +35,9 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:5173"
 
-    # Default admin account (created on first startup if no admin exists)
+    # Default admin account (created on first startup if no admin exists and
+    # the setup wizard is skipped). When using the setup wizard (/setup) these
+    # values are ignored - the wizard creates the admin account interactively.
     default_admin_username: str = "admin"
     default_admin_email: str = "admin@paws.local"
     default_admin_password: str = "changeme"
@@ -54,22 +50,13 @@ class Settings(BaseSettings):
     password_require_special: bool = True
     password_history_count: int = 5
 
-    # S3 Storage (Ceph RadosGW)
+    # S3 Storage (Ceph RadosGW) - fallback only; prefer Admin UI > Connections
     s3_endpoint_url: str = "http://localhost:7480"
     s3_access_key: str = ""
     s3_secret_key: str = ""
     s3_region: str = "us-east-1"
 
-    # Proxmox Backup Server (PBS)
-    pbs_host: str = ""
-    pbs_port: int = 8007
-    pbs_token_id: str = "root@pam!paws"
-    pbs_token_secret: str = ""
-    pbs_fingerprint: str = ""  # PBS TLS cert fingerprint for PVE storage config
-    pbs_datastore: str = "backups"
-    pbs_verify_ssl: bool = False
-
-    model_config = {"env_prefix": "PAWS_", "env_file": [".env", "../.env"]}
+    model_config = {"env_prefix": "PAWS_", "env_file": [".env", "../.env"], "extra": "ignore"}
 
     @property
     def cors_origin_list(self) -> list[str]:

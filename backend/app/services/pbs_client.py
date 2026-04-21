@@ -1,6 +1,7 @@
 """Proxmox Backup Server (PBS) client service.
 
 Wraps the PBS REST API for namespace management, backup listing, and usage queries.
+Supports multiple clusters via ClusterRegistry.
 """
 
 import logging
@@ -8,35 +9,54 @@ from typing import Any
 
 import httpx
 
-from app.core.config import settings
-
 logger = logging.getLogger(__name__)
 
 
 class PBSClient:
-    """PBS REST API client - singleton."""
+    """PBS REST API client for a single cluster."""
 
-    _instance: "PBSClient | None" = None
-
-    def __new__(cls) -> "PBSClient":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    def __init__(
+        self,
+        host: str = "",
+        port: int = 8007,
+        token_id: str = "root@pam!paws",
+        token_secret: str = "",
+        fingerprint: str = "",
+        datastore: str = "backups",
+        verify_ssl: bool = False,
+        cluster_name: str = "default",
+    ) -> None:
+        self.cluster_name = cluster_name
+        self._host = host
+        self._port = port
+        self._token_id = token_id
+        self._token_secret = token_secret
+        self._fingerprint = fingerprint
+        self._datastore = datastore
+        self._verify_ssl = verify_ssl
 
     @property
     def configured(self) -> bool:
-        return bool(settings.pbs_host)
+        return bool(self._host)
+
+    @property
+    def datastore(self) -> str:
+        return self._datastore
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
 
     @property
     def _base_url(self) -> str:
-        return f"https://{settings.pbs_host}:{settings.pbs_port}/api2/json"
+        return f"https://{self._host}:{self._port}/api2/json"
 
     @property
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"PBSAPIToken={settings.pbs_token_id}:{settings.pbs_token_secret}"}
+        return {"Authorization": f"PBSAPIToken={self._token_id}:{self._token_secret}"}
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        async with httpx.AsyncClient(verify=settings.pbs_verify_ssl, timeout=30) as client:
+        async with httpx.AsyncClient(verify=self._verify_ssl, timeout=30) as client:
             r = await client.request(method, f"{self._base_url}{path}", headers=self._auth_headers, **kwargs)
             r.raise_for_status()
             data = r.json()
@@ -44,7 +64,7 @@ class PBSClient:
 
     async def _stream_request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Return a streaming response (caller must close)."""
-        client = httpx.AsyncClient(verify=settings.pbs_verify_ssl, timeout=120)
+        client = httpx.AsyncClient(verify=self._verify_ssl, timeout=120)
         r = await client.send(
             client.build_request(method, f"{self._base_url}{path}", headers=self._auth_headers, **kwargs),
             stream=True,
@@ -239,4 +259,17 @@ class PBSClient:
         )
 
 
-pbs_client = PBSClient()
+class _DefaultPBSProxy:
+    """Lazy proxy that delegates to the default cluster's PBSClient."""
+
+    def __getattr__(self, name: str) -> Any:
+        from app.services.cluster_registry import cluster_registry
+
+        return getattr(cluster_registry.get_pbs(), name)
+
+    def __repr__(self) -> str:
+        return "<PBSClient proxy (default cluster)>"
+
+
+# Backward-compatible alias - delegates to default cluster via proxy
+pbs_client: PBSClient = _DefaultPBSProxy()  # type: ignore[assignment]

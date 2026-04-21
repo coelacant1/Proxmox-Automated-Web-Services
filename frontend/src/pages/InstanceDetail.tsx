@@ -29,6 +29,7 @@ interface Instance {
   live_status?: string;
   proxmox_vmid: number;
   proxmox_node: string;
+  cluster_id?: string;
   specs: Record<string, unknown>;
   created_at: string;
   [key: string]: unknown;
@@ -128,6 +129,7 @@ export default function InstanceDetail() {
   const [ipAddresses, setIpAddresses] = useState<Record<string, string[]>>({});
   const [showAddNic, setShowAddNic] = useState(false);
   const [addNicVpc, setAddNicVpc] = useState('');
+  const [networkLoading, setNetworkLoading] = useState(false);
 
   // Notes
   const [notes, setNotes] = useState('');
@@ -628,6 +630,7 @@ export default function InstanceDetail() {
 
   const handleNetworkUpdate = async () => {
     if (!id) return;
+    setNetworkLoading(true);
     try {
       const res = await api.put(`/api/compute/vms/${id}/network`, netForm);
       setShowNetModal(false);
@@ -636,6 +639,8 @@ export default function InstanceDetail() {
       toast(msg, res.data?.restarted ? 'warning' : 'success');
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Network update failed', 'error');
+    } finally {
+      setNetworkLoading(false);
     }
   };
 
@@ -908,6 +913,9 @@ export default function InstanceDetail() {
                 <Stat label="Created" value={new Date(inst.created_at).toLocaleString()} />
                 <Stat label="VMID" value={String(inst.proxmox_vmid)} />
                 <Stat label="Node" value={inst.proxmox_node} />
+                {inst.cluster_id && inst.cluster_id !== 'default' && (
+                  <Stat label="Cluster" value={inst.cluster_id} />
+                )}
               </div>
             </CardContent>
           </Card>
@@ -1763,8 +1771,8 @@ export default function InstanceDetail() {
             </div>
             <p className="text-xs text-paws-text-dim">
               {inst?.resource_type === 'lxc'
-                ? 'LXC containers support hostname, password, DNS, and SSH keys.'
-                : 'VM changes are applied via cloud-init. A reboot may be required for changes to take effect.'}
+                ? 'SSH keys are set in the container config for root. If a username is set, PAWS will also inject keys for that user (container must be running).'
+                : 'VM changes are applied via cloud-init. SSH keys are injected for the configured username. A reboot may be required for changes to take effect.'}
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setShowConfig(false)}>Cancel</Button>
@@ -1916,8 +1924,8 @@ export default function InstanceDetail() {
                     <p className="text-sm text-paws-text-dim">No VPCs available. Create a VPC first.</p>
                   )}
                   <p className="text-xs text-paws-text-dim">The instance should be stopped before changing network. It will be restarted automatically.</p>
-                  <Button onClick={handleNetworkUpdate} variant="primary" className="w-full" disabled={!netForm.vpc_id}>
-                    Update Network
+                  <Button onClick={handleNetworkUpdate} variant="primary" className="w-full" disabled={!netForm.vpc_id || networkLoading}>
+                    {networkLoading ? 'Updating Network...' : 'Update Network'}
                   </Button>
                 </div>
 
@@ -1932,12 +1940,15 @@ export default function InstanceDetail() {
                           variant: 'danger',
                           confirmLabel: 'Remove',
                           onConfirm: async () => {
+                            setNetworkLoading(true);
                             try {
                               await api.delete(`/api/compute/vms/${id}/network/nics/${nicKey}`);
                               toast(`Interface ${nicKey} removed`, 'success');
                               refreshNetwork();
                             } catch (e: any) {
                               toast(e.response?.data?.detail || 'Failed to remove NIC', 'error');
+                            } finally {
+                              setNetworkLoading(false);
                             }
                             setConfirmDialog(null);
                             setSelectedNic(null);
@@ -1974,8 +1985,9 @@ export default function InstanceDetail() {
             <p className="text-sm text-paws-text-dim">No VPCs available.</p>
           )}
           <p className="text-xs text-paws-text-dim">The instance should be stopped before adding a NIC.</p>
-          <Button variant="primary" className="w-full" disabled={!addNicVpc}
+          <Button variant="primary" className="w-full" disabled={!addNicVpc || networkLoading}
             onClick={async () => {
+              setNetworkLoading(true);
               try {
                 await api.post(`/api/compute/vms/${id}/network/nics`, { vpc_id: addNicVpc });
                 setShowAddNic(false);
@@ -1983,9 +1995,11 @@ export default function InstanceDetail() {
                 toast('Network interface added', 'success');
               } catch (err: any) {
                 toast(err?.response?.data?.detail || 'Failed to add NIC', 'error');
+              } finally {
+                setNetworkLoading(false);
               }
             }}>
-            Add NIC
+            {networkLoading ? 'Adding NIC...' : 'Add NIC'}
           </Button>
         </div>
       </Modal>

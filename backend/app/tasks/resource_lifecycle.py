@@ -24,7 +24,7 @@ async def _enforce_lifecycle():
 
     from app.core.database import async_session_factory
     from app.models.models import Resource, SystemSetting, User
-    from app.services.proxmox_client import proxmox_client
+    from app.services.proxmox_client import get_pve
 
     async with async_session_factory() as db:
         result = await db.execute(
@@ -68,10 +68,11 @@ async def _enforce_lifecycle():
                 if last_access and last_access < cutoff:
                     try:
                         if r.proxmox_vmid and r.proxmox_node:
+                            pve = get_pve(r.cluster_id)
                             if r.resource_type == "lxc":
-                                proxmox_client.stop_container(r.proxmox_node, r.proxmox_vmid)
+                                pve.stop_container(r.proxmox_node, r.proxmox_vmid)
                             else:
-                                proxmox_client.shutdown_vm(r.proxmox_node, r.proxmox_vmid)
+                                pve.shutdown_vm(r.proxmox_node, r.proxmox_vmid)
                             r.status = "stopped"
                             shutdown_count += 1
                             log.info(
@@ -108,10 +109,11 @@ async def _enforce_lifecycle():
                 if last_access and last_access < cutoff:
                     try:
                         if r.proxmox_vmid and r.proxmox_node:
+                            pve = get_pve(r.cluster_id)
                             if r.resource_type == "lxc":
-                                proxmox_client.delete_container(r.proxmox_node, r.proxmox_vmid)
+                                pve.delete_container(r.proxmox_node, r.proxmox_vmid)
                             else:
-                                proxmox_client.delete_vm(r.proxmox_node, r.proxmox_vmid)
+                                pve.delete_vm(r.proxmox_node, r.proxmox_vmid)
                         r.status = "destroyed"
                         destroy_count += 1
                         log.info(
@@ -190,7 +192,7 @@ async def _enforce_quota():
 
     from app.core.database import async_session_factory
     from app.models.models import Resource, User, UserQuota
-    from app.services.proxmox_client import proxmox_client
+    from app.services.proxmox_client import get_pve
 
     async with async_session_factory() as db:
         # Get all users with running resources
@@ -276,10 +278,11 @@ async def _enforce_quota():
             for r in running:
                 try:
                     if r.proxmox_vmid and r.proxmox_node:
+                        pve = get_pve(r.cluster_id)
                         if r.resource_type == "lxc":
-                            proxmox_client.stop_container(r.proxmox_node, r.proxmox_vmid)
+                            pve.stop_container(r.proxmox_node, r.proxmox_vmid)
                         else:
-                            proxmox_client.shutdown_vm(r.proxmox_node, r.proxmox_vmid)
+                            pve.shutdown_vm(r.proxmox_node, r.proxmox_vmid)
                     r.status = "stopped"
                     shutdown_count += 1
                     log.info("Over-quota shutdown: %s (VMID %s, user %s)", r.display_name, r.proxmox_vmid, username)

@@ -1,4 +1,4 @@
-"""Tests for VPC and subnet management."""
+"""Tests for VPC management (single subnet per network)."""
 
 from unittest.mock import patch
 
@@ -30,13 +30,15 @@ async def test_list_vpcs_empty(auth_client: AsyncClient):
 @pytest.mark.asyncio
 async def test_create_and_list_vpc(auth_client: AsyncClient):
     with _mock_sdn():
-        r = await auth_client.post("/api/vpcs/", json={"name": "my-vpc", "cidr": "10.0.0.0/16"})
+        r = await auth_client.post("/api/vpcs/", json={"name": "my-vpc", "cidr": "10.0.0.0/24"})
     assert r.status_code == 201
     data = r.json()
     assert data["name"] == "my-vpc"
-    assert data["cidr"] == "10.0.0.0/16"
+    assert data["cidr"] == "10.0.0.0/24"
     assert data["status"] == "active"
-    assert data["subnets"] == []
+    # Single subnet auto-created with same CIDR as the network
+    assert len(data["subnets"]) == 1
+    assert data["subnets"][0]["cidr"] == "10.0.0.0/24"
 
     vpcs = await auth_client.get("/api/vpcs/")
     assert len(vpcs.json()) == 1
@@ -50,6 +52,7 @@ async def test_get_vpc(auth_client: AsyncClient):
     r = await auth_client.get(f"/api/vpcs/{vpc_id}")
     assert r.status_code == 200
     assert r.json()["name"] == "get-vpc"
+    assert len(r.json()["subnets"]) == 1
 
 
 @pytest.mark.asyncio
@@ -67,7 +70,7 @@ async def test_cannot_delete_default_vpc(auth_client: AsyncClient, db_session):
     from app.models.models import VPC
     from tests.conftest import TEST_USER_ID
 
-    vpc = VPC(owner_id=TEST_USER_ID, name="default-vpc", cidr="10.0.0.0/16", is_default=True)
+    vpc = VPC(owner_id=TEST_USER_ID, name="default-vpc", cidr="10.0.0.0/24", is_default=True)
     db_session.add(vpc)
     await db_session.commit()
     await db_session.refresh(vpc)
@@ -87,42 +90,14 @@ async def test_duplicate_vpc_name(auth_client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_create_subnet(auth_client: AsyncClient):
+async def test_cidr_uniqueness(auth_client: AsyncClient):
+    """Two networks cannot have overlapping CIDRs."""
     with _mock_sdn():
-        vpc = await auth_client.post("/api/vpcs/", json={"name": "subnet-vpc"})
-        vpc_id = vpc.json()["id"]
-
-        r = await auth_client.post(
-            f"/api/vpcs/{vpc_id}/subnets",
-            json={
-                "name": "web-subnet",
-                "cidr": "10.0.1.0/24",
-                "gateway": "10.0.1.1",
-            },
-        )
-    assert r.status_code == 201
-    assert r.json()["name"] == "web-subnet"
-
-    # Verify subnet appears in VPC
-    vpc_data = await auth_client.get(f"/api/vpcs/{vpc_id}")
-    assert len(vpc_data.json()["subnets"]) == 1
-
-
-@pytest.mark.asyncio
-async def test_delete_subnet(auth_client: AsyncClient):
-    with _mock_sdn():
-        vpc = await auth_client.post("/api/vpcs/", json={"name": "del-subnet-vpc"})
-        vpc_id = vpc.json()["id"]
-        subnet = await auth_client.post(
-            f"/api/vpcs/{vpc_id}/subnets",
-            json={
-                "name": "temp",
-                "cidr": "10.0.2.0/24",
-            },
-        )
-        subnet_id = subnet.json()["id"]
-        r = await auth_client.delete(f"/api/vpcs/{vpc_id}/subnets/{subnet_id}")
-    assert r.status_code == 204
+        r1 = await auth_client.post("/api/vpcs/", json={"name": "net-a", "cidr": "10.50.0.0/24"})
+        assert r1.status_code == 201
+        r2 = await auth_client.post("/api/vpcs/", json={"name": "net-b", "cidr": "10.50.0.0/24"})
+        assert r2.status_code == 409
+        assert "overlap" in r2.json()["detail"].lower() or "unique" in r2.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

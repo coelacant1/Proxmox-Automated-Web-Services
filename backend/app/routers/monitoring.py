@@ -17,7 +17,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.models.models import Alarm, CustomMetric, Resource, User
 from app.services.audit_service import log_action
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 
@@ -91,7 +91,8 @@ async def get_resource_metrics(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        rrd_data = proxmox_client.get_rrd_data(resource.proxmox_node, resource.proxmox_vmid, vmtype, timeframe)
+        pve = get_pve(resource.cluster_id)
+        rrd_data = pve.get_rrd_data(resource.proxmox_node, resource.proxmox_vmid, vmtype, timeframe)
         return {"resource_id": resource_id, "timeframe": timeframe, "data": rrd_data}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -107,10 +108,11 @@ async def get_current_metrics(
     resource = await _get_resource(db, user.id, resource_id)
 
     try:
+        pve = get_pve(resource.cluster_id)
         if resource.resource_type == "lxc":
-            status_data = proxmox_client.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
+            status_data = pve.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
         else:
-            status_data = proxmox_client.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
+            status_data = pve.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
 
         return {
             "resource_id": resource_id,

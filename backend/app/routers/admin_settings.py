@@ -50,8 +50,27 @@ KNOWN_SETTINGS: dict[str, tuple[str, str | None]] = {
     "idle_destroy_days": ("30", "Days before idle resources are destroyed"),
     # Account Lifecycle
     "account_inactive_days": ("90", "Days before inactive accounts are purged"),
+    # SMTP / Email Notifications
+    "smtp_enabled": ("false", "Enable email notifications via SMTP"),
+    "smtp_host": ("", "SMTP server hostname"),
+    "smtp_port": ("587", "SMTP server port"),
+    "smtp_username": ("", "SMTP authentication username"),
+    "smtp_password": ("", "SMTP authentication password"),
+    "smtp_from_address": ("paws@localhost", "Sender email address"),
+    "smtp_from_name": ("PAWS", "Sender display name"),
+    "smtp_use_tls": ("true", "Use STARTTLS for SMTP connection"),
     # General
     "motd": ("", "Message of the day displayed on dashboard"),
+    # S3 Storage (Ceph RadosGW / MinIO)
+    "s3_endpoint_url": ("", "S3-compatible storage endpoint URL"),
+    "s3_access_key": ("", "S3 access key (admin/RadosGW key)"),
+    "s3_secret_key": ("", "S3 secret key (encrypted)"),
+    "s3_region": ("us-east-1", "S3 region name"),
+    # OAuth / OIDC
+    "oauth_enabled": ("false", "Enable OAuth2/OIDC login"),
+    "oauth_provider_url": ("", "OAuth2/OIDC provider URL (e.g. Authentik)"),
+    "oauth_client_id": ("", "OAuth2 client ID"),
+    "oauth_client_secret": ("", "OAuth2 client secret (encrypted)"),
 }
 
 
@@ -79,7 +98,12 @@ async def list_settings(
             seeded = True
     if seeded:
         await db.commit()
-    return sorted(existing.values(), key=lambda s: s.key)
+    # Mask encrypted values in response
+    items = sorted(existing.values(), key=lambda s: s.key)
+    for s in items:
+        if s.is_encrypted and s.value:
+            s.value = "********"
+    return items
 
 
 @router.get("/{key}", response_model=SystemSettingRead)
@@ -102,13 +126,55 @@ async def update_setting(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
+    from app.core.config_resolver import ENCRYPTED_KEYS
+
+    should_encrypt = key in ENCRYPTED_KEYS
+    stored_value = data.value
+    if should_encrypt and data.value:
+        from app.core.encryption import encrypt
+
+        stored_value = encrypt(data.value)
+
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if not setting:
-        setting = SystemSetting(key=key, value=data.value, description=None)
+        setting = SystemSetting(key=key, value=stored_value, description=None, is_encrypted=should_encrypt)
         db.add(setting)
     else:
-        setting.value = data.value
+        setting.value = stored_value
+        setting.is_encrypted = should_encrypt
     await db.commit()
     await db.refresh(setting)
+
+    # Invalidate service caches when relevant keys change
+    if key.startswith("s3_"):
+        from app.services.storage_service import storage_service
+
+        storage_service.invalidate_config()
+    elif key.startswith("oauth_"):
+        from app.services.oauth_service import oauth_service
+
+        oauth_service.invalidate_config()
+
     return setting
+
+
+@router.post("/smtp/test")
+async def send_test_email(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Send a test email to the current admin user to verify SMTP settings."""
+    from app.services.email_service import get_smtp_config, render_template, send_email
+
+    smtp_config = await get_smtp_config(db)
+    if smtp_config.get("smtp_enabled", "false").lower() != "true":
+        raise HTTPException(status_code=400, detail="SMTP is not enabled. Enable smtp_enabled first.")
+    if not smtp_config.get("smtp_host"):
+        raise HTTPException(status_code=400, detail="SMTP host is not configured.")
+
+    subject, html_body, text_body = render_template("test", {})
+    success = await send_email(admin.email, subject, html_body, text_body, smtp_config)
+    if not success:
+        raise HTTPException(status_code=502, detail="Failed to send test email. Check SMTP settings and server logs.")
+    return {"status": "ok", "sent_to": admin.email}

@@ -95,6 +95,7 @@ class User(Base):
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tier_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("user_tiers.id"), nullable=True)
+    email_notifications: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -180,13 +181,15 @@ class Resource(Base):
     """Base resource tracking table - every VM, container, network, etc. is a resource owned by a user."""
 
     __tablename__ = "resources"
+    __table_args__ = (UniqueConstraint("cluster_id", "proxmox_vmid", name="uq_resource_cluster_vmid"),)
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), index=True)
     project_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("projects.id"), nullable=True, index=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     resource_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)  # vm, lxc, network, storage
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    proxmox_vmid: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)  # for VMs/containers
+    proxmox_vmid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     proxmox_node: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(50), default="pending")  # pending, creating, running, stopped, error
     specs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON blob for flexible metadata
@@ -209,8 +212,10 @@ class VMIDPool(Base):
     """Tracks allocated VMIDs to prevent collisions."""
 
     __tablename__ = "vmid_pool"
+    __table_args__ = (UniqueConstraint("cluster_id", "vmid", name="uq_vmidpool_cluster_vmid"),)
 
     vmid: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", primary_key=True)
     resource_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=True)
     reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -231,9 +236,11 @@ class TemplateCatalog(Base):
     """Admin-curated catalog of Proxmox templates available to users."""
 
     __tablename__ = "template_catalog"
+    __table_args__ = (UniqueConstraint("cluster_id", "proxmox_vmid", name="uq_template_cluster_vmid"),)
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    proxmox_vmid: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
+    proxmox_vmid: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     os_type: Mapped[str | None] = mapped_column(String(50), nullable=True)  # linux, windows, bsd
@@ -279,6 +286,32 @@ class SystemSetting(Base):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)  # JSON-encoded value
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_encrypted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ClusterConnection(Base):
+    """Stored connection credentials for Proxmox VE, PBS, S3, etc."""
+
+    __tablename__ = "cluster_connections"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    conn_type: Mapped[str] = mapped_column(String(20), nullable=False)  # pve, pbs, s3
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False, default=8006)
+    token_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    token_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    console_user: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    console_password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    verify_ssl: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    extra_config: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -325,6 +358,7 @@ class SecurityGroup(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     project_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("projects.id"), nullable=True)
@@ -384,6 +418,7 @@ class Volume(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     size_gib: Mapped[int] = mapped_column(Integer, nullable=False)
     storage_pool: Mapped[str] = mapped_column(String(100), default="local-lvm")
@@ -410,9 +445,10 @@ class VPC(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     cidr: Mapped[str] = mapped_column(String(20), nullable=False)  # e.g. "10.100.0.0/16"
-    vxlan_tag: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
+    vxlan_tag: Mapped[int | None] = mapped_column(Integer, nullable=True)
     proxmox_zone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     proxmox_vnet: Mapped[str | None] = mapped_column(String(50), nullable=True)
     gateway: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -427,7 +463,10 @@ class VPC(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_vpc_owner_name"),)
+    __table_args__ = (
+        UniqueConstraint("owner_id", "name", name="uq_vpc_owner_name"),
+        UniqueConstraint("cluster_id", "vxlan_tag", name="uq_vpc_cluster_vxlan"),
+    )
 
     owner: Mapped["User"] = relationship()
     subnets: Mapped[list["Subnet"]] = relationship(back_populates="vpc", cascade="all, delete-orphan")
@@ -466,6 +505,7 @@ class IPReservation(Base):
     subnet_id: Mapped[uuid.UUID] = mapped_column(
         GUID(), ForeignKey("subnets.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     ip_address: Mapped[str] = mapped_column(String(20), nullable=False)
     resource_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=True)
     label: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -518,6 +558,7 @@ class Backup(Base):
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=False)
     owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     backup_type: Mapped[str] = mapped_column(String(20), nullable=False)  # snapshot, full, incremental
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, running, completed, failed
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -541,6 +582,7 @@ class BackupPlan(Base):
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=False)
     owner_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     schedule_cron: Mapped[str] = mapped_column(String(50), nullable=False)  # cron expression
     backup_type: Mapped[str] = mapped_column(String(20), default="snapshot")
@@ -628,6 +670,7 @@ class HealthCheck(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     resource_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("resources.id"), nullable=False, index=True)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     check_type: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     latency_ms: Mapped[float | None] = mapped_column(nullable=True)
@@ -818,9 +861,10 @@ class HAGroup(Base):
     __tablename__ = "ha_groups"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    cluster_id: Mapped[str] = mapped_column(String(100), nullable=False, default="default", index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pve_group_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    pve_group_name: Mapped[str] = mapped_column(String(100), nullable=False)
     nodes: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON array of node names
     restricted: Mapped[bool] = mapped_column(Boolean, default=False)
     nofailback: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -828,6 +872,8 @@ class HAGroup(Base):
     max_restart: Mapped[int] = mapped_column(Integer, default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("cluster_id", "pve_group_name", name="uq_ha_cluster_pvename"),)
 
 
 class TierRequest(Base):

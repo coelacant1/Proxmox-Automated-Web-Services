@@ -32,9 +32,9 @@ async def health_detailed(_: User = Depends(require_admin)):
     # Proxmox API check
     t0 = time.monotonic()
     try:
-        from app.services.proxmox_client import proxmox_client
+        from app.services.proxmox_client import get_pve
 
-        proxmox_client.get_nodes()
+        get_pve().get_nodes()
         subsystems["proxmox"] = {"status": "ok", "latency_ms": round((time.monotonic() - t0) * 1000, 1)}
     except Exception as e:
         subsystems["proxmox"] = {"status": "error", "error": str(e)}

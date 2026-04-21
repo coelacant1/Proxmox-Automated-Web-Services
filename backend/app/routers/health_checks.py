@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.models.models import HealthCheck, Resource, User
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
@@ -59,10 +59,11 @@ async def run_health_check(
 
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     try:
+        pve = get_pve(resource.cluster_id)
         if vmtype == "lxc":
-            status_data = proxmox_client.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
+            status_data = pve.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
         else:
-            status_data = proxmox_client.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
+            status_data = pve.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
 
         vm_status = status_data.get("status", "unknown")
         health = "healthy" if vm_status == "running" else "unhealthy"
@@ -72,6 +73,7 @@ async def run_health_check(
             check_type="agent",
             status=health,
             details=json.dumps({"vm_status": vm_status, "uptime": status_data.get("uptime", 0)}),
+            cluster_id=resource.cluster_id,
         )
         db.add(check)
         await db.commit()
@@ -88,6 +90,7 @@ async def run_health_check(
             check_type="agent",
             status="unhealthy",
             details=str(e),
+            cluster_id=resource.cluster_id,
         )
         db.add(check)
         await db.commit()
@@ -111,7 +114,7 @@ async def get_guest_agent_info(
         raise HTTPException(status_code=400, detail="Guest agent not available for containers")
 
     try:
-        agent_info = proxmox_client.get_agent_info(resource.proxmox_node, resource.proxmox_vmid)
+        agent_info = get_pve(resource.cluster_id).get_agent_info(resource.proxmox_node, resource.proxmox_vmid)
         return {
             "resource_id": str(resource.id),
             "agent_available": True,

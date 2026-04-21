@@ -27,6 +27,8 @@ class UserRead(BaseModel):
     role: str
     is_active: bool
     auth_provider: str
+    tier_id: uuid.UUID | None = None
+    email_notifications: bool = True
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -42,7 +44,6 @@ class QuotaRead(BaseModel):
     max_backups: int = 20
     max_backup_size_gb: int = 100
     max_networks: int = 3
-    max_subnets_per_network: int = 5
     max_elastic_ips: int = 5
 
     model_config = {"from_attributes": True}
@@ -56,6 +57,7 @@ class ResourceBase(BaseModel):
 class ResourceRead(ResourceBase):
     id: uuid.UUID
     status: str
+    cluster_id: str = "default"
     proxmox_node: str | None
     created_at: datetime
 
@@ -151,6 +153,7 @@ class SystemSettingRead(BaseModel):
     key: str
     value: str
     description: str | None
+    is_encrypted: bool = False
     updated_at: datetime
 
     model_config = {"from_attributes": True}
@@ -176,6 +179,7 @@ class ClusterStatusResponse(BaseModel):
     nodes_online: int = 0
     nodes: list[ClusterNodeStatus] = []
     quorate: bool = False
+    cached_at: int | None = None  # epoch seconds when the payload was computed
 
 
 # --- Usage ---
@@ -327,12 +331,14 @@ class SecurityGroupRuleRead(BaseModel):
 class SecurityGroupCreate(BaseModel):
     name: str
     description: str | None = None
+    cluster_id: str = "default"
 
 
 class SecurityGroupRead(BaseModel):
     id: uuid.UUID
     name: str
     description: str | None
+    cluster_id: str = "default"
     rules: list[SecurityGroupRuleRead] = []
     created_at: datetime
 
@@ -347,6 +353,7 @@ class VolumeCreate(BaseModel):
     size_gib: int
     storage_pool: str = "local-lvm"
     resource_id: uuid.UUID  # VM to create the disk on (required)
+    cluster_id: str = "default"
 
 
 class VolumeAttachRequest(BaseModel):
@@ -359,6 +366,7 @@ class VolumeRead(BaseModel):
     size_gib: int
     storage_pool: str
     status: str
+    cluster_id: str = "default"
     resource_id: uuid.UUID | None
     disk_slot: str | None
     proxmox_node: str | None
@@ -407,6 +415,7 @@ class IPReservationRead(BaseModel):
     id: uuid.UUID
     subnet_id: uuid.UUID
     ip_address: str
+    cluster_id: str = "default"
     resource_id: uuid.UUID | None = None
     label: str | None = None
     is_gateway: bool
@@ -419,14 +428,18 @@ class VPCCreate(BaseModel):
     name: str
     cidr: str | None = None  # auto-allocate if None
     gateway: str | None = None
+    snat_enabled: bool = True
+    dns_server: str | None = None
     dhcp_enabled: bool = True
     network_mode: str = "private"  # published, private, isolated
+    cluster_id: str = "default"
 
 
 class VPCRead(BaseModel):
     id: uuid.UUID
     name: str
     cidr: str
+    cluster_id: str = "default"
     vxlan_tag: int | None
     proxmox_zone: str | None
     proxmox_vnet: str | None

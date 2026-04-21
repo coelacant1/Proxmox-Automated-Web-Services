@@ -44,7 +44,7 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
 
     Returns a summary dict of what was cleaned up.
     """
-    from app.services.proxmox_client import proxmox_client
+    from app.services.proxmox_client import get_all_pve, get_pve
 
     summary: dict[str, int] = {}
 
@@ -60,18 +60,19 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
     for r in resources:
         if r.proxmox_vmid and r.proxmox_node:
             try:
+                pve = get_pve(r.cluster_id)
                 if r.resource_type == "lxc":
                     try:
-                        proxmox_client.stop_container(r.proxmox_node, r.proxmox_vmid)
+                        pve.stop_container(r.proxmox_node, r.proxmox_vmid)
                     except Exception:
                         pass
-                    proxmox_client.delete_container(r.proxmox_node, r.proxmox_vmid)
+                    pve.delete_container(r.proxmox_node, r.proxmox_vmid)
                 else:
                     try:
-                        proxmox_client.stop_vm(r.proxmox_node, r.proxmox_vmid)
+                        pve.stop_vm(r.proxmox_node, r.proxmox_vmid)
                     except Exception:
                         pass
-                    proxmox_client.delete_vm(r.proxmox_node, r.proxmox_vmid)
+                    pve.delete_vm(r.proxmox_node, r.proxmox_vmid)
             except Exception:
                 log.exception("Failed to destroy %s VMID %s for user %s", r.resource_type, r.proxmox_vmid, user_id)
     summary["proxmox_resources"] = len(resources)
@@ -80,11 +81,12 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
     user_result = await db.execute(select(User).where(User.id == user_id))
     user = user_result.scalar_one_or_none()
     if user:
-        try:
-            pool_name = proxmox_client.get_pool_name_for_user(user.username)
-            proxmox_client.delete_pool(pool_name)
-        except Exception:
-            log.debug("Pool cleanup skipped for user %s", user.username)
+        for cid, pve in get_all_pve().items():
+            try:
+                pool_name = pve.get_pool_name_for_user(user.username)
+                pve.delete_pool(pool_name)
+            except Exception:
+                log.debug("Pool cleanup skipped on cluster %s for user %s", cid, user.username)
 
     # 3. Delete volumes on Proxmox
     vol_result = await db.execute(select(Volume).where(Volume.owner_id == user_id))
@@ -94,7 +96,7 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict:
             try:
                 node = v.proxmox_node if hasattr(v, "proxmox_node") else None
                 if node:
-                    proxmox_client.delete_volume(node, v.storage, v.proxmox_volid)
+                    get_pve(v.cluster_id).delete_volume(node, v.storage, v.proxmox_volid)
             except Exception:
                 log.debug("Volume cleanup skipped for %s", v.proxmox_volid)
     summary["volumes"] = len(volumes)

@@ -2,14 +2,14 @@
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import SystemSetting, User
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/storage-pools", tags=["storage-pools"])
 
@@ -34,11 +34,12 @@ async def list_storage_pools(
 
 @router.get("/available")
 async def list_available_storage_pools(
+    cluster_id: str | None = Query(None, description="Target cluster"),
     _: User = Depends(require_admin),
 ):
     """Admin-only: list all Proxmox storages that can hold VM/container disks."""
     try:
-        storages = proxmox_client.get_storage_list()
+        storages = get_pve(cluster_id).get_storage_list()
         result = []
         for s in storages:
             content = s.get("content", "")

@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Network, Plus, Trash2, Server, Globe, Map, Edit2, Shield } from 'lucide-react';
+import { Network, Plus, Trash2, Server, Globe, Edit2, Shield } from 'lucide-react';
 import api from '../api/client';
 import {
   Button, Card, CardHeader, CardTitle, CardContent,
-  Input, Modal, Badge, EmptyState, StatusBadge, Tabs,
+  Input, Modal, Badge, EmptyState, StatusBadge, Select,
   useToast, useConfirm,
 } from '@/components/ui';
 import { cn } from '@/lib/utils';
@@ -20,6 +20,7 @@ interface VPC {
   proxmox_vnet: string | null;
   dhcp_enabled: boolean;
   network_mode?: string;
+  cluster_id?: string;
   security_group_id?: string | null;
   subnets: Subnet[];
   created_at: string;
@@ -59,14 +60,10 @@ export default function VPCs() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<VPC | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [showSubnet, setShowSubnet] = useState(false);
   const [instances, setInstances] = useState<VPCInstance[]>([]);
-  const [form, setForm] = useState({ name: '', network_mode: 'private' });
+  const [clusters, setClusters] = useState<{name: string}[]>([]);
+  const [form, setForm] = useState({ name: '', network_mode: 'private', cluster_id: '' });
   const [changingMode, setChangingMode] = useState(false);
-  const [subnetForm, setSubnetForm] = useState({
-    name: '', cidr: '', gateway: '', snat_enabled: true, dns_server: '',
-  });
-  const [detailTab, setDetailTab] = useState('details');
   const [editIpInst, setEditIpInst] = useState<VPCInstance | null>(null);
   const [newIp, setNewIp] = useState('');
 
@@ -86,6 +83,15 @@ export default function VPCs() {
   useEffect(fetchVPCs, []);
 
   useEffect(() => {
+    api.get('/api/cluster/list').then((res) => {
+      setClusters(res.data || []);
+      if (res.data?.length === 1) {
+        setForm((prev) => ({ ...prev, cluster_id: res.data![0].name }));
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     if (selected) {
       api.get(`/api/vpcs/${selected.id}/instances`).then((res) => setInstances(res.data)).catch(() => setInstances([]));
     }
@@ -93,9 +99,9 @@ export default function VPCs() {
 
   const handleCreate = async () => {
     try {
-      await api.post('/api/vpcs/', { name: form.name, network_mode: form.network_mode });
+      await api.post('/api/vpcs/', { name: form.name, network_mode: form.network_mode, cluster_id: form.cluster_id || undefined });
       setShowCreate(false);
-      setForm({ name: '', network_mode: 'private' });
+      setForm({ name: '', network_mode: 'private', cluster_id: clusters.length === 1 ? clusters[0]?.name ?? '' : '' });
       fetchVPCs();
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Failed to create network', 'error');
@@ -103,7 +109,7 @@ export default function VPCs() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!await confirm({ title: 'Delete Network', message: 'Delete this network and all its subnets?' })) return;
+    if (!await confirm({ title: 'Delete Network', message: 'Delete this network and its subnet?' })) return;
     try {
       await api.delete(`/api/vpcs/${id}`);
       if (selected?.id === id) setSelected(null);
@@ -111,39 +117,6 @@ export default function VPCs() {
       fetchVPCs();
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Failed to delete network', 'error');
-    }
-  };
-
-  const handleAddSubnet = async () => {
-    if (!selected) return;
-    const payload: Record<string, unknown> = {
-      name: subnetForm.name,
-      snat_enabled: subnetForm.snat_enabled,
-    };
-    if (subnetForm.cidr) payload.cidr = subnetForm.cidr;
-    if (subnetForm.gateway) payload.gateway = subnetForm.gateway;
-    if (subnetForm.dns_server) payload.dns_server = subnetForm.dns_server;
-    try {
-      await api.post(`/api/vpcs/${selected.id}/subnets`, payload);
-      toast('Subnet created', 'success');
-      setShowSubnet(false);
-      setSubnetForm({
-        name: '', cidr: '', gateway: '', snat_enabled: true, dns_server: '',
-      });
-      fetchVPCs();
-    } catch (e: any) {
-      toast(e?.response?.data?.detail || 'Failed to create subnet', 'error');
-    }
-  };
-
-  const handleDeleteSubnet = async (subnetId: string) => {
-    if (!selected) return;
-    try {
-      await api.delete(`/api/vpcs/${selected.id}/subnets/${subnetId}`);
-      toast('Subnet deleted', 'success');
-      fetchVPCs();
-    } catch (e: any) {
-      toast(e?.response?.data?.detail || 'Failed to delete subnet', 'error');
     }
   };
 
@@ -159,11 +132,6 @@ export default function VPCs() {
       toast(typeof d === 'string' ? d : 'Failed to change IP', 'error');
     }
   };
-
-  const detailTabs = [
-    { id: 'details', label: 'Details' },
-    { id: 'diagram', label: 'Network Diagram', icon: <Map className="h-3.5 w-3.5" /> },
-  ];
 
   return (
     <div className="space-y-6">
@@ -201,6 +169,7 @@ export default function VPCs() {
                         {(vpc.network_mode || 'private').charAt(0).toUpperCase() + (vpc.network_mode || 'private').slice(1)}
                       </Badge>
                       <StatusBadge status={vpc.status} />
+                      {clusters.length > 1 && vpc.cluster_id && <Badge variant="default">{vpc.cluster_id}</Badge>}
                     </div>
                   </div>
                 </CardContent>
@@ -213,16 +182,12 @@ export default function VPCs() {
           <div className="lg:col-span-2 space-y-4">
             {selected ? (
               <>
-                <Tabs tabs={detailTabs} activeTab={detailTab} onChange={setDetailTab} className="mb-4" />
-
-                {detailTab === 'details' && (
-                  <>
-                    <Card>
-                      <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle>{selected.name}</CardTitle>
-                          {!selected.is_default && (
-                            <Button variant="danger" size="sm" onClick={() => handleDelete(selected.id)}>
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <CardTitle>{selected.name}</CardTitle>
+                      {!selected.is_default && (
+                        <Button variant="danger" size="sm" onClick={() => handleDelete(selected.id)}>
                               <Trash2 className="h-3.5 w-3.5 mr-1" /> Delete
                             </Button>
                           )}
@@ -337,41 +302,26 @@ export default function VPCs() {
                       </Card>
                     )}
 
-                    {/* Subnets */}
+                    {/* Subnet */}
                     <Card>
                       <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle>Subnets</CardTitle>
-                          <Button size="sm" onClick={() => setShowSubnet(true)}>
-                            <Plus className="h-4 w-4 mr-1" /> Add Subnet
-                          </Button>
-                        </div>
+                        <CardTitle>Subnet</CardTitle>
                       </CardHeader>
                       <CardContent>
                         {(selected.subnets || []).length === 0 ? (
-                          <p className="text-sm text-paws-text-dim">No subnets.</p>
+                          <p className="text-sm text-paws-text-dim">No subnet configured.</p>
                         ) : (
-                          <div className="space-y-2">
-                            {selected.subnets.map((s) => (
-                              <div key={s.id} className="flex items-center justify-between py-2 border-b border-paws-border-subtle last:border-0">
-                                <div className="flex items-center gap-3">
-                                  <Globe className="h-4 w-4 text-paws-text-dim" />
-                                  <div>
-                                    <p className="text-sm font-medium text-paws-text">{s.name}</p>
-                                    <p className="text-xs font-mono text-paws-text-dim">
-                                      {s.cidr}{s.gateway ? ` · gw ${s.gateway}` : ''}
-                                    </p>
-                                  </div>
-                                  {s.is_public && <Badge variant="warning">Public</Badge>}
-                                  <Badge variant={s.snat_enabled ? 'success' : 'default'}>SNAT</Badge>
-                                  <Badge variant="info">Static IP</Badge>
-                                  <StatusBadge status={s.status} />
-                                </div>
-                                <Button variant="ghost" size="sm" onClick={() => handleDeleteSubnet(s.id)}>
-                                  <Trash2 className="h-3.5 w-3.5 text-paws-danger" />
-                                </Button>
-                              </div>
-                            ))}
+                          <div className="flex items-center gap-3 py-1">
+                            <Globe className="h-4 w-4 text-paws-text-dim" />
+                            <div>
+                              <p className="text-sm font-medium text-paws-text">{selected.subnets?.[0]?.name}</p>
+                              <p className="text-xs font-mono text-paws-text-dim">
+                                {selected.subnets?.[0]?.cidr}{selected.subnets?.[0]?.gateway ? ` · gw ${selected.subnets[0].gateway}` : ''}
+                              </p>
+                            </div>
+                            <Badge variant={selected.subnets?.[0]?.snat_enabled ? 'success' : 'default'}>SNAT</Badge>
+                            <Badge variant="info">Static IP</Badge>
+                            <StatusBadge status={selected.subnets?.[0]?.status ?? 'unknown'} />
                           </div>
                         )}
                       </CardContent>
@@ -427,122 +377,10 @@ export default function VPCs() {
                       </CardContent>
                     </Card>
                   </>
-                )}
-
-                {/* Network Diagram Tab */}
-                {detailTab === 'diagram' && (
-                  <Card>
-                    <CardHeader><CardTitle>Network Topology</CardTitle></CardHeader>
-                    <CardContent>
-                      <div className="bg-paws-bg rounded-lg p-6 min-h-[400px]">
-                        {/* VPC container */}
-                        <div className="border-2 border-paws-primary/30 rounded-xl p-4">
-                          <div className="flex items-center gap-2 mb-4">
-                            <Network className="h-5 w-5 text-paws-primary" />
-                            <span className="font-bold text-paws-text">{selected.name}</span>
-                            <span className="text-xs font-mono text-paws-text-dim">{selected.cidr}</span>
-                          </div>
-
-                          {/* Gateway */}
-                          <div className="flex justify-center mb-6">
-                            <div className="bg-paws-surface border border-paws-border rounded-lg px-4 py-2 text-center">
-                              <p className="text-xs text-paws-text-dim">Gateway</p>
-                              <p className="text-sm font-mono text-paws-text">{selected.gateway || 'Auto'}</p>
-                            </div>
-                          </div>
-
-                          {/* Subnets */}
-                          {(selected.subnets || []).length === 0 ? (
-                            <div className="text-center py-8 text-sm text-paws-text-dim">
-                              No subnets configured
-                            </div>
-                          ) : (
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              {selected.subnets.map((subnet) => {
-                                const subnetInstances = instances.filter((i) => i.subnet_id === subnet.id);
-                                const hasMatchedAny = instances.some((i) => i.subnet_id);
-                                // If no instances have subnet_id, show all instances under every subnet (or the first one)
-                                const displayInstances = subnetInstances.length > 0
-                                  ? subnetInstances
-                                  : !hasMatchedAny
-                                    ? instances
-                                    : [];
-                                return (
-                                  <div
-                                    key={subnet.id}
-                                    className={cn(
-                                      'border rounded-lg p-3',
-                                      subnet.is_public ? 'border-paws-warning/40 bg-paws-warning/5' : 'border-paws-info/40 bg-paws-info/5',
-                                    )}
-                                  >
-                                    <div className="flex items-center justify-between mb-2">
-                                      <div className="flex items-center gap-2">
-                                        <Globe className="h-4 w-4 text-paws-text-dim" />
-                                        <span className="text-sm font-medium text-paws-text">{subnet.name}</span>
-                                      </div>
-                                      <Badge variant={subnet.is_public ? 'warning' : 'info'}>
-                                        {subnet.is_public ? 'Public' : 'Private'}
-                                      </Badge>
-                                    </div>
-                                    <p className="text-xs font-mono text-paws-text-dim mb-1">{subnet.cidr}</p>
-                                    {subnet.gateway && (
-                                      <p className="text-xs font-mono text-paws-text-dim mb-2">GW: {subnet.gateway}</p>
-                                    )}
-
-                                    {/* Instances in subnet */}
-                                    {displayInstances.length > 0 ? (
-                                      <div className="space-y-1">
-                                        {displayInstances.map((inst) => (
-                                          <div key={inst.id} className="flex items-center gap-2 bg-paws-surface rounded px-2 py-1 flex-wrap">
-                                            <Server className="h-3 w-3 text-paws-text-dim" />
-                                            <span className="text-xs text-paws-text">{inst.name}</span>
-                                            <span className={cn(
-                                              'w-1.5 h-1.5 rounded-full',
-                                              inst.status === 'running' ? 'bg-paws-success' : 'bg-paws-text-dim',
-                                            )} />
-                                            {inst.allocated_ips && inst.allocated_ips.length > 0 && inst.allocated_ips.map((ip) => (
-                                              <span key={`d-${ip}`} className="text-[10px] font-mono px-1 py-0.5 rounded bg-paws-primary/10 text-paws-primary">{ip}</span>
-                                            ))}
-                                            {(!inst.allocated_ips || inst.allocated_ips.length === 0) && inst.live_ips && inst.live_ips.length > 0 && inst.live_ips.map((ip) => (
-                                              <span key={`dl-${ip}`} className="text-[10px] font-mono px-1 py-0.5 rounded bg-paws-success/10 text-paws-success">{ip}</span>
-                                            ))}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <p className="text-xs text-paws-text-dim italic">No instances</p>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Legend */}
-                        <div className="flex items-center gap-6 mt-4 text-xs text-paws-text-dim">
-                          <div className="flex items-center gap-1">
-                            <span className="w-2 h-2 rounded-full bg-paws-success" /> Running
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <span className="w-2 h-2 rounded-full bg-paws-text-dim" /> Stopped
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <span className="w-3 h-2 rounded bg-paws-warning/30 border border-paws-warning/40" /> Public Subnet
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <span className="w-3 h-2 rounded bg-paws-info/30 border border-paws-info/40" /> Private Subnet
-                          </div>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
-              </>
-            ) : (
+              ) : (
               <Card>
                 <CardContent className="py-16 text-center text-paws-text-dim">
-                  Select a VPC to view details, subnets, and attached instances.
+                  Select a network to view details and attached instances.
                 </CardContent>
               </Card>
             )}
@@ -578,35 +416,14 @@ export default function VPCs() {
             </div>
           </div>
           <p className="text-xs text-paws-text-dim">CIDR will be auto-allocated. IPs are assigned statically to instances.</p>
+          {clusters.length > 1 && (
+            <Select label="Cluster" value={form.cluster_id}
+              options={clusters.map((c) => ({ value: c.name, label: c.name }))}
+              onChange={(e) => setForm({ ...form, cluster_id: e.target.value })} />
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             <Button onClick={handleCreate} disabled={!form.name}>Create</Button>
-          </div>
-        </div>
-      </Modal>
-
-      <Modal open={showSubnet} onClose={() => setShowSubnet(false)} title="Add Subnet">
-        <div className="space-y-4">
-          <Input label="Name" value={subnetForm.name} onChange={(e) => setSubnetForm({ ...subnetForm, name: e.target.value })} />
-          <Input label="CIDR (optional)" value={subnetForm.cidr} placeholder="Auto-allocate /24"
-            onChange={(e) => setSubnetForm({ ...subnetForm, cidr: e.target.value })} />
-          <Input label="Gateway (optional)" value={subnetForm.gateway} placeholder="Auto (first host IP)"
-            onChange={(e) => setSubnetForm({ ...subnetForm, gateway: e.target.value })} />
-          <label className="flex items-center gap-2 text-sm text-paws-text">
-            <input
-              type="checkbox"
-              checked={subnetForm.snat_enabled}
-              onChange={(e) => setSubnetForm({ ...subnetForm, snat_enabled: e.target.checked })}
-              className="accent-paws-primary"
-            />
-            Enable Internet Access (SNAT)
-          </label>
-          <Input label="DNS Server (optional)" value={subnetForm.dns_server} placeholder="Default: 1.1.1.1"
-            onChange={(e) => setSubnetForm({ ...subnetForm, dns_server: e.target.value })} />
-          <p className="text-xs text-paws-text-dim">IPs are auto-allocated from this subnet when instances are assigned to the VPC.</p>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => setShowSubnet(false)}>Cancel</Button>
-            <Button onClick={handleAddSubnet} disabled={!subnetForm.name}>Add</Button>
           </div>
         </div>
       </Modal>
@@ -615,7 +432,7 @@ export default function VPCs() {
         <div className="space-y-4">
           <p className="text-sm text-paws-text">
             Change the static IP for <span className="font-medium">{editIpInst?.name}</span>.
-            The new IP must be within one of the VPC subnet ranges.
+            The new IP must be within the network's subnet range.
           </p>
           {editIpInst?.allocated_ips && editIpInst.allocated_ips.length > 0 && (
             <p className="text-xs text-paws-text-dim">
@@ -624,7 +441,7 @@ export default function VPCs() {
           )}
           {selected?.subnets && selected.subnets.length > 0 && (
             <p className="text-xs text-paws-text-dim">
-              Available ranges: {selected.subnets.map((s) => s.cidr).join(', ')}
+              Available range: {selected.subnets?.[0]?.cidr}
             </p>
           )}
           <Input

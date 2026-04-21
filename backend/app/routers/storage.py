@@ -26,11 +26,11 @@ BUCKET_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$")
 @router.get("/s3-info")
 async def get_s3_connection_info(user: User = Depends(get_current_active_user)):
     """Return S3 endpoint info so users can configure CLI tools and SDKs."""
-    from app.core.config import settings
+    from app.core.config_resolver import get_config_value
 
     return {
-        "endpoint_url": settings.s3_endpoint_url,
-        "region": settings.s3_region,
+        "endpoint_url": await get_config_value("s3_endpoint_url"),
+        "region": await get_config_value("s3_region"),
         "note": "Use your PAWS API key as the Access Key. Generate one from Account > API Keys.",
     }
 

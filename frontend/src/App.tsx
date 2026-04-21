@@ -31,6 +31,7 @@ import QuotaRequests from './pages/QuotaRequests';
 import ResourceDetail from './pages/ResourceDetail';
 import Resources from './pages/Resources';
 import SecurityGroups from './pages/SecurityGroups';
+import Setup from './pages/Setup';
 import SSHKeys from './pages/SSHKeys';
 import StatusPage from './pages/StatusPage';
 import Storage from './pages/Storage';
@@ -48,6 +49,7 @@ function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/setup" element={<Setup />} />
           <Route path="/oauth/callback" element={<OAuthCallback />} />
           <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
             <Route index element={<Dashboard />} />

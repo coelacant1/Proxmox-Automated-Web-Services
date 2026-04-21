@@ -2,6 +2,7 @@
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -11,26 +12,35 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import Resource, User
 from app.schemas.schemas import ClusterNodeStatus, ClusterStatusResponse
-from app.services.proxmox_client import proxmox_client
+from app.services.cache import cached_call, now_epoch
+from app.services.cluster_registry import NoClustersConfigured, cluster_registry
+from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cluster", tags=["cluster"])
 
+CLUSTER_STATUS_TTL_SECONDS = 10
 
-@router.get("/status", response_model=ClusterStatusResponse)
-async def cluster_health(_: User = Depends(get_current_active_user)):
-    """Sanitized cluster health for all authenticated users.
 
-    Shows node count, per-node online/offline status, and API connectivity.
-    Does NOT expose raw CPU/RAM/disk capacity to prevent users seeing total resources.
-    """
+@router.get("/list")
+async def list_available_clusters(_: User = Depends(get_current_active_user)) -> list[dict[str, Any]]:
+    """List available clusters (name only, no credentials)."""
+    return [{"name": cid} for cid in cluster_registry.list_cluster_ids()]
+
+
+async def _compute_cluster_status(cluster_id: str | None) -> dict[str, Any]:
+    """Call Proxmox and build the sanitized cluster status payload."""
     try:
-        nodes = proxmox_client.get_nodes()
-        cluster_info = proxmox_client.get_cluster_status()
+        pve = get_pve(cluster_id)
+    except NoClustersConfigured:
+        return {"api_reachable": False, "cached_at": now_epoch()}
+    try:
+        nodes = pve.get_nodes()
+        cluster_info = pve.get_cluster_status()
     except Exception:
         logger.warning("Proxmox API unreachable for cluster health check")
-        return ClusterStatusResponse(api_reachable=False)
+        return {"api_reachable": False, "cached_at": now_epoch()}
 
     cluster_name = None
     quorate = False
@@ -41,21 +51,56 @@ async def cluster_health(_: User = Depends(get_current_active_user)):
             break
 
     node_statuses = [
-        ClusterNodeStatus(
-            name=n.get("node", "unknown"),
-            status="online" if n.get("status") == "online" else "offline",
-            uptime_seconds=n.get("uptime", 0),
-        )
+        {
+            "name": n.get("node", "unknown"),
+            "status": "online" if n.get("status") == "online" else "offline",
+            "uptime_seconds": n.get("uptime", 0),
+        }
         for n in nodes
     ]
 
+    return {
+        "api_reachable": True,
+        "cluster_name": cluster_name,
+        "node_count": len(node_statuses),
+        "nodes_online": sum(1 for n in node_statuses if n["status"] == "online"),
+        "nodes": node_statuses,
+        "quorate": quorate,
+        "cached_at": now_epoch(),
+    }
+
+
+@router.get("/status", response_model=ClusterStatusResponse)
+async def cluster_health(
+    _: User = Depends(get_current_active_user),
+    cluster_id: str | None = Query(None, description="Target cluster (omit for default)"),
+):
+    """Sanitized cluster health for all authenticated users.
+
+    Shows node count, per-node online/offline status, and API connectivity.
+    Does NOT expose raw CPU/RAM/disk capacity to prevent users seeing total resources.
+
+    Results are cached in Redis for a short TTL so dashboard loads do not
+    hit the Proxmox API on every request.
+    """
+    cache_key = f"cluster_status:{cluster_id or 'default'}"
+    payload = await cached_call(
+        cache_key,
+        CLUSTER_STATUS_TTL_SECONDS,
+        lambda: _compute_cluster_status(cluster_id),
+    )
+
+    if not payload.get("api_reachable"):
+        return ClusterStatusResponse(api_reachable=False, cached_at=payload.get("cached_at"))
+
     return ClusterStatusResponse(
         api_reachable=True,
-        cluster_name=cluster_name,
-        node_count=len(node_statuses),
-        nodes_online=sum(1 for n in node_statuses if n.status == "online"),
-        nodes=node_statuses,
-        quorate=quorate,
+        cluster_name=payload.get("cluster_name"),
+        node_count=payload.get("node_count", 0),
+        nodes_online=payload.get("nodes_online", 0),
+        nodes=[ClusterNodeStatus(**n) for n in payload.get("nodes", [])],
+        quorate=payload.get("quorate", False),
+        cached_at=payload.get("cached_at"),
     )
 
 
@@ -138,8 +183,9 @@ async def admin_cluster_tasks(
     node: str | None = Query(None),
     vmid: int | None = Query(None),
     type_filter: str | None = Query(None, alias="type"),
-    since: int | None = Query(None, description="Unix epoch – only tasks started after this time"),
+    since: int | None = Query(None, description="Unix epoch -- only tasks started after this time"),
     errors_only: bool = Query(False),
+    cluster_id: str | None = Query(None, description="Target cluster (omit for default)"),
 ):
     """Full PVE cluster task history with PAWS user attribution.
 
@@ -147,7 +193,8 @@ async def admin_cluster_tasks(
     Resource records to show which PAWS user owns the affected resource.
     """
     try:
-        nodes_list = proxmox_client.get_nodes()
+        pve = get_pve(cluster_id)
+        nodes_list = pve.get_nodes()
     except Exception:
         return {"tasks": [], "error": "Proxmox API unreachable"}
 
@@ -188,7 +235,7 @@ async def admin_cluster_tasks(
             if errors_only:
                 params["errors"] = 1
 
-            tasks = proxmox_client.api.nodes(n).tasks.get(**params)
+            tasks = pve.api.nodes(n).tasks.get(**params)
             for t in tasks:
                 t["_source_node"] = n
             all_tasks.extend(tasks)
@@ -249,15 +296,17 @@ async def admin_task_detail(
     upid: str,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
+    cluster_id: str | None = Query(None, description="Target cluster (omit for default)"),
 ):
     """Get full detail and log output for a single PVE task."""
     try:
-        status = proxmox_client.get_task_status(node, upid)
+        pve = get_pve(cluster_id)
+        status = pve.get_task_status(node, upid)
     except Exception as e:
         return {"error": f"Failed to fetch task status: {e}"}
 
     try:
-        log_lines = proxmox_client.get_task_log(node, upid, limit=5000)
+        log_lines = pve.get_task_log(node, upid, limit=5000)
     except Exception:
         log_lines = []
 

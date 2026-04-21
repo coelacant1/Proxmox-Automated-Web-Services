@@ -11,7 +11,7 @@ from app.core.database import get_db
 from app.core.deps import require_admin
 from app.models.models import TemplateCatalog, User
 from app.schemas.schemas import TemplateCatalogCreate, TemplateCatalogRead, TemplateCatalogUpdate
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/admin/templates", tags=["admin"])
 
@@ -101,6 +101,7 @@ async def delete_catalog_template(
 
 @router.get("/proxmox-available")
 async def list_proxmox_templates(
+    cluster_id: str | None = Query(None, description="Proxmox cluster to query (default cluster if omitted)"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
@@ -110,7 +111,8 @@ async def list_proxmox_templates(
     so the admin only needs to pick a template and optionally rename it.
     """
     try:
-        resources = proxmox_client.get_cluster_resources()
+        pve = get_pve(cluster_id) if cluster_id else get_pve()
+        resources = pve.get_cluster_resources()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to connect to Proxmox: {e}")
 

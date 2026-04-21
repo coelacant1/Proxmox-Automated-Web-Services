@@ -12,21 +12,21 @@ def test_generate_vnet_name():
 
 def test_allocate_vxlan_tag_empty(monkeypatch):
     sdn = SDNService()
-    monkeypatch.setattr(sdn, "get_vnets", lambda: [])
+    monkeypatch.setattr(sdn, "get_vnets", lambda cluster_id=None: [])
     tag = sdn.allocate_vxlan_tag()
     assert tag == VXLAN_TAG_MIN
 
 
 def test_allocate_vxlan_tag_skips_used(monkeypatch):
     sdn = SDNService()
-    monkeypatch.setattr(sdn, "get_vnets", lambda: [{"tag": VXLAN_TAG_MIN}, {"tag": VXLAN_TAG_MIN + 1}])
+    monkeypatch.setattr(sdn, "get_vnets", lambda cluster_id=None: [{"tag": VXLAN_TAG_MIN}, {"tag": VXLAN_TAG_MIN + 1}])
     tag = sdn.allocate_vxlan_tag()
     assert tag == VXLAN_TAG_MIN + 2
 
 
 def test_get_paws_zone_found(monkeypatch):
     sdn = SDNService()
-    monkeypatch.setattr(sdn, "get_zones", lambda: [{"zone": "paws", "type": "evpn"}])
+    monkeypatch.setattr(sdn, "get_zones", lambda cluster_id=None: [{"zone": "paws", "type": "evpn"}])
     zone = sdn.get_paws_zone()
     assert zone is not None
     assert zone["zone"] == "paws"
@@ -34,6 +34,6 @@ def test_get_paws_zone_found(monkeypatch):
 
 def test_get_paws_zone_not_found(monkeypatch):
     sdn = SDNService()
-    monkeypatch.setattr(sdn, "get_zones", lambda: [{"zone": "otherzone", "type": "simple"}])
+    monkeypatch.setattr(sdn, "get_zones", lambda cluster_id=None: [{"zone": "otherzone", "type": "simple"}])
     zone = sdn.get_paws_zone()
     assert zone is None

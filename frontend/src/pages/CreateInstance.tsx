@@ -17,6 +17,7 @@ interface Template {
   min_ram_mb: number;
   min_disk_gb: number;
   proxmox_vmid: number;
+  cluster_id?: string;
 }
 
 interface InstanceType {
@@ -37,9 +38,10 @@ export default function CreateInstance() {
   const [step, setStep] = useState(0);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [instanceTypes, setInstanceTypes] = useState<InstanceType[]>([]);
-  const [vpcs, setVpcs] = useState<Array<{ id: string; name: string; cidr: string }>>([]);
+  const [vpcs, setVpcs] = useState<Array<{ id: string; name: string; cidr: string; network_mode?: string }>>([]);
   const [sshKeys, setSshKeys] = useState<Array<{ id: string; name: string }>>([]);
   const [storagePools, setStoragePools] = useState<string[]>([]);
+  const [clusters, setClusters] = useState<Array<{ name: string }>>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -51,12 +53,12 @@ export default function CreateInstance() {
     template_vmid: 0,
     selectedTemplate: null as Template | null,
     instance_type: '',
+    cluster_id: '',
     cores: 2,
     memory_mb: 2048,
     disk_gb: 32,
     storage: 'local-lvm',
     vpc_id: '',
-    network_mode: 'private',
     hostname: '',
     ssh_key_ids: [] as string[],
     ci_user: '',
@@ -93,6 +95,12 @@ export default function CreateInstance() {
       setVpcs(data);
     }).catch(() => {});
     api.get('/api/ssh-keys/').then((res) => setSshKeys(res.data)).catch(() => {});
+    api.get('/api/cluster/list').then((res) => {
+      setClusters(res.data);
+      if (res.data.length === 1) {
+        setForm((prev) => ({ ...prev, cluster_id: res.data[0].name }));
+      }
+    }).catch(() => {});
     api.get('/api/storage-pools/').then((res) => {
       setStoragePools(res.data.pools || []);
       if (res.data.default) {
@@ -141,8 +149,8 @@ export default function CreateInstance() {
         memory_mb: form.memory_mb,
         disk_gb: form.disk_gb,
         storage: form.storage,
+        cluster_id: form.cluster_id || undefined,
         vpc_id: form.vpc_id || undefined,
-        network_mode: form.network_mode,
         hostname: form.hostname || undefined,
         ssh_key_ids: form.ssh_key_ids.length > 0 ? form.ssh_key_ids : undefined,
         ci_user: form.ci_user || undefined,
@@ -285,22 +293,12 @@ export default function CreateInstance() {
           <Select
             label="VPC"
             placeholder="Select a VPC (optional)"
-            options={[{ value: '', label: 'No VPC' }, ...vpcs.map((v) => ({ value: v.id, label: `${v.name} (${v.cidr})` }))]}
+            options={[{ value: '', label: 'No VPC' }, ...vpcs.map((v) => ({ value: v.id, label: `${v.name} (${v.cidr}) — ${(v.network_mode || 'private').charAt(0).toUpperCase() + (v.network_mode || 'private').slice(1)}` }))]}
             value={form.vpc_id}
             onChange={(e) => setForm({ ...form, vpc_id: e.target.value })}
           />
-          <Select
-            label="Network Mode"
-            options={[
-              { value: 'private', label: 'Private - Full LAN + Internet access' },
-              { value: 'published', label: 'Published - Internet only, LAN blocked (for public services)' },
-              { value: 'isolated', label: 'Isolated - Own subnet only (airgapped)' },
-            ]}
-            value={form.network_mode}
-            onChange={(e) => setForm({ ...form, network_mode: e.target.value })}
-          />
           {form.vpc_id && (
-            <p className="text-xs text-paws-text-dim">IP address will be automatically allocated from the VPC subnet.</p>
+            <p className="text-xs text-paws-text-dim">IP address will be automatically allocated from the VPC subnet. Network mode is inherited from the VPC.</p>
           )}
         </div>
       )}
@@ -310,6 +308,11 @@ export default function CreateInstance() {
         <div className="space-y-4">
           <Input label="Instance Name" value={form.name} placeholder="my-instance"
             onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          {clusters.length > 1 && (
+            <Select label="Cluster" value={form.cluster_id}
+              options={clusters.map((c) => ({ value: c.name, label: c.name }))}
+              onChange={(e) => setForm({ ...form, cluster_id: e.target.value })} />
+          )}
           <Input label="Hostname" value={form.hostname} placeholder="Optional hostname"
             onChange={(e) => setForm({ ...form, hostname: e.target.value })} />
           <div className="grid grid-cols-2 gap-4">
@@ -356,10 +359,10 @@ export default function CreateInstance() {
           <CardContent className="space-y-3">
             <ReviewRow label="Template" value={form.selectedTemplate?.name || '-'} />
             <ReviewRow label="Name" value={form.name} />
+            {clusters.length > 1 && <ReviewRow label="Cluster" value={form.cluster_id || 'Default'} />}
             <ReviewRow label="Size" value={`${form.cores} vCPU · ${form.memory_mb} MB RAM · ${form.disk_gb} GB Disk`} />
             <ReviewRow label="Storage" value={form.storage} />
-            <ReviewRow label="VPC" value={vpcs.find((v) => v.id === form.vpc_id)?.name || 'None'} />
-            <ReviewRow label="Network Mode" value={form.network_mode.charAt(0).toUpperCase() + form.network_mode.slice(1)} />
+            <ReviewRow label="VPC" value={(() => { const v = vpcs.find((v) => v.id === form.vpc_id); return v ? `${v.name} (${(v.network_mode || 'private').charAt(0).toUpperCase() + (v.network_mode || 'private').slice(1)})` : 'None'; })()} />
             <ReviewRow label="Hostname" value={form.hostname || '-'} />
             <ReviewRow label="Username" value={form.ci_user || 'paws (default)'} />
             <ReviewRow label="Password" value={form.ci_password ? '***' : 'Not set'} />

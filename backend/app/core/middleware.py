@@ -1,4 +1,4 @@
-"""Rate-limiting and analytics middleware using Redis."""
+"""Rate-limiting, analytics, and setup-guard middleware using Redis."""
 
 import time
 
@@ -8,6 +8,36 @@ from starlette.responses import JSONResponse
 
 from app.core.security import decode_token
 from app.services.rate_limiter import check_api_rate_limit
+
+
+class SetupGuardMiddleware(BaseHTTPMiddleware):
+    """Returns 503 with setup_required flag when the app has not been initialized."""
+
+    ALLOWED_PREFIXES = (
+        "/api/setup",
+        "/health",
+        "/docs",
+        "/openapi.json",
+        "/favicon",
+    )
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        from app.core.setup_state import is_initialized
+
+        if is_initialized():
+            return await call_next(request)
+
+        path = request.url.path
+        if any(path.startswith(p) for p in self.ALLOWED_PREFIXES):
+            return await call_next(request)
+
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "detail": "Application has not been initialized",
+                "setup_required": True,
+            },
+        )
 
 
 class AnalyticsMiddleware(BaseHTTPMiddleware):

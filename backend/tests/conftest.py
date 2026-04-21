@@ -78,6 +78,16 @@ class _ChainableMock:
 class MockProxmoxClient:
     """Fake ProxmoxClient that returns realistic data without network calls."""
 
+    _host = "test"
+    _port = 8006
+    _token_id = "mock@pam!paws"
+    _token_secret = "mock-secret"
+    _verify_ssl = False
+    _password = ""
+    _console_user = ""
+    _console_password = ""
+    cluster_name = "default"
+
     @property
     def api(self):
         """Chainable mock for raw proxmoxer API access (e.g. api.nodes(x).qemu(y).firewall.rules.get())."""
@@ -491,16 +501,42 @@ def make_token(user: User) -> str:
 @pytest.fixture
 async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncClient, None]:
     """AsyncClient wired to the FastAPI app with mocked DB, Proxmox, S3, Redis."""
+    import app.services.cluster_registry as reg_mod
     import app.services.proxmox_client as pxm_mod
     import app.services.rate_limiter as rl_mod
     import app.services.storage_service as stg_mod
 
-    # Swap singletons
+    # Swap singletons / proxies
     monkeypatch.setattr(pxm_mod, "proxmox_client", mock_proxmox)
     monkeypatch.setattr(stg_mod, "storage_service", mock_storage)
     monkeypatch.setattr(rl_mod, "check_action_rate_limit", _always_allow)
     monkeypatch.setattr(rl_mod, "check_api_rate_limit", _always_allow_api)
     monkeypatch.setattr(rl_mod, "check_rate_limit", _always_allow)
+
+    # Patch cluster registry so get_pve() / get_pbs() return mocks
+    monkeypatch.setattr(reg_mod.cluster_registry, "_initialized", True)
+    monkeypatch.setattr(reg_mod.cluster_registry, "_default_cluster", "default")
+    monkeypatch.setattr(reg_mod.cluster_registry, "_pve_clients", {"default": mock_proxmox})
+    monkeypatch.setattr(reg_mod.cluster_registry, "_pbs_clients", {"default": mock_proxmox})
+    monkeypatch.setattr(
+        reg_mod.cluster_registry,
+        "_configs",
+        {
+            "default": type(
+                "C",
+                (),
+                {
+                    "name": "default",
+                    "host": "test",
+                    "port": 8006,
+                    "pbs_host": "",
+                    "pbs_port": 8007,
+                    "pbs_datastore": "backups",
+                    "extra": {},
+                },
+            )()
+        },
+    )
 
     # Patch Redis-based token revocation to avoid needing Redis in tests
     import app.core.security as sec_mod
@@ -522,7 +558,7 @@ async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncC
     # Patch volumes router so it uses the mock Proxmox client
     import app.routers.volumes as vol_mod
 
-    monkeypatch.setattr(vol_mod, "_get_proxmox", lambda: mock_proxmox)
+    monkeypatch.setattr(vol_mod, "_get_proxmox", lambda cluster_id="default": mock_proxmox)
 
     from app.main import app
 

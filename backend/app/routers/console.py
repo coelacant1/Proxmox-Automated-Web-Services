@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.models.models import Resource, User
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/console", tags=["console"])
 
@@ -31,7 +31,8 @@ async def get_vnc_console(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        ticket_data = proxmox_client.get_vnc_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype)
+        pve = get_pve(resource.cluster_id)
+        ticket_data = pve.get_vnc_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype)
         return {
             "type": "vnc",
             "ticket": ticket_data.get("ticket"),
@@ -55,7 +56,8 @@ async def get_terminal_console(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        ticket_data = proxmox_client.get_terminal_proxy(resource.proxmox_node, resource.proxmox_vmid, vmtype)
+        pve = get_pve(resource.cluster_id)
+        ticket_data = pve.get_terminal_proxy(resource.proxmox_node, resource.proxmox_vmid, vmtype)
         return {
             "type": "terminal",
             "ticket": ticket_data.get("ticket"),
@@ -79,7 +81,8 @@ async def get_spice_console(
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
 
     try:
-        ticket_data = proxmox_client.get_spice_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype)
+        pve = get_pve(resource.cluster_id)
+        ticket_data = pve.get_spice_ticket(resource.proxmox_node, resource.proxmox_vmid, vmtype)
         return {
             "type": "spice",
             "ticket": ticket_data.get("ticket"),
@@ -110,10 +113,9 @@ async def get_available_consoles(
 
 def _build_ws_url(resource: Resource, proxy_type: str, ticket_data: dict) -> str:
     """Build WebSocket URL for proxying through Proxmox."""
-    from app.core.config import settings
-
-    host = settings.proxmox_host
-    port = settings.proxmox_port
+    pve = get_pve(resource.cluster_id)
+    host = pve._host
+    port = pve._port
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
     vncticket = ticket_data.get("ticket", "")
     return (

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import require_admin, require_capability
 from app.models.models import HAGroup, Resource, User
-from app.services.proxmox_client import proxmox_client as pve
+from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ class HAGroupCreate(BaseModel):
     nofailback: bool = False
     max_relocate: int = 1
     max_restart: int = 1
+    cluster_id: str = "default"
 
 
 class HAGroupUpdate(BaseModel):
@@ -66,8 +67,13 @@ async def create_ha_group(
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
-    # Check uniqueness
-    existing = await db.execute(select(HAGroup).where(HAGroup.pve_group_name == body.pve_group_name))
+    # Check uniqueness (scoped to cluster)
+    existing = await db.execute(
+        select(HAGroup).where(
+            HAGroup.pve_group_name == body.pve_group_name,
+            HAGroup.cluster_id == body.cluster_id,
+        )
+    )
     if existing.scalar_one_or_none():
         raise HTTPException(400, "HA group with this PVE name already exists")
 
@@ -76,7 +82,7 @@ async def create_ha_group(
         pve_params = {}
         if body.nofailback:
             pve_params["nofailback"] = 1
-        pve.create_ha_group(body.pve_group_name, ",".join(body.nodes), **pve_params)
+        get_pve(body.cluster_id).create_ha_group(body.pve_group_name, ",".join(body.nodes), **pve_params)
     except Exception as e:
         err = str(e).lower()
         if "already exists" in err:
@@ -95,6 +101,7 @@ async def create_ha_group(
         nofailback=body.nofailback,
         max_relocate=body.max_relocate,
         max_restart=body.max_restart,
+        cluster_id=body.cluster_id,
     )
     db.add(group)
     await db.commit()
@@ -130,7 +137,7 @@ async def update_ha_group(
     # Sync to PVE (best-effort; skip if migrated to rules)
     if pve_updates:
         try:
-            pve.update_ha_group(group.pve_group_name, **pve_updates)
+            get_pve(group.cluster_id).update_ha_group(group.pve_group_name, **pve_updates)
         except Exception as e:
             err = str(e).lower()
             if "migrated to rules" not in err and "rules" not in err:
@@ -149,7 +156,7 @@ async def delete_ha_group(group_id: str, db: AsyncSession = Depends(get_db), _ad
         raise HTTPException(404, "HA group not found")
 
     try:
-        pve.delete_ha_group(group.pve_group_name)
+        get_pve(group.cluster_id).delete_ha_group(group.pve_group_name)
     except Exception as e:
         err = str(e).lower()
         rules_migrated = "migrated to rules" in err or "rules" in err
@@ -163,7 +170,11 @@ async def delete_ha_group(group_id: str, db: AsyncSession = Depends(get_db), _ad
 
 
 @router.post("/api/admin/ha/groups/sync")
-async def sync_ha_groups(db: AsyncSession = Depends(get_db), _admin: User = Depends(require_admin)):
+async def sync_ha_groups(
+    cluster_id: str = "default",
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
     """Sync HA groups from PVE cluster into PAWS database.
 
     Handles both legacy HA groups and newer HA rules (PVE 8.2+).
@@ -173,14 +184,14 @@ async def sync_ha_groups(db: AsyncSession = Depends(get_db), _admin: User = Depe
 
     # Try legacy groups API first
     try:
-        pve_groups = pve.get_ha_groups()
+        pve_groups = get_pve(cluster_id).get_ha_groups()
     except Exception as e:
         err_str = str(e).lower()
         if "migrated to rules" in err_str or "rules" in err_str:
             # PVE has migrated to HA rules - fall back
             logger.info("HA groups migrated to rules, using rules API")
             try:
-                pve_groups = _fetch_ha_rules_as_groups()
+                pve_groups = _fetch_ha_rules_as_groups(cluster_id=cluster_id)
                 source = "rules"
             except Exception as e2:
                 raise HTTPException(502, f"Failed to fetch HA rules from PVE: {e2}")
@@ -193,7 +204,12 @@ async def sync_ha_groups(db: AsyncSession = Depends(get_db), _admin: User = Depe
         if not group_name:
             continue
 
-        existing = await db.execute(select(HAGroup).where(HAGroup.pve_group_name == group_name))
+        existing = await db.execute(
+            select(HAGroup).where(
+                HAGroup.pve_group_name == group_name,
+                HAGroup.cluster_id == cluster_id,
+            )
+        )
         if existing.scalar_one_or_none():
             continue
 
@@ -207,6 +223,7 @@ async def sync_ha_groups(db: AsyncSession = Depends(get_db), _admin: User = Depe
             nofailback=bool(pg.get("nofailback", 0)),
             max_relocate=pg.get("max_relocate", 1) or 1,
             max_restart=pg.get("max_restart", 1) or 1,
+            cluster_id=cluster_id,
         )
         db.add(group)
         synced += 1
@@ -226,6 +243,7 @@ async def get_instance_ha(
 ):
     resource = await _get_user_resource(db, user, resource_id)
     sid = _resource_to_sid(resource)
+    pve = get_pve(resource.cluster_id)
 
     try:
         ha_res = pve.get_ha_resource(sid)
@@ -250,6 +268,7 @@ async def enable_instance_ha(
 ):
     resource = await _get_user_resource(db, user, resource_id)
     sid = _resource_to_sid(resource)
+    pve = get_pve(resource.cluster_id)
 
     pve_group = None
     if body.ha_group_id:
@@ -283,6 +302,7 @@ async def disable_instance_ha(
 ):
     resource = await _get_user_resource(db, user, resource_id)
     sid = _resource_to_sid(resource)
+    pve = get_pve(resource.cluster_id)
 
     try:
         pve.remove_ha_resource(sid)
@@ -312,14 +332,14 @@ async def list_user_ha_groups(
 # --- Helpers ---
 
 
-def _fetch_ha_rules_as_groups() -> list[dict]:
+def _fetch_ha_rules_as_groups(cluster_id: str = "default") -> list[dict]:
     """Fetch HA rules from PVE and convert location rules into group-like dicts.
 
     PVE 8.2+ migrates HA groups to rules. Location rules define which nodes
     a resource can run on, similar to the old group concept.
     """
     try:
-        rules = pve.get_ha_rules()
+        rules = get_pve(cluster_id).get_ha_rules()
     except Exception:
         # If rules API also fails, try the status API as last resort
         rules = []
@@ -354,6 +374,7 @@ def _serialize_group(g: HAGroup) -> dict:
         "name": g.name,
         "description": g.description,
         "pve_group_name": g.pve_group_name,
+        "cluster_id": g.cluster_id,
         "nodes": json.loads(g.nodes),
         "restricted": g.restricted,
         "nofailback": g.nofailback,

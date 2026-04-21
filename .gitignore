@@ -36,3 +36,4 @@ htmlcov/
 .InternalDocs/
 .InternalDocs/*
 */*.tsbuildinfo
+*.paws_master_key

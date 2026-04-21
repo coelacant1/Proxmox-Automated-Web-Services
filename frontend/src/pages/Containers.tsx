@@ -14,6 +14,7 @@ interface Container {
   name: string;
   vmid: number;
   node: string;
+  cluster_id?: string;
   status: string;
   live_status?: string;
   specs: { cores?: number; memory_mb?: number; disk_gb?: number };

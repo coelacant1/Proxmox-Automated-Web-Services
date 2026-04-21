@@ -3,7 +3,7 @@
 import ipaddress
 import uuid as _uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
@@ -21,7 +21,7 @@ from app.schemas.schemas import (
 )
 from app.services.audit_service import log_action
 from app.services.firewall_profile import FirewallProfileService
-from app.services.proxmox_client import proxmox_client
+from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/networking", tags=["networking"])
 
@@ -49,17 +49,23 @@ class FirewallRuleRequest(BaseModel):
 
 
 @router.get("/zones")
-async def list_zones(_: User = Depends(get_current_active_user)):
+async def list_zones(
+    cluster_id: str | None = Query(None, description="Target cluster"),
+    _: User = Depends(get_current_active_user),
+):
     try:
-        return proxmox_client.get_sdn_zones()
+        return get_pve(cluster_id).get_sdn_zones()
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/vnets")
-async def list_vnets(_: User = Depends(get_current_active_user)):
+async def list_vnets(
+    cluster_id: str | None = Query(None, description="Target cluster"),
+    _: User = Depends(get_current_active_user),
+):
     try:
-        return proxmox_client.get_sdn_vnets()
+        return get_pve(cluster_id).get_sdn_vnets()
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -67,6 +73,7 @@ async def list_vnets(_: User = Depends(get_current_active_user)):
 @router.post("/vnets", status_code=status.HTTP_201_CREATED)
 async def create_vnet(
     body: VNetCreateRequest,
+    cluster_id: str | None = Query(None, description="Target cluster"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
 ):
@@ -76,7 +83,7 @@ async def create_vnet(
             kwargs["tag"] = body.tag
         if body.alias:
             kwargs["alias"] = body.alias
-        proxmox_client.create_sdn_vnet(body.name, body.zone, **kwargs)
+        get_pve(cluster_id).create_sdn_vnet(body.name, body.zone, **kwargs)
         await log_action(db, user.id, "vnet_create", "network", details={"vnet": body.name, "zone": body.zone})
         return {"status": "created", "vnet": body.name}
     except Exception as e:
@@ -86,11 +93,12 @@ async def create_vnet(
 @router.delete("/vnets/{vnet_name}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_vnet(
     vnet_name: str,
+    cluster_id: str | None = Query(None, description="Target cluster"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
 ):
     try:
-        proxmox_client.delete_sdn_vnet(vnet_name)
+        get_pve(cluster_id).delete_sdn_vnet(vnet_name)
         await log_action(db, user.id, "vnet_delete", "network", details={"vnet": vnet_name})
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -103,10 +111,11 @@ async def delete_vnet(
 async def get_firewall_rules(
     node: str,
     vmid: int,
+    cluster_id: str | None = Query(None, description="Target cluster"),
     _: User = Depends(get_current_active_user),
 ):
     try:
-        return proxmox_client.get_firewall_rules(node, vmid, "qemu")
+        return get_pve(cluster_id).get_firewall_rules(node, vmid, "qemu")
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -116,6 +125,7 @@ async def add_firewall_rule(
     node: str,
     vmid: int,
     body: FirewallRuleRequest,
+    cluster_id: str | None = Query(None, description="Target cluster"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
@@ -130,7 +140,7 @@ async def add_firewall_rule(
             if val is not None:
                 params[field] = val
 
-        proxmox_client.create_firewall_rule(node, vmid, "qemu", **params)
+        get_pve(cluster_id).create_firewall_rule(node, vmid, "qemu", **params)
         await log_action(db, user.id, "firewall_add", "vm", details={"vmid": vmid, "rule": params})
         return {"status": "created"}
     except Exception as e:
@@ -189,6 +199,9 @@ async def reserve_static_ip(
         if not ip:
             raise HTTPException(status_code=409, detail="No available IPs in subnet")
 
+    # Fetch the VPC to inherit cluster_id
+    vpc_result = await db.execute(select(VPC).where(VPC.id == _uuid.UUID(vpc_id)))
+    vpc = vpc_result.scalar_one()
     reservation = IPReservation(
         subnet_id=subnet.id,
         ip_address=ip,
@@ -196,6 +209,7 @@ async def reserve_static_ip(
         label=body.label,
         is_gateway=False,
         owner_id=user.id,
+        cluster_id=vpc.cluster_id,
     )
     db.add(reservation)
     try:
