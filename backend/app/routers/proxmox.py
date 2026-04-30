@@ -1,11 +1,15 @@
 """Proxmox cluster status endpoints (admin + user overview)."""
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import User
 from app.services.node_service import get_node_resources
-from app.services.proxmox_client import get_pve
+from app.services.proxmox_cache import get_cluster_status as cached_cluster_status
+from app.services.proxmox_cache import get_storage_list as cached_storage_list
+from app.services.proxmox_cache import get_vm_templates as cached_vm_templates
 
 router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
 
@@ -14,7 +18,7 @@ router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
 async def list_nodes(_: User = Depends(require_admin)):
     """Get cluster node status (admin only)."""
     try:
-        return get_node_resources()
+        return await asyncio.to_thread(get_node_resources)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to connect to Proxmox: {e}")
 
@@ -26,7 +30,7 @@ async def cluster_status(
 ):
     """Get cluster-level status (admin only)."""
     try:
-        return get_pve(cluster_id).get_cluster_status()
+        return await cached_cluster_status(cluster_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to connect to Proxmox: {e}")
 
@@ -38,7 +42,7 @@ async def list_templates(
 ):
     """List available VM templates."""
     try:
-        return get_pve(cluster_id).get_vm_templates()
+        return await cached_vm_templates(cluster_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to connect to Proxmox: {e}")
 
@@ -50,6 +54,6 @@ async def list_storage(
 ):
     """List storage pools (admin only)."""
     try:
-        return get_pve(cluster_id).get_storage_list()
+        return await cached_storage_list(cluster_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to connect to Proxmox: {e}")

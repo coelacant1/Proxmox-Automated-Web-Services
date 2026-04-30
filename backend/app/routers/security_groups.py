@@ -12,6 +12,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user
 from app.models.models import Resource, ResourceSecurityGroup, SecurityGroup, SecurityGroupRule, User
 from app.schemas.schemas import SecurityGroupCreate, SecurityGroupRead, SecurityGroupRuleCreate, SecurityGroupRuleRead
+from app.services.cluster_registry import NoClustersConfigured, cluster_registry
 
 router = APIRouter(prefix="/api/security-groups", tags=["security-groups"])
 
@@ -78,8 +79,6 @@ async def list_security_groups(
             )
             .options(selectinload(SecurityGroup.rules))
         )
-        if cluster_id:
-            query = query.where(SecurityGroup.cluster_id == cluster_id)
         result = await db.execute(query)
     else:
         query = (
@@ -88,8 +87,6 @@ async def list_security_groups(
             .options(selectinload(SecurityGroup.rules))
             .order_by(SecurityGroup.created_at.desc())
         )
-        if cluster_id:
-            query = query.where(SecurityGroup.cluster_id == cluster_id)
         result = await db.execute(query)
     return list(result.scalars().all())
 
@@ -100,17 +97,24 @@ async def create_security_group(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
+    try:
+        _cluster_id = cluster_registry.default_cluster
+    except NoClustersConfigured:
+        raise HTTPException(
+            status_code=503, detail="No Proxmox cluster configured. Add one via Admin > Infrastructure."
+        )
+
     existing = await db.execute(
         select(SecurityGroup).where(
             SecurityGroup.owner_id == user.id,
             SecurityGroup.name == body.name,
-            SecurityGroup.cluster_id == body.cluster_id,
+            SecurityGroup.cluster_id == _cluster_id,
         )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Security group name already exists")
 
-    sg = SecurityGroup(owner_id=user.id, name=body.name, description=body.description, cluster_id=body.cluster_id)
+    sg = SecurityGroup(owner_id=user.id, name=body.name, description=body.description, cluster_id=_cluster_id)
     db.add(sg)
     await db.commit()
 
@@ -148,7 +152,12 @@ async def create_from_template(
     if template_id not in SG_TEMPLATES:
         raise HTTPException(status_code=404, detail=f"Template '{template_id}' not found")
 
-    cluster_id = body.cluster_id if body else "default"
+    try:
+        cluster_id = cluster_registry.default_cluster
+    except NoClustersConfigured:
+        raise HTTPException(
+            status_code=503, detail="No Proxmox cluster configured. Add one via Admin > Infrastructure."
+        )
     tpl = SG_TEMPLATES[template_id]
 
     existing = await db.execute(

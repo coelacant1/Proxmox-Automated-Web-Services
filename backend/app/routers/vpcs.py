@@ -29,6 +29,7 @@ from app.models.models import (
 )
 from app.schemas.schemas import VPCCreate, VPCRead
 from app.services.audit_service import log_action
+from app.services.cluster_registry import NoClustersConfigured, cluster_registry
 from app.services.group_access import check_group_access
 from app.services.ipam_service import cidr_pool, ipam_service
 from app.services.proxmox_client import get_pve
@@ -290,7 +291,12 @@ async def create_vpc(
         )
 
     # VXLAN tag
-    cluster_id = body.cluster_id if hasattr(body, "cluster_id") else "default"
+    try:
+        cluster_id = cluster_registry.default_cluster
+    except NoClustersConfigured:
+        raise HTTPException(
+            status_code=503, detail="No Proxmox cluster configured. Add one via Admin > Infrastructure."
+        )
     tag = sdn_service.allocate_vxlan_tag(cluster_id=cluster_id)
 
     # Persist VPC (flush to obtain id before generating vnet name)

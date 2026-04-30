@@ -29,16 +29,21 @@ async def list_available_clusters(_: User = Depends(get_current_active_user)) ->
     return [{"name": cid} for cid in cluster_registry.list_cluster_ids()]
 
 
-async def _compute_cluster_status(cluster_id: str | None) -> dict[str, Any]:
+async def _compute_cluster_status() -> dict[str, Any]:
     """Call Proxmox and build the sanitized cluster status payload."""
+    from app.services.proxmox_cache import get_cluster_status as _cached_status
+    from app.services.proxmox_cache import get_nodes as _cached_nodes
+
     try:
-        pve = get_pve(cluster_id)
+        # Touch the registry to ensure NoClustersConfigured can fast-fail.
+        get_pve()
     except NoClustersConfigured:
         return {"api_reachable": False, "cached_at": now_epoch()}
-    try:
-        nodes = pve.get_nodes()
-        cluster_info = pve.get_cluster_status()
-    except Exception:
+
+    nodes = await _cached_nodes()
+    cluster_info = await _cached_status()
+    if not nodes and not cluster_info:
+        # Both empty likely means PVE unreachable (helpers swallow + log).
         logger.warning("Proxmox API unreachable for cluster health check")
         return {"api_reachable": False, "cached_at": now_epoch()}
 
@@ -83,11 +88,11 @@ async def cluster_health(
     Results are cached in Redis for a short TTL so dashboard loads do not
     hit the Proxmox API on every request.
     """
-    cache_key = f"cluster_status:{cluster_id or 'default'}"
+    cache_key = "cluster_status"
     payload = await cached_call(
         cache_key,
         CLUSTER_STATUS_TTL_SECONDS,
-        lambda: _compute_cluster_status(cluster_id),
+        _compute_cluster_status,
     )
 
     if not payload.get("api_reachable"):

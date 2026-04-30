@@ -1,9 +1,12 @@
 import logging
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import yaml
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -11,8 +14,10 @@ from app.core.database import async_session
 from app.core.middleware import (
     AnalyticsMiddleware,
     RateLimitMiddleware,
+    RequestIDMiddleware,
     SecurityHeadersMiddleware,
     SetupGuardMiddleware,
+    _RequestIDFilter,
 )
 from app.core.security import hash_password
 from app.models.models import InstanceType, SystemSetting, User, UserQuota, UserRole
@@ -37,6 +42,7 @@ from app.routers import (
     dashboard,
     dns,
     docs,
+    drift,
     endpoints,
     events,
     groups,
@@ -68,6 +74,8 @@ from app.routers import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SEEDS_DIR = Path(__file__).parent.parent / "seeds"
 
 
 def validate_security_settings() -> None:
@@ -208,43 +216,34 @@ async def seed_system_settings() -> None:
         logger.warning("Could not seed system settings - have you run 'alembic upgrade head'?")
 
 
-DEFAULT_INSTANCE_TYPES = [
-    ("paws.nano", 1, 512, 10, "general", "Nano - 1 vCPU, 512 MiB RAM, 10 GiB", 10),
-    ("paws.micro", 1, 1024, 20, "general", "Micro - 1 vCPU, 1 GiB RAM, 20 GiB", 20),
-    ("paws.small", 2, 2048, 40, "general", "Small - 2 vCPU, 2 GiB RAM, 40 GiB", 30),
-    ("paws.medium", 2, 4096, 80, "general", "Medium - 2 vCPU, 4 GiB RAM, 80 GiB", 40),
-    ("paws.large", 4, 8192, 160, "general", "Large - 4 vCPU, 8 GiB RAM, 160 GiB", 50),
-    ("paws.xlarge", 8, 16384, 320, "general", "XLarge - 8 vCPU, 16 GiB RAM, 320 GiB", 60),
-    ("paws.compute.small", 4, 2048, 40, "compute", "Compute Small - 4 vCPU, 2 GiB RAM", 110),
-    ("paws.compute.medium", 8, 4096, 40, "compute", "Compute Medium - 8 vCPU, 4 GiB RAM", 120),
-    ("paws.compute.large", 16, 8192, 40, "compute", "Compute Large - 16 vCPU, 8 GiB RAM", 130),
-    ("paws.memory.small", 2, 8192, 40, "memory", "Memory Small - 2 vCPU, 8 GiB RAM", 210),
-    ("paws.memory.medium", 4, 16384, 80, "memory", "Memory Medium - 4 vCPU, 16 GiB RAM", 220),
-    ("paws.memory.large", 8, 32768, 160, "memory", "Memory Large - 8 vCPU, 32 GiB RAM", 230),
-]
-
-
 async def seed_instance_types() -> None:
-    """Seed default instance types if none exist."""
+    """Seed default instance types from seeds/instance_types.yml if none exist."""
     try:
         async with async_session() as db:
             result = await db.execute(select(InstanceType).limit(1))
             if result.scalar_one_or_none() is not None:
                 return
-            for name, vcpus, ram_mib, disk_gib, category, description, sort_order in DEFAULT_INSTANCE_TYPES:
+            seeds_file = _SEEDS_DIR / "instance_types.yml"
+            if not seeds_file.exists():
+                logger.warning("seeds/instance_types.yml not found, skipping instance type seed")
+                return
+            with seeds_file.open() as f:
+                data = yaml.safe_load(f)
+            types = data.get("instance_types", [])
+            for t in types:
                 db.add(
                     InstanceType(
-                        name=name,
-                        vcpus=vcpus,
-                        ram_mib=ram_mib,
-                        disk_gib=disk_gib,
-                        category=category,
-                        description=description,
-                        sort_order=sort_order,
+                        name=t["name"],
+                        vcpus=t["vcpus"],
+                        ram_mib=t["ram_mib"],
+                        disk_gib=t["disk_gib"],
+                        category=t["category"],
+                        description=t["description"],
+                        sort_order=t.get("sort_order", 0),
                     )
                 )
             await db.commit()
-            logger.info("Default instance types seeded (%d types).", len(DEFAULT_INSTANCE_TYPES))
+            logger.info("Default instance types seeded from YAML (%d types).", len(types))
     except Exception:
         logger.warning("Could not seed instance types - have you run 'alembic upgrade head'?")
 
@@ -252,6 +251,11 @@ async def seed_instance_types() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.core.setup_state import check_initialized, is_initialized
+    from app.services.cluster_registry import cluster_registry
+
+    _req_id_filter = _RequestIDFilter()
+    for handler in logging.root.handlers:
+        handler.addFilter(_req_id_filter)
 
     validate_security_settings()
     await check_initialized()
@@ -259,6 +263,7 @@ async def lifespan(app: FastAPI):
         await seed_default_admin()
         await seed_system_settings()
         await seed_instance_types()
+        await cluster_registry.reload()
     yield
 
 
@@ -309,8 +314,14 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "X-CSRF-Token"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-CSRF-Token", "X-Request-ID"],
 )
+app.add_middleware(RequestIDMiddleware)
+
+Instrumentator(
+    should_group_status_codes=True,
+    excluded_handlers=["/health", "/metrics"],
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 app.include_router(health.router)
 app.include_router(setup.router)
@@ -362,3 +373,4 @@ app.include_router(system_rules.router)
 app.include_router(groups.router)
 app.include_router(template_requests.router)
 app.include_router(docs.router)
+app.include_router(drift.router)

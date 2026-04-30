@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import SystemSetting, User
-from app.services.proxmox_client import get_pve
+from app.services.proxmox_cache import get_storage_list as cached_storage_list
 
 router = APIRouter(prefix="/api/storage-pools", tags=["storage-pools"])
 
@@ -39,7 +39,7 @@ async def list_available_storage_pools(
 ):
     """Admin-only: list all Proxmox storages that can hold VM/container disks."""
     try:
-        storages = get_pve(cluster_id).get_storage_list()
+        storages = await cached_storage_list(cluster_id)
         result = []
         for s in storages:
             content = s.get("content", "")

@@ -1,12 +1,51 @@
 # Changelog
 
-## 0.2.12 - Current
+## 0.2.13 - Current
 
 ### Added
+- Added scripts/backup-db.sh for gzip-compressed pg_dump backups with auto-parsed DATABASE_URL.
+- Added scripts/restore-db.sh for confirmed drop-and-restore with connection termination.
+- Added scripts/test-db-backup-restore.sh smoke test validating the full backup/restore cycle.
+- Added .InternalDocs/db-backup-restore-runbook.md covering all recovery scenarios.
+- **Drift** - Added `POST /api/admin/drift/{event_id}/fix` and `POST /api/admin/drift/fix-all` to immediately reconcile auto-fixable drift events without waiting for the next scan.
+- **Drift UI** - Added per-row Fix and toolbar Fix All buttons to the Admin > Drift tab; events expose an `auto_fixable` flag so the UI can disable buttons for non-fixable types.
+- **Backups** - Added 15-second Redis cache for snapshot listings with invalidation on create, rollback, and delete to cut PVE round-trips on the backup pages.
+- **Proxmox cache helpers** - Added `app/services/proxmox_cache.py` with reusable cached PVE call primitives shared across routers.
+
+### Changed
+- **Drift scanner** - `status_mismatch` and `node_mismatch` are now auto-corrected against PVE during the scheduled scan (PVE is treated as source of truth); these no longer raise drift events.
+- **Network migration** - Rewrote `PUT /api/compute/vms/{id}/network` to be transactionally consistent: target VPC IP is allocated first, the instance is stopped, PVE config is updated atomically (single call for VMs with cloud-init regen, single call for LXC), then DB is committed and the instance restarted; on any failure the previous PVE config and DB state are restored. Restricted to `net0` so primary-VPC reservation logic stays coherent.
+- **Backups** - All snapshot operations (list, create, rollback, delete) now run via `asyncio.to_thread` so the event loop is no longer blocked on PVE API calls.
+- **Celery tasks** - `email_tasks`, `resource_lifecycle`, and `drift_scanner` now run their async bodies through a shared `app/tasks/_async_runner.py` helper that builds a fresh per-task engine; eliminates the recurring "Future attached to a different loop" errors under Celery prefork.
+- **Cluster status cache** - `refresh_cluster_status_cache` now refreshes a single primary key instead of iterating registered clusters, matching the single-cluster deployment model.
+
+### Fixed
+- **IP reservations** - Network migration no longer drops the old reservation before confirming the target VPC has an allocatable IP; returns 409 if no IP is available, preventing the "DB has no IP, PVE keeps stale ipconfig0" drift.
+- **Secondary NIC reservations** - Old IP reservation cleanup is now scoped to the old VPC subnets and the primary NIC label, so secondary-NIC reservations are no longer wiped during a primary network change.
+
+
+## 0.2.12 - 2026-04-21
+
+### Added
+- Added RequestIDMiddleware to assign X-Request-ID to every request and response.
+- Added Prometheus /metrics endpoint via prometheus-fastapi-instrumentator.
+- Added typed cpu_cores, ram_mb, disk_gb, spec_hostname properties to Resource model.
+- Moved instance type seeds to backend/seeds/instance_types.yml for operator customization.
+- Added PAWS-ID machine-parseable stamp to Proxmox resource description on create.
+- Added drift_events table and Alembic migration b1c2d3e4f5a6.
+- Added paws.scan_drift Celery task scheduled every 5 minutes to detect DB/cluster divergence.
+- Added /api/admin/drift endpoints for listing and acknowledging drift events.
+- Added Drift tab to Admin > Infrastructure panel.
 - **Redis-backed cache for cluster status** - `/api/cluster/status` now caches the sanitized Proxmox response in Redis with a 10s TTL, eliminating per-request PVE API round-trips on dashboard load; new `app/services/cache.py` helper provides reusable JSON cache primitives that gracefully no-op when Redis is unavailable
 - **Redis-backed cache for live VM and container status** - `list_vms`, `get_vm`, `list_containers`, `get_container` now cache per-resource live status in Redis with a 5s TTL; cache is invalidated on power actions (start/stop/shutdown/suspend/hibernate) and resize so user-triggered changes surface immediately
 - **Celery Beat cache warming** - New `paws.refresh_cluster_status_cache` task runs every 30 seconds to pre-populate cluster status for every registered cluster so the dashboard always reads from a warm cache
 - **`cached_at` timestamps on cluster status** - `ClusterStatusResponse` now carries an epoch-second `cached_at` field so the UI can render freshness
+
+### Changed
+- Simplified cluster status cache to use a single key for single-cluster deployments.
+- Auto-resolved cluster_id from registry on resource, VPC, and security group creation.
+- Removed cluster selector UI from instance creation, VPC, and security group forms.
+- Dropped stale cluster_id query params from admin cluster status and task log fetch calls.
 
 ## 0.2.11 - 2026-04-09
 

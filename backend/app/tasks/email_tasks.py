@@ -1,6 +1,5 @@
 """Celery tasks for sending email notifications."""
 
-import asyncio
 import logging
 from typing import Any
 
@@ -10,22 +9,19 @@ log = logging.getLogger(__name__)
 
 
 def _run_async(coro):  # noqa: ANN001
-    """Run an async coroutine from a sync Celery task."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    from app.tasks._async_runner import run_task_async
+
+    return run_task_async(coro)
 
 
 async def _send_notification(user_id: str, template_name: str, context: dict[str, Any]) -> None:
     from sqlalchemy import select
 
-    from app.core.database import async_session_factory
+    from app.core.database import async_session
     from app.models.models import User
     from app.services.email_service import send_template_email
 
-    async with async_session_factory() as db:
+    async with async_session() as db:
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         if not user:

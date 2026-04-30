@@ -34,6 +34,14 @@ celery_app.conf.update(
             "task": "paws.refresh_cluster_status_cache",
             "schedule": 30.0,  # every 30 seconds - keeps dashboard warm
         },
+        "refresh-vm-statuses-batch": {
+            "task": "paws.refresh_vm_statuses_batch",
+            "schedule": 10.0,  # every 10 seconds - keeps list pages warm
+        },
+        "scan-drift": {
+            "task": "paws.scan_drift",
+            "schedule": 300.0,  # every 5 minutes
+        },
     },
 )
 

@@ -617,7 +617,7 @@ export default function InstanceDetail() {
       const url = window.URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement('a');
       a.href = url;
-      const contentType = r.headers?.['content-type'] || '';
+      const contentType = String(r.headers?.['content-type'] || '');
       const isZip = contentType.includes('zip') || (!baseName.includes('.') && r.data.size > 0);
       a.download = isZip && !baseName.endsWith('.zip') ? `${baseName}.zip` : baseName;
       a.click();
@@ -913,9 +913,6 @@ export default function InstanceDetail() {
                 <Stat label="Created" value={new Date(inst.created_at).toLocaleString()} />
                 <Stat label="VMID" value={String(inst.proxmox_vmid)} />
                 <Stat label="Node" value={inst.proxmox_node} />
-                {inst.cluster_id && inst.cluster_id !== 'default' && (
-                  <Stat label="Cluster" value={inst.cluster_id} />
-                )}
               </div>
             </CardContent>
           </Card>

@@ -109,7 +109,7 @@ const ADMIN_SECTIONS = [
   },
   {
     label: 'Infrastructure',
-    tabs: ['Storage', 'Connections', 'SDN'] as const,
+    tabs: ['Storage', 'Connections', 'SDN', 'Drift'] as const,
   },
 ] as const;
 
@@ -213,6 +213,7 @@ export default function Admin() {
       {activeTab === 'API Keys' && <ApiKeysTab onSwitchTab={handleTabClick} />}
       {activeTab === 'Connections' && <ConnectionsTab />}
       {activeTab === 'SDN' && <SDNTab />}
+      {activeTab === 'Drift' && <DriftTab />}
     </div>
   );
 }
@@ -3251,7 +3252,7 @@ function ConnectionsTab() {
           {form.conn_type === 'pve' && (
             <>
               <div className="border-t border-paws-border-subtle pt-3 mt-1">
-                <p className="text-xs text-paws-text-dim mb-2">Console Access (xterm.js) — dedicated read-only Proxmox user for terminal sessions</p>
+                <p className="text-xs text-paws-text-dim mb-2">Console Access (xterm.js) - dedicated read-only Proxmox user for terminal sessions</p>
                 <Input label="Console Username" value={form.console_user} onChange={e => setForm(p => ({ ...p, console_user: e.target.value }))} placeholder="e.g. paws-console@pve" />
                 <Input label="Console Password" type="password" value={form.console_password} onChange={e => setForm(p => ({ ...p, console_password: e.target.value }))} placeholder={editing ? '(leave blank to keep current)' : ''} />
               </div>
@@ -3404,14 +3405,13 @@ function ClusterDetailView({ clusterId }: { clusterId: string }) {
   const { confirm } = useConfirm();
 
   const fetchStatus = () => {
-    api.get(`/api/cluster/status?cluster_id=${encodeURIComponent(clusterId)}`).then(r => setStatus(r.data)).catch(() => {});
+    api.get('/api/cluster/status').then(r => setStatus(r.data)).catch(() => {});
   };
 
   const fetchTasks = () => {
     setTasksLoading(true);
     const params = new URLSearchParams();
     params.set('limit', '200');
-    params.set('cluster_id', clusterId);
     if (nodeFilter) params.set('node', nodeFilter);
     if (typeFilter) params.set('type', typeFilter);
     if (errorsOnly) params.set('errors_only', 'true');
@@ -3486,7 +3486,7 @@ function ClusterDetailView({ clusterId }: { clusterId: string }) {
   const openTaskDetail = (task: PveTask) => {
     setDetailLoading(true);
     setSelectedTask(null);
-    api.get(`/api/cluster/admin/tasks/${encodeURIComponent(task.node)}/${encodeURIComponent(task.upid)}?cluster_id=${encodeURIComponent(clusterId)}`)
+    api.get(`/api/cluster/admin/tasks/${encodeURIComponent(task.node)}/${encodeURIComponent(task.upid)}`)
       .then(r => setSelectedTask(r.data))
       .catch(() => setSelectedTask({ ...task, exitstatus: 'fetch error', log: 'Failed to load task log.' }))
       .finally(() => setDetailLoading(false));
@@ -3808,6 +3808,159 @@ function ClusterDetailView({ clusterId }: { clusterId: string }) {
           </div>
         ) : null}
       </Modal>
+    </div>
+  );
+}
+
+// --- Drift Tab -----------------------------------------------------------
+
+function DriftTab() {
+  const [events, setEvents] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<'all' | 'active' | 'acknowledged'>('active');
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
+
+  const fetchEvents = () => {
+    setLoading(true);
+    const params = filter === 'all' ? '' : filter === 'active' ? '?acknowledged=false' : '?acknowledged=true';
+    api.get(`/api/admin/drift${params}`)
+      .then(r => setEvents(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchEvents(); }, [filter]);
+
+  const acknowledge = async (id: string) => {
+    try {
+      await api.post(`/api/admin/drift/${id}/acknowledge`);
+      toast('Event acknowledged', 'success');
+      fetchEvents();
+    } catch {
+      toast('Failed to acknowledge', 'error');
+    }
+  };
+
+  const fixEvent = async (id: string) => {
+    try {
+      const r = await api.post(`/api/admin/drift/${id}/fix`);
+      const changes = r.data?.changes ? Object.keys(r.data.changes).join(', ') : '';
+      toast(`Fixed${changes ? `: ${changes}` : ''}`, 'success');
+      fetchEvents();
+    } catch (e: any) {
+      toast(e?.response?.data?.detail ?? 'Failed to fix', 'error');
+    }
+  };
+
+  const fixAll = async () => {
+    if (!await confirm({ title: 'Fix All', message: 'Sync DB to Proxmox state for every auto-fixable drift event?' })) return;
+    try {
+      const r = await api.post('/api/admin/drift/fix-all');
+      toast(`Fixed ${r.data?.fixed ?? 0} event(s)`, 'success');
+      fetchEvents();
+    } catch {
+      toast('Failed to fix all', 'error');
+    }
+  };
+
+  const deleteEvent = async (id: string) => {
+    if (!await confirm({ title: 'Delete Event', message: 'Delete this drift event?' })) return;
+    try {
+      await api.delete(`/api/admin/drift/${id}`);
+      toast('Event deleted', 'success');
+      fetchEvents();
+    } catch {
+      toast('Failed to delete', 'error');
+    }
+  };
+
+  const DRIFT_LABELS: Record<string, string> = {
+    orphaned_in_db: 'Orphaned in DB',
+    orphaned_in_proxmox: 'Orphaned in Proxmox',
+    status_mismatch: 'Status Mismatch',
+    node_mismatch: 'Node Mismatch',
+  };
+
+  const DRIFT_COLOR: Record<string, string> = {
+    orphaned_in_db: 'text-red-400',
+    orphaned_in_proxmox: 'text-orange-400',
+    status_mismatch: 'text-yellow-400',
+    node_mismatch: 'text-blue-400',
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold">Drift Events</h3>
+          <p className="text-sm text-muted-foreground">Divergence between PAWS database and Proxmox cluster state.</p>
+        </div>
+        <div className="flex gap-2">
+          <select
+            value={filter}
+            onChange={e => setFilter(e.target.value as any)}
+            className="text-sm border rounded px-2 py-1 bg-background"
+          >
+            <option value="active">Active</option>
+            <option value="acknowledged">Acknowledged</option>
+            <option value="all">All</option>
+          </select>
+          <Button variant="outline" size="sm" onClick={fetchEvents}>Refresh</Button>
+          <Button variant="success" size="sm" onClick={fixAll} disabled={!events.some(e => e.auto_fixable && !e.acknowledged)}>Fix All</Button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="text-center py-8 text-muted-foreground">Loading...</div>
+      ) : events.length === 0 ? (
+        <div className="text-center py-8 text-muted-foreground">
+          {filter === 'active' ? 'No active drift detected.' : 'No events found.'}
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left">
+            <thead>
+              <tr className="border-b text-muted-foreground">
+                <th className="pb-2 pr-4">Type</th>
+                <th className="pb-2 pr-4">Resource</th>
+                <th className="pb-2 pr-4">VMID</th>
+                <th className="pb-2 pr-4">Node</th>
+                <th className="pb-2 pr-4">Details</th>
+                <th className="pb-2 pr-4">Detected</th>
+                <th className="pb-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map(ev => (
+                <tr key={ev.id} className="border-b hover:bg-muted/50">
+                  <td className={`py-2 pr-4 font-medium ${DRIFT_COLOR[ev.drift_type] ?? ''}`}>
+                    {DRIFT_LABELS[ev.drift_type] ?? ev.drift_type}
+                  </td>
+                  <td className="py-2 pr-4 font-mono text-xs">{ev.resource_name ?? ev.resource_id ?? '-'}</td>
+                  <td className="py-2 pr-4">{ev.proxmox_vmid ?? '-'}</td>
+                  <td className="py-2 pr-4">{ev.proxmox_node ?? '-'}</td>
+                  <td className="py-2 pr-4 text-xs text-muted-foreground max-w-xs truncate">{ev.details ?? '-'}</td>
+                  <td className="py-2 pr-4 text-xs text-muted-foreground">
+                    {ev.detected_at ? new Date(ev.detected_at).toLocaleString() : '-'}
+                  </td>
+                  <td className="py-2">
+                    <div className="flex gap-1">
+                      {ev.auto_fixable && !ev.acknowledged && (
+                        <Button variant="success" size="sm" onClick={() => fixEvent(ev.id)}>Fix</Button>
+                      )}
+                      {!ev.acknowledged && (
+                        <Button variant="outline" size="sm" onClick={() => acknowledge(ev.id)}>Ack</Button>
+                      )}
+                      <Button variant="ghost" size="sm" onClick={() => deleteEvent(ev.id)}>Delete</Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

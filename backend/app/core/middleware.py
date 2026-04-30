@@ -1,6 +1,9 @@
 """Rate-limiting, analytics, and setup-guard middleware using Redis."""
 
+import contextvars
+import logging
 import time
+import uuid
 
 from fastapi import Request, Response, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -9,6 +12,36 @@ from starlette.responses import JSONResponse
 from app.core.security import decode_token
 from app.services.rate_limiter import check_api_rate_limit
 
+_request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+def get_request_id() -> str:
+    return _request_id_var.get()
+
+
+class _RequestIDFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _request_id_var.get()
+        return True
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Assigns a unique X-Request-ID to every request for traceability.
+
+    Reads from the incoming header if present; otherwise generates a UUID4.
+    The id is stored in a ContextVar so log formatters can include it.
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        token = _request_id_var.set(req_id)
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = req_id
+            return response
+        finally:
+            _request_id_var.reset(token)
+
 
 class SetupGuardMiddleware(BaseHTTPMiddleware):
     """Returns 503 with setup_required flag when the app has not been initialized."""
@@ -16,6 +49,7 @@ class SetupGuardMiddleware(BaseHTTPMiddleware):
     ALLOWED_PREFIXES = (
         "/api/setup",
         "/health",
+        "/metrics",
         "/docs",
         "/openapi.json",
         "/favicon",
@@ -43,7 +77,7 @@ class SetupGuardMiddleware(BaseHTTPMiddleware):
 class AnalyticsMiddleware(BaseHTTPMiddleware):
     """Tracks per-user request counts and active sessions in Redis."""
 
-    EXEMPT_PREFIXES = ("/health", "/docs", "/openapi.json", "/favicon")
+    EXEMPT_PREFIXES = ("/health", "/metrics", "/docs", "/openapi.json", "/favicon")
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
