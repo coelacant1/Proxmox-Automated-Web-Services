@@ -18,7 +18,8 @@ def upgrade() -> None:
     # --- cluster_connections table ---
     op.create_table(
         "cluster_connections",
-        sa.Column("id", sa.CHAR(36), primary_key=True),
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
         sa.Column("name", sa.String(100), nullable=False, unique=True),
         sa.Column("conn_type", sa.String(20), nullable=False),
         sa.Column("host", sa.String(255), nullable=False),

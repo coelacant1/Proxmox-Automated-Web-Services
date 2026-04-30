@@ -1,5 +1,6 @@
 """Backup and snapshot management endpoints."""
 
+import asyncio
 import json as _json
 import logging
 import uuid
@@ -15,10 +16,15 @@ from app.core.database import get_db
 from app.core.deps import get_current_active_user, require_admin
 from app.models.models import Backup, BackupPlan, Resource, SystemSetting, User, UserQuota
 from app.services.audit_service import log_action
+from app.services.cache import cache_delete, cached_call
 from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/backups", tags=["backups"])
 logger = logging.getLogger(__name__)
+
+
+def _snapshots_cache_key(resource: Resource, vmtype: str) -> str:
+    return f"pve:{resource.cluster_id or 'default'}:snapshots:{resource.proxmox_node}:{resource.proxmox_vmid}:{vmtype}"
 
 
 class SnapshotCreate(BaseModel):
@@ -65,11 +71,22 @@ async def list_snapshots(
 ):
     resource = await _get_resource(db, user.id, resource_id)
     vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
-    try:
-        snapshots = get_pve(resource.cluster_id).list_snapshots(resource.proxmox_node, resource.proxmox_vmid, vmtype)
-        return [s for s in snapshots if s.get("name") != "current"]
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+
+    cache_key = _snapshots_cache_key(resource, vmtype)
+
+    async def _fetch():
+        try:
+            snaps = await asyncio.to_thread(
+                get_pve(resource.cluster_id).list_snapshots,
+                resource.proxmox_node,
+                resource.proxmox_vmid,
+                vmtype,
+            )
+            return [s for s in snaps if s.get("name") != "current"]
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
+    return await cached_call(cache_key, 15, _fetch)
 
 
 @router.post("/{resource_id}/snapshots", status_code=status.HTTP_201_CREATED)
@@ -87,7 +104,10 @@ async def create_snapshot(
         if vmtype == "qemu" and body.include_ram:
             kwargs["vmstate"] = 1
         pve = get_pve(resource.cluster_id)
-        upid = pve.create_snapshot(resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype, **kwargs)
+        upid = await asyncio.to_thread(
+            pve.create_snapshot, resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype, **kwargs
+        )
+        await cache_delete(_snapshots_cache_key(resource, vmtype))
         await log_action(db, user.id, "snapshot_create", resource.resource_type, resource.id, {"snapshot": body.name})
         return {"status": "creating", "task": upid, "snapshot": body.name}
     except Exception as e:
@@ -106,7 +126,10 @@ async def rollback_snapshot(
 
     try:
         pve = get_pve(resource.cluster_id)
-        upid = pve.rollback_snapshot(resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype)
+        upid = await asyncio.to_thread(
+            pve.rollback_snapshot, resource.proxmox_node, resource.proxmox_vmid, body.name, vmtype
+        )
+        await cache_delete(_snapshots_cache_key(resource, vmtype))
         await log_action(db, user.id, "snapshot_rollback", resource.resource_type, resource.id, {"snapshot": body.name})
         return {"status": "rolling_back", "task": upid}
     except Exception as e:
@@ -125,7 +148,10 @@ async def delete_snapshot(
 
     try:
         pve = get_pve(resource.cluster_id)
-        upid = pve.delete_snapshot(resource.proxmox_node, resource.proxmox_vmid, snapshot_name, vmtype)
+        upid = await asyncio.to_thread(
+            pve.delete_snapshot, resource.proxmox_node, resource.proxmox_vmid, snapshot_name, vmtype
+        )
+        await cache_delete(_snapshots_cache_key(resource, vmtype))
         await log_action(
             db, user.id, "snapshot_delete", resource.resource_type, resource.id, {"snapshot": snapshot_name}
         )
@@ -578,7 +604,13 @@ async def list_all_proxmox_backups(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    """List ALL Proxmox backup files across all user's resources."""
+    """List ALL Proxmox backup files across all user's resources.
+
+    Cached per-user for 30 s in Redis. Per-cluster ``get_storage_list`` and
+    per-storage ``get_storage_content`` calls run concurrently via
+    ``asyncio.gather`` + ``to_thread`` so they no longer serialize the event
+    loop.
+    """
     # Get user's resources
     result = await db.execute(
         select(Resource).where(
@@ -587,68 +619,69 @@ async def list_all_proxmox_backups(
             Resource.status != "destroyed",
         )
     )
-    resources = result.scalars().all()
-    resource_map = {}
-    vmid_to_resource = {}
-    for r in resources:
-        resource_map[str(r.id)] = r
-        if r.proxmox_vmid:
-            vmid_to_resource[str(r.proxmox_vmid)] = r
+    resources = list(result.scalars().all())
+    vmid_to_resource = {str(r.proxmox_vmid): r for r in resources if r.proxmox_vmid}
 
     fallback_node = resources[0].proxmox_node if resources else None
     user_tag = f"[paws:{user.id}]"
-    backups: list[dict] = []
-
     cluster_ids = {r.cluster_id for r in resources}
-    for cid in cluster_ids:
-        try:
-            pve = get_pve(cid)
-            storages = pve.get_storage_list()
-            for s in storages:
-                if "backup" not in s.get("content", ""):
-                    continue
+
+    cache_key = f"backup_list_proxmox_all:{user.id}"
+
+    async def _scan() -> list[dict]:
+        async def _scan_cluster(cid: str | None) -> list[dict]:
+            try:
+                pve = get_pve(cid)
+                storages = await asyncio.to_thread(pve.get_storage_list)
+            except Exception:
+                return []
+            backup_storages = [s for s in storages if "backup" in (s.get("content") or "")]
+
+            async def _scan_storage(s: dict) -> list[dict]:
                 try:
                     node = _resolve_node(s, fallback_node, cid)
-                    contents = pve.get_storage_content(node, s["storage"])
-                    is_pbs = s.get("type") == "pbs"
-                    for item in contents:
-                        if item.get("content") != "backup":
-                            continue
-                        notes = item.get("notes", "") or ""
-                        if user_tag not in notes:
-                            continue
-                        volid = item.get("volid", "")
-                        # Match to resource by VMID
-                        matched_resource = None
-                        for vmid_str, r in vmid_to_resource.items():
-                            if vmid_str in volid:
-                                matched_resource = r
-                                break
-
-                        entry = {
-                            "volid": volid,
-                            "size": item.get("size", 0),
-                            "ctime": item.get("ctime", 0),
-                            "format": item.get("format", "pbs" if is_pbs else ""),
-                            "storage": s["storage"],
-                            "notes": notes,
-                            "pbs": is_pbs,
-                            "resource_id": str(matched_resource.id) if matched_resource else None,
-                            "resource_name": matched_resource.display_name if matched_resource else None,
-                            "resource_type": matched_resource.resource_type if matched_resource else None,
-                            "vmid": matched_resource.proxmox_vmid if matched_resource else None,
-                            "node": matched_resource.proxmox_node if matched_resource else (s.get("node") or None),
-                        }
-                        if is_pbs:
-                            entry["backup_type"] = "ct" if "/ct/" in volid else "vm"
-                            entry["backup_time"] = item.get("ctime", 0)
-                        backups.append(entry)
+                    contents = await asyncio.to_thread(pve.get_storage_content, node, s["storage"])
                 except Exception:
-                    pass
-        except Exception:
-            pass
+                    return []
+                is_pbs = s.get("type") == "pbs"
+                out: list[dict] = []
+                for item in contents:
+                    if item.get("content") != "backup":
+                        continue
+                    notes = item.get("notes", "") or ""
+                    if user_tag not in notes:
+                        continue
+                    volid = item.get("volid", "")
+                    matched = next((r for vmid, r in vmid_to_resource.items() if vmid in volid), None)
+                    entry = {
+                        "volid": volid,
+                        "size": item.get("size", 0),
+                        "ctime": item.get("ctime", 0),
+                        "format": item.get("format", "pbs" if is_pbs else ""),
+                        "storage": s["storage"],
+                        "notes": notes,
+                        "pbs": is_pbs,
+                        "resource_id": str(matched.id) if matched else None,
+                        "resource_name": matched.display_name if matched else None,
+                        "resource_type": matched.resource_type if matched else None,
+                        "vmid": matched.proxmox_vmid if matched else None,
+                        "node": matched.proxmox_node if matched else (s.get("node") or None),
+                    }
+                    if is_pbs:
+                        entry["backup_type"] = "ct" if "/ct/" in volid else "vm"
+                        entry["backup_time"] = item.get("ctime", 0)
+                    out.append(entry)
+                return out
 
-    backups.sort(key=lambda b: b.get("ctime", 0), reverse=True)
+            results = await asyncio.gather(*[_scan_storage(s) for s in backup_storages])
+            return [item for sub in results for item in sub]
+
+        cluster_results = await asyncio.gather(*[_scan_cluster(cid) for cid in cluster_ids])
+        all_backups = [b for sub in cluster_results for b in sub]
+        all_backups.sort(key=lambda b: b.get("ctime", 0), reverse=True)
+        return all_backups
+
+    backups = await cached_call(cache_key, 30, _scan)
     return {"backups": backups, "total": len(backups)}
 
 
@@ -657,15 +690,20 @@ async def backup_quota_summary(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    """Get backup quota usage for the current user."""
-    # Quota limits
+    """Get backup quota usage for the current user.
+
+    Cached per-user for 30 s in Redis because the underlying Proxmox calls
+    (per-VM ``list_snapshots`` + per-storage ``get_storage_content``) are
+    expensive and the data is only used for an at-a-glance UI counter.
+    """
+    # Quota limits (always read fresh from DB)
     q_result = await db.execute(select(UserQuota).where(UserQuota.user_id == user.id))
     quota = q_result.scalar_one_or_none()
     max_snapshots = quota.max_snapshots if quota else 10
     max_backups = quota.max_backups if quota else 20
     max_backup_size_gb = quota.max_backup_size_gb if quota else 100
 
-    # DB backup records count
+    # DB backup records count (cheap)
     count_result = await db.execute(
         select(func.count(Backup.id)).where(
             Backup.owner_id == user.id,
@@ -674,7 +712,7 @@ async def backup_quota_summary(
     )
     db_backup_count = count_result.scalar() or 0
 
-    # Snapshot count from Proxmox (live per-resource)
+    # User's VM/LXC resources (needed to look up live counts from PVE)
     res_result = await db.execute(
         select(Resource).where(
             Resource.owner_id == user.id,
@@ -682,55 +720,86 @@ async def backup_quota_summary(
             Resource.status != "destroyed",
         )
     )
-    all_resources = res_result.scalars().all()
-    snapshot_count = 0
-    for r in all_resources:
-        if not r.proxmox_vmid or not r.proxmox_node:
-            continue
-        try:
-            vmtype = "lxc" if r.resource_type == "lxc" else "qemu"
-            snaps = get_pve(r.cluster_id).list_snapshots(r.proxmox_node, r.proxmox_vmid, vmtype)
-            snapshot_count += len([s for s in snaps if s.get("name") != "current"])
-        except Exception:
-            pass
+    all_resources = list(res_result.scalars().all())
 
-    # Proxmox backup files total size
-    fallback_node = all_resources[0].proxmox_node if all_resources else None
-    user_tag = f"[paws:{user.id}]"
-    total_backup_size = 0
-    proxmox_backup_count = 0
-    cluster_ids = {r.cluster_id for r in all_resources}
-    for cid in cluster_ids:
-        try:
-            pve = get_pve(cid)
-            storages = pve.get_storage_list()
-            for s in storages:
-                if "backup" not in s.get("content", ""):
-                    continue
+    # Heavy section: snapshot count + proxmox backup totals.
+    # Per-VM list_snapshots and per-storage get_storage_content are sync HTTP
+    # calls; running them serially in an async handler blocks the event loop
+    # and serializes every other request. Parallelize with to_thread + gather
+    # and cache the aggregate per-user.
+    cache_key = f"backup_quota_summary:{user.id}"
+
+    async def _compute_pve_counts() -> dict:
+        # --- Snapshots: one call per resource, run in parallel ---
+        async def _count_snaps(r: Resource) -> int:
+            if not r.proxmox_vmid or not r.proxmox_node:
+                return 0
+            try:
+                vmtype = "lxc" if r.resource_type == "lxc" else "qemu"
+                snaps = await asyncio.to_thread(
+                    get_pve(r.cluster_id).list_snapshots, r.proxmox_node, r.proxmox_vmid, vmtype
+                )
+                return len([s for s in snaps if s.get("name") != "current"])
+            except Exception:
+                return 0
+
+        snap_counts = await asyncio.gather(*[_count_snaps(r) for r in all_resources])
+        total_snaps = sum(snap_counts)
+
+        # --- Proxmox backup files: one call per (cluster, storage), parallelized ---
+        fallback_node = all_resources[0].proxmox_node if all_resources else None
+        user_tag = f"[paws:{user.id}]"
+        cluster_ids = {r.cluster_id for r in all_resources}
+
+        async def _scan_cluster(cid: str | None) -> tuple[int, int]:
+            try:
+                pve = get_pve(cid)
+                storages = await asyncio.to_thread(pve.get_storage_list)
+            except Exception:
+                return 0, 0
+            backup_storages = [s for s in storages if "backup" in (s.get("content") or "")]
+
+            async def _scan_storage(s: dict) -> tuple[int, int]:
                 try:
                     node = _resolve_node(s, fallback_node, cid)
-                    contents = pve.get_storage_content(node, s["storage"])
-                    for item in contents:
-                        if item.get("content") != "backup":
-                            continue
-                        if user_tag not in (item.get("notes", "") or ""):
-                            continue
-                        proxmox_backup_count += 1
-                        total_backup_size += item.get("size", 0)
+                    contents = await asyncio.to_thread(pve.get_storage_content, node, s["storage"])
                 except Exception:
-                    pass
-        except Exception:
-            pass
+                    return 0, 0
+                cnt = 0
+                size = 0
+                for item in contents:
+                    if item.get("content") != "backup":
+                        continue
+                    if user_tag not in (item.get("notes", "") or ""):
+                        continue
+                    cnt += 1
+                    size += item.get("size", 0)
+                return cnt, size
+
+            results = await asyncio.gather(*[_scan_storage(s) for s in backup_storages])
+            return sum(c for c, _ in results), sum(sz for _, sz in results)
+
+        cluster_results = await asyncio.gather(*[_scan_cluster(cid) for cid in cluster_ids])
+        total_backup_count = sum(c for c, _ in cluster_results)
+        total_backup_size = sum(sz for _, sz in cluster_results)
+
+        return {
+            "snapshot_count": total_snaps,
+            "proxmox_backup_count": total_backup_count,
+            "total_backup_size": total_backup_size,
+        }
+
+    pve_counts = await cached_call(cache_key, 30, _compute_pve_counts)
 
     return {
         "max_snapshots": max_snapshots,
         "max_backups": max_backups,
         "max_backup_size_gb": max_backup_size_gb,
-        "snapshot_count": snapshot_count,
+        "snapshot_count": pve_counts["snapshot_count"],
         "db_backup_count": db_backup_count,
-        "proxmox_backup_count": proxmox_backup_count,
-        "total_backup_size": total_backup_size,
-        "total_count": snapshot_count + proxmox_backup_count,
+        "proxmox_backup_count": pve_counts["proxmox_backup_count"],
+        "total_backup_size": pve_counts["total_backup_size"],
+        "total_count": pve_counts["snapshot_count"] + pve_counts["proxmox_backup_count"],
     }
 
 

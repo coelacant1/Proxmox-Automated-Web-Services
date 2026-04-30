@@ -1,6 +1,7 @@
 """User-facing resource endpoints with tenant isolation."""
 
 import logging
+import re as _re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,6 +15,7 @@ from app.core.pagination import PaginatedParams, PaginatedResponse
 from app.models.models import ProjectMember, Resource, User, UserQuota
 from app.schemas.schemas import QuotaRead, UsageResponse
 from app.services.group_access import check_group_access
+from app.services.proxmox_cache import get_cluster_resources as cached_cluster_resources
 from app.services.proxmox_client import get_pve
 
 logger = logging.getLogger(__name__)
@@ -76,17 +78,14 @@ async def list_my_resources(
     result = await db.execute(query)
     resources = list(result.scalars().all())
 
-    # Build VMID -> live info lookup from cluster resources (single API call per cluster)
+    # Build VMID -> live info lookup from cluster resources (single API call per cluster, cached)
     cluster_lookup: dict[int, dict] = {}
     cluster_ids = {r.cluster_id for r in resources if hasattr(r, "cluster_id")}
-    for cid in cluster_ids or {"default"}:
-        try:
-            for cr in get_pve(cid).get_cluster_resources("vm"):
-                vmid = cr.get("vmid")
-                if vmid is not None:
-                    cluster_lookup[vmid] = cr
-        except Exception:
-            pass
+    for cid in cluster_ids or {None}:
+        for cr in await cached_cluster_resources(cid, "vm"):
+            vmid = cr.get("vmid")
+            if vmid is not None:
+                cluster_lookup[vmid] = cr
 
     items = []
     for r in resources:
@@ -161,6 +160,19 @@ async def get_my_usage(
 
 # --- Resource Notes ---
 
+_PAWS_ID_RE = _re.compile(r"^PAWS-ID:([0-9a-f-]{36})", _re.MULTILINE)
+
+
+def parse_paws_id(description: str) -> str | None:
+    """Extract the PAWS resource UUID from a Proxmox description field.
+
+    Returns None if no PAWS-ID line is present.
+    """
+    if not description:
+        return None
+    m = _PAWS_ID_RE.search(description)
+    return m.group(1) if m else None
+
 
 def _build_paws_description(resource: Resource, owner: User | None, user_notes: str) -> str:
     """Build Proxmox description with PAWS metadata header + user notes."""
@@ -168,6 +180,8 @@ def _build_paws_description(resource: Resource, owner: User | None, user_notes: 
     email = (owner.email or "N/A") if owner else "N/A"
     owner_id = owner.id if owner else resource.owner_id
     lines = [
+        f"PAWS-ID:{resource.id}",
+        "",
         "PAWS Managed Resource",
         "",
         f"Owner: {username} ({email})",

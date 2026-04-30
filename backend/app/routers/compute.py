@@ -19,6 +19,7 @@ from app.core.lifecycle import validate_instance_specs
 from app.models.models import VPC, Resource, SSHKeyPair, Subnet, SystemSetting, User, UserQuota, VMIDPool, Volume
 from app.services.audit_service import log_action
 from app.services.cache import cache_delete, cached_call
+from app.services.cluster_registry import NoClustersConfigured, cluster_registry
 from app.services.firewall_profile import FirewallProfileService
 from app.services.node_service import get_next_vmid, select_node
 from app.services.pool_service import add_resource_to_pool, cleanup_user_pool, ensure_user_pool
@@ -374,13 +375,20 @@ async def create_vm(
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
+    try:
+        _cluster_id = cluster_registry.default_cluster
+    except NoClustersConfigured:
+        raise HTTPException(
+            status_code=503, detail="No Proxmox cluster configured. Add one via Admin > Infrastructure."
+        )
+
     # Reserve VMID first (without creating resource yet)
     db.add(VMIDPool(vmid=new_vmid, resource_id=None))
     await db.commit()
 
     # Find template's source node and determine clone strategy
     try:
-        pve = get_pve(body.cluster_id)
+        pve = get_pve()
         template_node = pve.find_vm_node(body.template_vmid)
         if not template_node:
             raise RuntimeError(f"Template VMID {body.template_vmid} not found on any node")
@@ -440,7 +448,7 @@ async def create_vm(
         proxmox_node=clone_node,
         status="provisioning",
         termination_protected=body.termination_protected,
-        cluster_id=body.cluster_id,
+        cluster_id=_cluster_id,
         specs=json.dumps(
             {
                 "cores": body.cores,
@@ -581,6 +589,7 @@ async def list_vms(
     result = await db.execute(query)
     resources = result.scalars().all()
     vms = []
+    batch = await _get_batch_vm_statuses()
     for r in resources:
         vm_data = {
             "id": str(r.id),
@@ -595,18 +604,14 @@ async def list_vms(
             "created_at": str(r.created_at),
             "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
         }
-        # Fetch live status if running (Redis-cached; ~5s TTL)
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
-            try:
-                live = await _get_live_status_cached(r)
-                vm_data["live_status"] = live.get("status")
-                vm_data["cpu_usage"] = live.get("cpu", 0)
-                vm_data["mem_usage"] = live.get("mem", 0)
-                vm_data["uptime"] = live.get("uptime", 0)
-                vm_data["netin"] = live.get("netin", 0)
-                vm_data["netout"] = live.get("netout", 0)
-            except Exception:
-                vm_data["live_status"] = "unknown"
+            pve_data = batch.get(r.proxmox_vmid, {})
+            vm_data["live_status"] = pve_data.get("status")
+            vm_data["cpu_usage"] = pve_data.get("cpu", 0)
+            vm_data["mem_usage"] = pve_data.get("mem", 0)
+            vm_data["uptime"] = pve_data.get("uptime", 0)
+            vm_data["netin"] = pve_data.get("netin", 0)
+            vm_data["netout"] = pve_data.get("netout", 0)
         vms.append(vm_data)
     return vms
 
@@ -1264,15 +1269,31 @@ async def update_vm_network(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_active_user),
 ):
-    """Update a VM's network interface to use a specific user VPC with static IP."""
+    """Migrate a VM's primary NIC (net0) to a different VPC with a fresh static IP.
+
+    Consistency contract:
+    - Pre-validates target VPC has an allocatable IP before mutating anything.
+    - Stages the new IPReservation in the DB (via flush) so unique-constraint
+      conflicts surface BEFORE we touch Proxmox.
+    - Snapshots the prior PVE NIC config so we can roll back on partial failure.
+    - PVE write happens AFTER DB stage; commit happens AFTER PVE write succeeds.
+    - On any PVE failure, we restore the previous PVE config and rollback the DB.
+    - Only ``net0`` is supported; secondary NICs use the dedicated NIC endpoints
+      so primary-VPC reservations and cloud-init ipconfig0 stay consistent.
+    """
     import ipaddress as _ipaddr
-
-    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
-
-    # Validate the VPC belongs to this user
     import uuid as _uuid
 
     from app.models.models import VPC, IPReservation
+
+    if body.net_id != "net0":
+        raise HTTPException(
+            status_code=400,
+            detail="This endpoint only migrates the primary NIC (net0). "
+            "Use /network/nics endpoints for secondary NICs.",
+        )
+
+    resource = await _get_user_resource(db, user.id, resource_id, "vm", min_group_perm="admin")
 
     try:
         vpc_uuid = _uuid.UUID(body.vpc_id)
@@ -1285,109 +1306,172 @@ async def update_vm_network(
     if not vpc.proxmox_vnet:
         raise HTTPException(status_code=400, detail="VPC has no Proxmox vnet configured")
 
-    # Release any old IP reservations for this resource
-    await db.execute(delete(IPReservation).where(IPReservation.resource_id == resource.id))
-
-    # Auto-allocate static IP from first active subnet
+    # ----- 1. Find a usable subnet + free IP in target VPC ------------------
     subnet_result = await db.execute(
         select(Subnet)
         .where(Subnet.vpc_id == vpc.id, Subnet.status == "active")
         .options(selectinload(Subnet.ip_reservations))
-        .limit(1)
     )
-    subnet = subnet_result.scalar_one_or_none()
-
-    ip_str = None
-    prefix_len = None
-    gateway = None
-    if subnet:
+    candidate: tuple[Subnet, str, int, str] | None = None  # (subnet, ip, prefix, gateway)
+    for subnet in subnet_result.scalars().all():
         try:
             network = _ipaddr.ip_network(subnet.cidr, strict=False)
-            prefix_len = network.prefixlen
-            gateway = subnet.gateway or str(list(network.hosts())[0])
-            used_ips = {r.ip_address for r in subnet.ip_reservations}
-            for host in list(network.hosts())[1:]:
-                if str(host) not in used_ips:
-                    ip_str = str(host)
-                    break
-            if ip_str:
-                db.add(
-                    IPReservation(
-                        subnet_id=subnet.id,
-                        ip_address=ip_str,
-                        resource_id=resource.id,
-                        label=resource.display_name,
-                        is_gateway=False,
-                        owner_id=user.id,
-                        cluster_id=vpc.cluster_id,
+        except ValueError:
+            continue
+        prefix_len = network.prefixlen
+        gateway = subnet.gateway or str(list(network.hosts())[0])
+        used_ips = {r.ip_address for r in subnet.ip_reservations}
+        excluded = used_ips | {gateway, str(network.network_address), str(network.broadcast_address)}
+        for host in network.hosts():
+            ip_str = str(host)
+            if ip_str not in excluded:
+                candidate = (subnet, ip_str, prefix_len, gateway)
+                break
+        if candidate:
+            break
+
+    if not candidate:
+        raise HTTPException(
+            status_code=409,
+            detail="Target VPC has no available IP in any active subnet. "
+            "Add a subnet, expand an existing one, or release reservations first.",
+        )
+
+    subnet, ip_str, prefix_len, gateway = candidate
+    dns_server = subnet.dns_server or "1.1.1.1"
+
+    # ----- 2. Snapshot old PVE config for rollback --------------------------
+    vmtype = "lxc" if resource.resource_type == "lxc" else "qemu"
+    pve = get_pve(resource.cluster_id)
+    old_pve_config: dict[str, str] = {}
+    try:
+        if vmtype == "lxc":
+            cur_cfg = pve.get_container_config(resource.proxmox_node, resource.proxmox_vmid)
+            if isinstance(cur_cfg, dict) and "net0" in cur_cfg:
+                old_pve_config["net0"] = cur_cfg["net0"]
+        else:
+            cur_cfg = pve.get_vm_config(resource.proxmox_node, resource.proxmox_vmid)
+            if isinstance(cur_cfg, dict):
+                for key in ("net0", "ipconfig0", "nameserver"):
+                    if key in cur_cfg:
+                        old_pve_config[key] = cur_cfg[key]
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to read current Proxmox config: {exc}",
+        ) from exc
+
+    # ----- 3. Stage DB changes (delete old primary reservation, add new) ----
+    # Identify the old primary reservation: it lives in a subnet of the OLD VPC
+    # (from specs.vpc_id) and has label == display_name (secondary NICs use
+    # "{display_name}-{net_id}" labels and must not be touched).
+    specs = json.loads(resource.specs) if resource.specs else {}
+    old_vpc_id = specs.get("vpc_id")
+    if old_vpc_id:
+        try:
+            old_vpc_uuid = _uuid.UUID(old_vpc_id)
+        except ValueError:
+            old_vpc_uuid = None
+        if old_vpc_uuid:
+            old_subnet_ids_q = await db.execute(select(Subnet.id).where(Subnet.vpc_id == old_vpc_uuid))
+            old_subnet_ids = list(old_subnet_ids_q.scalars().all())
+            if old_subnet_ids:
+                await db.execute(
+                    delete(IPReservation).where(
+                        IPReservation.resource_id == resource.id,
+                        IPReservation.subnet_id.in_(old_subnet_ids),
+                        IPReservation.label == resource.display_name,
                     )
                 )
-        except Exception:
-            logger.warning("Failed to allocate IP for network change on %s", resource_id, exc_info=True)
 
-    # Build and apply the NIC via unified helpers
-    vmtype = resource.resource_type if resource.resource_type == "lxc" else "qemu"
-    try:
-        net0_val = _build_net0(
-            vmtype,
-            vpc.proxmox_vnet,
-            ip=ip_str,
-            prefix_len=prefix_len,
-            gateway=gateway,
-            firewall=body.firewall,
-            model=body.model,
+    db.add(
+        IPReservation(
+            subnet_id=subnet.id,
+            ip_address=ip_str,
+            resource_id=resource.id,
+            label=resource.display_name,
+            is_gateway=False,
+            owner_id=user.id,
+            cluster_id=vpc.cluster_id,
         )
-        dns = (subnet.dns_server or "1.1.1.1") if subnet else "1.1.1.1"
+    )
+    try:
+        await db.flush()  # surface unique constraint conflicts BEFORE PVE write
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Failed to reserve IP {ip_str}: {exc}",
+        ) from exc
 
-        # Check if running - NIC bridge changes require stop/start for VMs
-        pve = get_pve(resource.cluster_id)
-        was_running = False
-        if vmtype != "lxc":
-            try:
-                st = pve.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
-                was_running = st.get("status") == "running"
-                if was_running:
-                    upid = pve.stop_vm(resource.proxmox_node, resource.proxmox_vmid)
-                    pve.wait_for_task(resource.proxmox_node, upid, timeout=60)
-            except Exception:
-                pass
+    # ----- 4. Stop instance if running (must succeed; no silent swallow) ----
+    was_running = False
+    try:
+        if vmtype == "lxc":
+            st = pve.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
         else:
-            try:
-                st = pve.get_container_status(resource.proxmox_node, resource.proxmox_vmid)
-                was_running = st.get("status") == "running"
-                if was_running:
-                    upid = pve.stop_container(resource.proxmox_node, resource.proxmox_vmid)
-                    pve.wait_for_task(resource.proxmox_node, upid, timeout=60)
-            except Exception:
-                pass
+            st = pve.get_vm_status(resource.proxmox_node, resource.proxmox_vmid)
+        was_running = (st or {}).get("status") == "running"
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"Failed to query instance status: {exc}") from exc
 
-        # For net0, use _apply_nic; for other NICs, apply directly
-        if body.net_id == "net0":
-            _apply_nic(
+    if was_running:
+        try:
+            if vmtype == "lxc":
+                upid = pve.stop_container(resource.proxmox_node, resource.proxmox_vmid)
+            else:
+                upid = pve.stop_vm(resource.proxmox_node, resource.proxmox_vmid)
+            pve.wait_for_task(resource.proxmox_node, upid, timeout=60)
+        except Exception as exc:
+            await db.rollback()
+            raise HTTPException(status_code=502, detail=f"Failed to stop instance: {exc}") from exc
+
+    # ----- 5. Apply new config to PVE; restore old on failure ---------------
+    net0_val = _build_net0(
+        vmtype,
+        vpc.proxmox_vnet,
+        ip=ip_str,
+        prefix_len=prefix_len,
+        gateway=gateway,
+        firewall=body.firewall,
+        model=body.model,
+    )
+
+    def _restore_pve_config():
+        try:
+            if vmtype == "lxc":
+                if "net0" in old_pve_config:
+                    pve.set_container_config(resource.proxmox_node, resource.proxmox_vmid, net0=old_pve_config["net0"])
+            else:
+                restore_kwargs = {k: v for k, v in old_pve_config.items()}
+                if restore_kwargs:
+                    pve.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **restore_kwargs)
+                    try:
+                        pve.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
+                    except Exception:
+                        logger.warning(
+                            "Failed to regenerate cloud-init during rollback for vmid=%s", resource.proxmox_vmid
+                        )
+        except Exception:
+            logger.exception("Failed to roll back PVE config for vmid=%s", resource.proxmox_vmid)
+
+    try:
+        if vmtype == "lxc":
+            pve.set_container_config(resource.proxmox_node, resource.proxmox_vmid, net0=net0_val)
+        else:
+            pve.update_vm_config(
                 resource.proxmox_node,
                 resource.proxmox_vmid,
-                vmtype,
-                net0_val,
-                cluster_id=resource.cluster_id,
-                ip=ip_str,
-                prefix_len=prefix_len,
-                gateway=gateway,
-                dns_server=dns,
+                net0=net0_val,
+                agent="1",
+                ipconfig0=f"ip={ip_str}/{prefix_len},gw={gateway}",
+                nameserver=dns_server,
             )
-        else:
-            if vmtype == "lxc":
-                pve.set_container_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val})
-            else:
-                pve.update_vm_config(resource.proxmox_node, resource.proxmox_vmid, **{body.net_id: net0_val})
-
-        specs = json.loads(resource.specs) if resource.specs else {}
-        specs["vpc_id"] = str(vpc.id)
-        if ip_str:
-            specs["ip_address"] = ip_str
-        resource.specs = json.dumps(specs)
-        await db.commit()
-
-        # Restart if it was running before the NIC change
+            pve.regenerate_cloudinit(resource.proxmox_node, resource.proxmox_vmid)
+    except Exception as exc:
+        _restore_pve_config()
+        await db.rollback()
         if was_running:
             try:
                 if vmtype == "lxc":
@@ -1396,16 +1480,54 @@ async def update_vm_network(
                     pve.start_vm(resource.proxmox_node, resource.proxmox_vmid)
             except Exception:
                 pass
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to apply network change to Proxmox; previous config restored: {exc}",
+        ) from exc
 
-        return {
-            "status": "ok",
-            "vpc": {"id": str(vpc.id), "name": vpc.name, "vnet": vpc.proxmox_vnet},
-            "ip_address": ip_str,
-            "restarted": was_running,
-            "message": "Instance was restarted to apply the network change." if was_running else "Network updated.",
-        }
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    # ----- 6. Update specs and commit ---------------------------------------
+    specs["vpc_id"] = str(vpc.id)
+    specs["ip_address"] = ip_str
+    resource.specs = json.dumps(specs)
+    try:
+        await db.commit()
+    except Exception as exc:
+        # PVE was already mutated; attempt to roll PVE back to keep states consistent.
+        _restore_pve_config()
+        if was_running:
+            try:
+                if vmtype == "lxc":
+                    pve.start_container(resource.proxmox_node, resource.proxmox_vmid)
+                else:
+                    pve.start_vm(resource.proxmox_node, resource.proxmox_vmid)
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"DB commit failed; PVE rolled back: {exc}",
+        ) from exc
+
+    # ----- 7. Restart if it was running before ------------------------------
+    if was_running:
+        try:
+            if vmtype == "lxc":
+                pve.start_container(resource.proxmox_node, resource.proxmox_vmid)
+            else:
+                pve.start_vm(resource.proxmox_node, resource.proxmox_vmid)
+        except Exception:
+            logger.warning(
+                "Network migration committed but failed to restart vmid=%s",
+                resource.proxmox_vmid,
+            )
+
+    return {
+        "status": "ok",
+        "vpc": {"id": str(vpc.id), "name": vpc.name, "vnet": vpc.proxmox_vnet},
+        "ip_address": ip_str,
+        "subnet": subnet.cidr,
+        "restarted": was_running,
+        "message": ("Instance was restarted to apply the network change." if was_running else "Network updated."),
+    }
 
 
 class NICAddRequest(BaseModel):
@@ -2158,12 +2280,19 @@ async def create_container(
     new_vmid = get_next_vmid(existing, start=vmid_start, end=vmid_end)
     node = select_node("least-loaded")
 
+    try:
+        _cluster_id = cluster_registry.default_cluster
+    except NoClustersConfigured:
+        raise HTTPException(
+            status_code=503, detail="No Proxmox cluster configured. Add one via Admin > Infrastructure."
+        )
+
     # Reserve VMID first
     db.add(VMIDPool(vmid=new_vmid, resource_id=None))
     await db.commit()
 
     try:
-        pve = get_pve(body.cluster_id)
+        pve = get_pve()
         if body.template_vmid:
             # Clone from CT template (same logic as VM cloning)
             template_node = pve.find_vm_node(body.template_vmid)
@@ -2211,7 +2340,7 @@ async def create_container(
             proxmox_vmid=new_vmid,
             proxmox_node=clone_node,
             status="provisioning",
-            cluster_id=body.cluster_id,
+            cluster_id=_cluster_id,
             specs=json.dumps(ct_specs),
         )
         db.add(resource)
@@ -2312,6 +2441,7 @@ async def list_containers(
     )
     resources = result.scalars().all()
     containers = []
+    batch = await _get_batch_vm_statuses()
     for r in resources:
         ct_data = {
             "id": str(r.id),
@@ -2324,11 +2454,8 @@ async def list_containers(
             "last_accessed_at": r.last_accessed_at.isoformat() if r.last_accessed_at else None,
         }
         if r.status not in ("destroyed", "error", "creating") and r.proxmox_vmid and r.proxmox_node:
-            try:
-                live = await _get_live_status_cached(r)
-                ct_data["live_status"] = live.get("status")
-            except Exception:
-                ct_data["live_status"] = "unknown"
+            pve_data = batch.get(r.proxmox_vmid, {})
+            ct_data["live_status"] = pve_data.get("status")
         containers.append(ct_data)
     return containers
 
@@ -2733,6 +2860,19 @@ def _get_live_status(resource: Resource) -> dict:
 # Keys the VM/LXC live-status cache uses. TTL is short (5s) so user-visible
 # state still reflects reality without hammering PVE on every list page load.
 _VM_STATUS_TTL_SECONDS = 5
+
+_BATCH_STATUS_TTL_SECONDS = 10
+
+
+async def _get_batch_vm_statuses() -> dict[int, dict]:
+    """Fetch all VM/LXC statuses in a single Proxmox cluster/resources call.
+
+    Returns a dict keyed by vmid (int) -> resource dict from Proxmox.
+    Backed by the shared Redis-cached + async-safe helper in proxmox_cache.
+    """
+    from app.services.proxmox_cache import get_vm_status_map
+
+    return await get_vm_status_map()
 
 
 def _vm_status_cache_key(resource: Resource) -> str:

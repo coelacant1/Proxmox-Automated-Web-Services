@@ -35,8 +35,7 @@ export default function SecurityGroups() {
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<SecurityGroup | null>(null);
   const [showAddRule, setShowAddRule] = useState(false);
-  const [clusters, setClusters] = useState<{name: string}[]>([]);
-  const [form, setForm] = useState({ name: '', description: '', cluster_id: '' });
+  const [form, setForm] = useState({ name: '', description: '' });
   const [ruleForm, setRuleForm] = useState<Rule>({
     direction: 'inbound', action: 'allow', protocol: 'tcp', port_range: '', source: '0.0.0.0/0',
   });
@@ -56,21 +55,12 @@ export default function SecurityGroups() {
 
   useEffect(fetchGroups, []);
 
-  useEffect(() => {
-    api.get('/api/cluster/list').then((res) => {
-      setClusters(res.data || []);
-      if (res.data?.length === 1) {
-        setForm((prev) => ({ ...prev, cluster_id: res.data![0].name }));
-      }
-    }).catch(() => {});
-  }, []);
-
   const handleCreate = async () => {
     try {
-      await api.post('/api/security-groups/', { ...form, cluster_id: form.cluster_id || undefined });
+      await api.post('/api/security-groups/', { ...form });
       toast('Firewall group created', 'success');
       setShowCreate(false);
-      setForm({ name: '', description: '', cluster_id: clusters.length === 1 ? clusters[0]?.name ?? '' : '' });
+      setForm({ name: '', description: '' });
       fetchGroups();
     } catch (e: any) {
       toast(e?.response?.data?.detail || 'Failed to create firewall group', 'error');
@@ -170,7 +160,6 @@ export default function SecurityGroups() {
                       <p className="text-xs text-paws-text-dim">{g.rules?.length || 0} rules</p>
                     </div>
                     <div className="flex items-center gap-1">
-                    {clusters.length > 1 && g.cluster_id && <Badge variant="default">{g.cluster_id}</Badge>}
                     {g.is_default && <Badge variant="info">Default</Badge>}
                     {!g.is_default && (
                       <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleDelete(g.id); }}>
@@ -221,11 +210,6 @@ export default function SecurityGroups() {
         <div className="space-y-4">
           <Input label="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-          {clusters.length > 1 && (
-            <Select label="Cluster" value={form.cluster_id}
-              options={clusters.map((c) => ({ value: c.name, label: c.name }))}
-              onChange={(e) => setForm({ ...form, cluster_id: e.target.value })} />
-          )}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             <Button onClick={handleCreate} disabled={!form.name}>Create</Button>

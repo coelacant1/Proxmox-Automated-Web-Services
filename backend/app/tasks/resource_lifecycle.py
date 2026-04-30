@@ -1,6 +1,5 @@
 """Periodic tasks: enforce resource and account lifecycle policies."""
 
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -10,23 +9,20 @@ log = logging.getLogger(__name__)
 
 
 def _run_async(coro):
-    """Run an async coroutine from a sync Celery task."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    from app.tasks._async_runner import run_task_async
+
+    return run_task_async(coro)
 
 
 async def _enforce_lifecycle():
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
 
-    from app.core.database import async_session_factory
+    from app.core.database import async_session
     from app.models.models import Resource, SystemSetting, User
     from app.services.proxmox_client import get_pve
 
-    async with async_session_factory() as db:
+    async with async_session() as db:
         result = await db.execute(
             select(SystemSetting).where(SystemSetting.key.in_(["idle_shutdown_days", "idle_destroy_days"]))
         )
@@ -133,11 +129,11 @@ async def _enforce_account_lifecycle():
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
 
-    from app.core.database import async_session_factory
+    from app.core.database import async_session
     from app.models.models import SystemSetting, User
     from app.services.user_cleanup import purge_user
 
-    async with async_session_factory() as db:
+    async with async_session() as db:
         result = await db.execute(select(SystemSetting).where(SystemSetting.key == "account_inactive_days"))
         setting = result.scalar_one_or_none()
         default_inactive = int(setting.value if setting else "0")
@@ -190,11 +186,11 @@ async def _enforce_quota():
 
     from sqlalchemy import select
 
-    from app.core.database import async_session_factory
+    from app.core.database import async_session
     from app.models.models import Resource, User, UserQuota
     from app.services.proxmox_client import get_pve
 
-    async with async_session_factory() as db:
+    async with async_session() as db:
         # Get all users with running resources
         result = await db.execute(
             select(Resource.owner_id)

@@ -157,10 +157,9 @@ async def create_connection(
     await db.commit()
     await db.refresh(conn)
 
-    # Trigger cluster registry reload
     from app.services.cluster_registry import cluster_registry
 
-    cluster_registry.invalidate()
+    await cluster_registry.reload()
 
     logger.info("Created %s connection '%s' -> %s:%d", body.conn_type, body.name, body.host, body.port)
     return _to_read(conn)
@@ -223,7 +222,7 @@ async def update_connection(
 
     from app.services.cluster_registry import cluster_registry
 
-    cluster_registry.invalidate()
+    await cluster_registry.reload()
 
     logger.info("Updated connection '%s'", conn.name)
     return _to_read(conn)
@@ -246,7 +245,7 @@ async def delete_connection(
 
     from app.services.cluster_registry import cluster_registry
 
-    cluster_registry.invalidate()
+    await cluster_registry.reload()
 
     logger.info("Deleted connection '%s'", conn.name)
 

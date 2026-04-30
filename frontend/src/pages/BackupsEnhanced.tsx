@@ -288,7 +288,7 @@ export default function BackupsEnhanced() {
       const url = window.URL.createObjectURL(new Blob([r.data]));
       const a = document.createElement('a');
       a.href = url;
-      const contentType = r.headers?.['content-type'] || '';
+      const contentType = String(r.headers?.['content-type'] || '');
       const isZip = contentType.includes('zip') || (!baseName.includes('.') && r.data.size > 0);
       a.download = isZip && !baseName.endsWith('.zip') ? `${baseName}.zip` : baseName;
       a.click();

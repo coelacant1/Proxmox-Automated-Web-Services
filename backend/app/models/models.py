@@ -1,4 +1,5 @@
 import enum
+import json as _json
 import uuid
 from datetime import datetime
 
@@ -203,6 +204,38 @@ class Resource(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def cpu_cores(self) -> int | None:
+        """Convenience accessor for CPU cores stored in the specs JSON blob."""
+        try:
+            return _json.loads(self.specs or "{}").get("cores")
+        except (ValueError, AttributeError):
+            return None
+
+    @property
+    def ram_mb(self) -> int | None:
+        """Convenience accessor for RAM in MiB stored in the specs JSON blob."""
+        try:
+            return _json.loads(self.specs or "{}").get("memory_mb")
+        except (ValueError, AttributeError):
+            return None
+
+    @property
+    def disk_gb(self) -> int | None:
+        """Convenience accessor for disk in GiB stored in the specs JSON blob."""
+        try:
+            return _json.loads(self.specs or "{}").get("disk_gb")
+        except (ValueError, AttributeError):
+            return None
+
+    @property
+    def spec_hostname(self) -> str | None:
+        """Convenience accessor for hostname stored in the specs JSON blob."""
+        try:
+            return _json.loads(self.specs or "{}").get("hostname")
+        except (ValueError, AttributeError):
+            return None
 
     owner: Mapped["User"] = relationship(back_populates="resources")
     project: Mapped["Project | None"] = relationship(back_populates="resources")
@@ -938,3 +971,35 @@ class DocPage(Base):
 
     owner: Mapped["User"] = relationship(lazy="selectin")
     group: Mapped["UserGroup | None"] = relationship(lazy="selectin")
+
+
+# Drift types:
+# - orphaned_in_db       -- Resource in PAWS DB but VMID not found in Proxmox
+# - orphaned_in_proxmox  -- VM/LXC in Proxmox with a valid PAWS-ID but no matching DB row
+# - status_mismatch      -- DB status differs from Proxmox power state
+# - node_mismatch        -- DB proxmox_node differs from where Proxmox reports the VM
+
+
+class DriftEvent(Base):
+    """Records detected drift between the PAWS database and the Proxmox cluster.
+
+    Populated by the paws.scan_drift Celery task. Cleared by admin acknowledgement
+    or on the next scan when drift resolves.
+    """
+
+    __tablename__ = "drift_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    resource_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("resources.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    proxmox_vmid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxmox_node: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    drift_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_by: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )

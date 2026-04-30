@@ -21,6 +21,9 @@ from app.schemas.schemas import (
 )
 from app.services.audit_service import log_action
 from app.services.firewall_profile import FirewallProfileService
+from app.services.proxmox_cache import call_async as _pve_call
+from app.services.proxmox_cache import get_sdn_vnets as _cached_sdn_vnets
+from app.services.proxmox_cache import get_sdn_zones as _cached_sdn_zones
 from app.services.proxmox_client import get_pve
 
 router = APIRouter(prefix="/api/networking", tags=["networking"])
@@ -54,7 +57,7 @@ async def list_zones(
     _: User = Depends(get_current_active_user),
 ):
     try:
-        return get_pve(cluster_id).get_sdn_zones()
+        return await _cached_sdn_zones(cluster_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -65,7 +68,7 @@ async def list_vnets(
     _: User = Depends(get_current_active_user),
 ):
     try:
-        return get_pve(cluster_id).get_sdn_vnets()
+        return await _cached_sdn_vnets(cluster_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -83,7 +86,7 @@ async def create_vnet(
             kwargs["tag"] = body.tag
         if body.alias:
             kwargs["alias"] = body.alias
-        get_pve(cluster_id).create_sdn_vnet(body.name, body.zone, **kwargs)
+        await _pve_call(get_pve(cluster_id).create_sdn_vnet, body.name, body.zone, **kwargs)
         await log_action(db, user.id, "vnet_create", "network", details={"vnet": body.name, "zone": body.zone})
         return {"status": "created", "vnet": body.name}
     except Exception as e:
@@ -98,7 +101,7 @@ async def delete_vnet(
     user: User = Depends(require_admin),
 ):
     try:
-        get_pve(cluster_id).delete_sdn_vnet(vnet_name)
+        await _pve_call(get_pve(cluster_id).delete_sdn_vnet, vnet_name)
         await log_action(db, user.id, "vnet_delete", "network", details={"vnet": vnet_name})
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -115,7 +118,7 @@ async def get_firewall_rules(
     _: User = Depends(get_current_active_user),
 ):
     try:
-        return get_pve(cluster_id).get_firewall_rules(node, vmid, "qemu")
+        return await _pve_call(get_pve(cluster_id).get_firewall_rules, node, vmid, "qemu")
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -140,7 +143,7 @@ async def add_firewall_rule(
             if val is not None:
                 params[field] = val
 
-        get_pve(cluster_id).create_firewall_rule(node, vmid, "qemu", **params)
+        await _pve_call(get_pve(cluster_id).create_firewall_rule, node, vmid, "qemu", **params)
         await log_action(db, user.id, "firewall_add", "vm", details={"vmid": vmid, "rule": params})
         return {"status": "created"}
     except Exception as e:

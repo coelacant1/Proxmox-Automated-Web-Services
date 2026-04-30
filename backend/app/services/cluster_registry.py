@@ -7,13 +7,18 @@ Usage:
     pve = cluster_registry.get_pve()               # default (first) cluster
     pbs = cluster_registry.get_pbs("main")
     ids = cluster_registry.list_cluster_ids()
+
+Initialization:
+    Call ``await cluster_registry.reload()`` once during application startup
+    (FastAPI lifespan) and after any connection create/update/delete.
+    Celery tasks should call ``await cluster_registry.reload()`` inside their
+    async entry point if ``not cluster_registry.has_clusters()``.
 """
 
 import json
 import logging
 from dataclasses import dataclass, field
 
-from app.core.config import settings
 from app.services.pbs_client import PBSClient
 from app.services.proxmox_client import ProxmoxClient
 
@@ -38,12 +43,16 @@ class ClusterConfig:
     extra: dict = field(default_factory=dict)
 
 
-class NoClustersConfigured(RuntimeError):
+class NoClustersConfigured(RuntimeError):  # noqa: N818
     """Raised when a caller needs a Proxmox client but none are configured."""
 
 
 class ClusterRegistry:
-    """Manages ProxmoxClient + PBSClient instances for every configured cluster."""
+    """Manages ProxmoxClient + PBSClient instances for every configured cluster.
+
+    Clients are loaded asynchronously from the ``cluster_connections`` table.
+    Call ``await reload()`` at startup and after any connection CRUD.
+    """
 
     def __init__(self) -> None:
         self._pve_clients: dict[str, ProxmoxClient] = {}
@@ -53,68 +62,62 @@ class ClusterRegistry:
         self._initialized = False
 
     def _ensure_init(self) -> None:
-        if self._initialized:
-            return
-        self._initialized = True
+        """Guard used by sync accessors. Logs a warning if reload() was never called."""
+        if not self._initialized:
+            logger.warning(
+                "Cluster registry accessed before reload(). "
+                "Ensure await cluster_registry.reload() is called at startup."
+            )
+            self._initialized = True
 
-        if not self._load_from_db():
-            logger.warning("No Proxmox clusters configured. Add one via Admin > Infrastructure > Connections.")
+    async def reload(self) -> bool:
+        """Load (or reload) cluster connections from the database.
 
-    def _load_from_db(self) -> bool:
-        """Load cluster connections from the database (synchronous, for init)."""
+        Safe to call from FastAPI lifespan, async route handlers, and Celery tasks
+        that run their own event loop. Returns True if at least one PVE client
+        was registered.
+        """
+        self._pve_clients.clear()
+        self._pbs_clients.clear()
+        self._configs.clear()
+        self._default_cluster = None
+
         try:
-            from sqlalchemy import create_engine, text
+            from sqlalchemy import select
 
-            sync_url = settings.database_url.replace("+asyncpg", "+psycopg2")
-            sync_url = sync_url.replace("postgresql+psycopg2", "postgresql")
-            engine = create_engine(sync_url)
+            from app.core.database import async_session
+            from app.core.encryption import decrypt
+            from app.models.models import ClusterConnection
 
-            with engine.connect() as conn:
-                # Check if table exists
-                row = conn.execute(
-                    text("SELECT 1 FROM information_schema.tables WHERE table_name = 'cluster_connections'")
-                ).fetchone()
-                if not row:
-                    return False
-
-                rows = conn.execute(
-                    text(
-                        "SELECT name, conn_type, host, port, token_id, "
-                        "token_secret_enc, password_enc, fingerprint, "
-                        "verify_ssl, is_active, extra_config, "
-                        "console_user, console_password_enc "
-                        "FROM cluster_connections WHERE is_active = true "
-                        "ORDER BY created_at"
-                    )
-                ).fetchall()
-
-            engine.dispose()
+            async with async_session() as db:
+                result = await db.execute(
+                    select(ClusterConnection)
+                    .where(ClusterConnection.is_active.is_(True))
+                    .order_by(ClusterConnection.created_at)
+                )
+                rows = result.scalars().all()
 
             if not rows:
+                logger.warning("No active cluster connections found. Add one via Admin > Infrastructure > Connections.")
+                self._initialized = True
                 return False
 
-            from app.core.encryption import decrypt
-
-            for r in rows:
-                name = r[0]
-                conn_type = r[1]
-                host = r[2]
-                port = r[3]
-                token_id = r[4] or ""
-                token_secret = decrypt(r[5]) if r[5] else ""
-                password = decrypt(r[6]) if r[6] else ""
-                fingerprint = r[7] or ""
-                verify_ssl = r[8]
-                extra = json.loads(r[10]) if r[10] else {}
-                console_user = r[11] or ""
-                console_password = decrypt(r[12]) if r[12] else ""
+            for conn in rows:
+                name = conn.name
+                conn_type = conn.conn_type
+                host = conn.host
+                port = conn.port
+                token_id = conn.token_id or ""
+                token_secret = decrypt(conn.token_secret_enc) if conn.token_secret_enc else ""
+                password = decrypt(conn.password_enc) if conn.password_enc else ""
+                fingerprint = conn.fingerprint or ""
+                verify_ssl = conn.verify_ssl
+                extra = json.loads(conn.extra_config) if conn.extra_config else {}
+                console_user = conn.console_user or ""
+                console_password = decrypt(conn.console_password_enc) if conn.console_password_enc else ""
 
                 if conn_type == "pve":
-                    cfg = ClusterConfig(
-                        name=name,
-                        host=host,
-                        port=port,
-                    )
+                    cfg = ClusterConfig(name=name, host=host, port=port)
                     self._configs[name] = cfg
                     self._pve_clients[name] = ProxmoxClient(
                         host=host,
@@ -129,11 +132,10 @@ class ClusterRegistry:
                     )
                     if self._default_cluster is None:
                         self._default_cluster = name
-                    logger.info("Registered PVE cluster '%s' from DB (%s:%d)", name, host, port)
+                    logger.info("Registered PVE cluster '%s' (%s:%d)", name, host, port)
 
                 elif conn_type == "pbs":
                     datastore = extra.get("datastore", "backups")
-                    # Find matching PVE cluster name or use PBS name
                     pve_cluster = extra.get("pve_cluster", name)
                     self._pbs_clients[pve_cluster] = PBSClient(
                         host=host,
@@ -145,27 +147,19 @@ class ClusterRegistry:
                         verify_ssl=verify_ssl,
                         cluster_name=pve_cluster,
                     )
-                    # Annotate matching PVE config with PBS endpoint for admin views
                     if pve_cluster in self._configs:
                         self._configs[pve_cluster].pbs_host = host
                         self._configs[pve_cluster].pbs_port = port
                         self._configs[pve_cluster].pbs_datastore = datastore
-                    logger.info("Registered PBS '%s' from DB (%s:%d)", name, host, port)
-
-            return bool(self._pve_clients)
+                    logger.info("Registered PBS '%s' (%s:%d)", name, host, port)
 
         except Exception as exc:
-            logger.debug("DB cluster load skipped: %s", exc)
+            logger.error("Cluster registry reload failed: %s", exc)
+            self._initialized = True
             return False
 
-    def invalidate(self) -> None:
-        """Clear all cached clients, forcing reload on next access."""
-        self._pve_clients.clear()
-        self._pbs_clients.clear()
-        self._configs.clear()
-        self._default_cluster = None
-        self._initialized = False
-        logger.info("Cluster registry invalidated, will reload on next access")
+        self._initialized = True
+        return bool(self._pve_clients)
 
     @property
     def default_cluster(self) -> str:

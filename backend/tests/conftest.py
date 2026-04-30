@@ -88,6 +88,27 @@ class MockProxmoxClient:
     _console_password = ""
     cluster_name = "default"
 
+    def __init__(self) -> None:
+        # Track VMs/containers created via clone_vm/create_vm so that
+        # get_cluster_resources() returns them (needed for batch status lookup).
+        self._created_vms: dict[int, dict[str, Any]] = {}
+
+    def _register_vm(self, vmid: int, node: str, vm_type: str = "qemu") -> None:
+        self._created_vms[vmid] = {
+            "vmid": vmid,
+            "type": vm_type,
+            "status": "running",
+            "cpu": 0.05,
+            "mem": 512 * 1024**2,
+            "maxmem": 2048 * 1024**2,
+            "uptime": 1234,
+            "netin": 0,
+            "netout": 0,
+            "disk": 0,
+            "maxdisk": 32 * 1024**3,
+            "node": node,
+        }
+
     @property
     def api(self):
         """Chainable mock for raw proxmoxer API access (e.g. api.nodes(x).qemu(y).firewall.rules.get())."""
@@ -126,15 +147,20 @@ class MockProxmoxClient:
         return [{"type": "cluster", "name": "paws-cluster", "nodes": 2, "quorate": 1}]
 
     def get_cluster_resources(self, resource_type: str | None = None) -> list[dict[str, Any]]:
-        return []
+        resources = list(self._created_vms.values())
+        if resource_type:
+            resources = [r for r in resources if r.get("type") == resource_type]
+        return resources
 
     def clone_vm(self, node: str, source_vmid: int, new_vmid: int, **kw: Any) -> str:
+        self._register_vm(new_vmid, node, "qemu")
         return f"UPID:{node}:00001234:00AB12CD:clonevm:{new_vmid}:user@pam:"
 
     def get_next_vmid(self) -> int:
         return 500
 
     def create_vm(self, node: str, vmid: int, **kw: Any) -> str:
+        self._register_vm(vmid, node, "qemu")
         return f"UPID:{node}:00001234:00AB12CD:createvm:{vmid}:user@pam:"
 
     def get_vm_status(self, node: str, vmid: int) -> dict[str, Any]:
@@ -174,6 +200,7 @@ class MockProxmoxClient:
         pass
 
     def create_container(self, node: str, vmid: int, **kw: Any) -> str:
+        self._register_vm(vmid, node, "lxc")
         return f"UPID:{node}:createct:{vmid}"
 
     def get_container_status(self, node: str, vmid: int) -> dict[str, Any]:
@@ -309,6 +336,7 @@ class MockProxmoxClient:
         return True
 
     def clone_container(self, node: str, source_vmid: int, new_vmid: int, **kw: Any) -> str:
+        self._register_vm(new_vmid, node, "lxc")
         return f"UPID:{node}:00001234:00AB12CD:clonect:{new_vmid}:user@pam:"
 
     def wait_for_task(self, node: str, upid: str, timeout: int = 300) -> dict[str, Any]:
@@ -421,7 +449,7 @@ mock_storage = MockStorageService()
 
 @pytest.fixture
 def mock_proxmox_client():
-    return mock_proxmox
+    return MockProxmoxClient()
 
 
 @pytest.fixture
@@ -506,8 +534,11 @@ async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncC
     import app.services.rate_limiter as rl_mod
     import app.services.storage_service as stg_mod
 
+    # Fresh mock per test so _created_vms state doesn't bleed between tests
+    test_proxmox = MockProxmoxClient()
+
     # Swap singletons / proxies
-    monkeypatch.setattr(pxm_mod, "proxmox_client", mock_proxmox)
+    monkeypatch.setattr(pxm_mod, "proxmox_client", test_proxmox)
     monkeypatch.setattr(stg_mod, "storage_service", mock_storage)
     monkeypatch.setattr(rl_mod, "check_action_rate_limit", _always_allow)
     monkeypatch.setattr(rl_mod, "check_api_rate_limit", _always_allow_api)
@@ -516,8 +547,8 @@ async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncC
     # Patch cluster registry so get_pve() / get_pbs() return mocks
     monkeypatch.setattr(reg_mod.cluster_registry, "_initialized", True)
     monkeypatch.setattr(reg_mod.cluster_registry, "_default_cluster", "default")
-    monkeypatch.setattr(reg_mod.cluster_registry, "_pve_clients", {"default": mock_proxmox})
-    monkeypatch.setattr(reg_mod.cluster_registry, "_pbs_clients", {"default": mock_proxmox})
+    monkeypatch.setattr(reg_mod.cluster_registry, "_pve_clients", {"default": test_proxmox})
+    monkeypatch.setattr(reg_mod.cluster_registry, "_pbs_clients", {"default": test_proxmox})
     monkeypatch.setattr(
         reg_mod.cluster_registry,
         "_configs",
@@ -558,7 +589,20 @@ async def client(db_session: AsyncSession, monkeypatch) -> AsyncGenerator[AsyncC
     # Patch volumes router so it uses the mock Proxmox client
     import app.routers.volumes as vol_mod
 
-    monkeypatch.setattr(vol_mod, "_get_proxmox", lambda cluster_id="default": mock_proxmox)
+    monkeypatch.setattr(vol_mod, "_get_proxmox", lambda cluster_id="default": test_proxmox)
+
+    # Flush Redis cache between tests so cached PVE responses from prior tests
+    # (e.g. an empty cluster_resources list) don't leak into this test.
+    try:
+        import redis.asyncio as _redis_async
+
+        _r = _redis_async.from_url("redis://localhost:6379/0", decode_responses=True)
+        _keys = await _r.keys("paws:cache:*")
+        if _keys:
+            await _r.delete(*_keys)
+        await _r.aclose()
+    except Exception:
+        pass
 
     from app.main import app
 

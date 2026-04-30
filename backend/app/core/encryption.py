@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 _NONCE_BYTES = 12
 _KEY_BYTES = 32  # 256 bits
 _KEY_FILE = Path("/data/.paws_master_key")
+_KEY_FILE_FALLBACK = Path(".paws_master_key")
 _master_key: bytes | None = None
 
 
@@ -36,13 +37,14 @@ def _resolve_master_key() -> bytes:
         _master_key = raw
         return _master_key
 
-    # Try reading from persistent file
-    if _KEY_FILE.exists():
-        raw = base64.urlsafe_b64decode(_KEY_FILE.read_text().strip())
-        if len(raw) == _KEY_BYTES:
-            _master_key = raw
-            log.info("Loaded master key from %s", _KEY_FILE)
-            return _master_key
+    # Try reading from primary file, then fallback location
+    for candidate in (_KEY_FILE, _KEY_FILE_FALLBACK):
+        if candidate.exists():
+            raw = base64.urlsafe_b64decode(candidate.read_text().strip())
+            if len(raw) == _KEY_BYTES:
+                _master_key = raw
+                log.info("Loaded master key from %s", candidate)
+                return _master_key
 
     # Auto-generate and persist
     _master_key = secrets.token_bytes(_KEY_BYTES)
@@ -53,10 +55,9 @@ def _resolve_master_key() -> bytes:
         log.info("Generated and saved new master key to %s", _KEY_FILE)
     except OSError:
         # Fallback: write to working directory
-        fallback = Path(".paws_master_key")
-        fallback.write_text(base64.urlsafe_b64encode(_master_key).decode())
-        fallback.chmod(0o600)
-        log.warning("Could not write to %s, saved master key to %s", _KEY_FILE, fallback)
+        _KEY_FILE_FALLBACK.write_text(base64.urlsafe_b64encode(_master_key).decode())
+        _KEY_FILE_FALLBACK.chmod(0o600)
+        log.warning("Could not write to %s, saved master key to %s", _KEY_FILE, _KEY_FILE_FALLBACK)
 
     return _master_key
 
